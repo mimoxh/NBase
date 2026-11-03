@@ -1,0 +1,51 @@
+.service-gate { width: min(440px, calc(100vw - 40px)); margin: auto; text-align: center; }
+.service-gate .brand-mark { margin: 0 auto 18px; }
+.service-gate h1 { font-size: 21px; font-weight: 600; margin: 0 0 10px; }
+.service-gate p { color: var(--muted); line-height: 1.7; }
+.service-gate .primary-button { margin: 15px auto 0; }
+.workspace.nbase-auth-screen { display: grid; place-items: center; }
+.nbase-login { width: min(380px, calc(100vw - 36px)); padding: 35px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); box-shadow: 0 12px 45px #25352612; }
+.nbase-login .brand-mark { margin-bottom: 22px; }
+.nbase-login h1 { font-size: 23px; margin: 0 0 7px; font-weight: 600; }
+.nbase-login p { color: var(--muted); font-size: 12px; margin: 0 0 25px; line-height: 1.7; }
+.nbase-login label { display: block; font-size: 12px; margin: 0 0 17px; }
+.nbase-login input { width: 100%; margin-top: 7px; padding: 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); }
+.nbase-login .primary-button { width: 100%; margin-top: 8px; }
+.nbase-form-error { color: var(--danger); font-size: 12px; line-height: 1.6; margin-bottom: 12px; }
+.persistent-workspace .sidebar-search>button:first-child { justify-content: flex-start; font-size: 12px; }
+.persistent-search-message { margin: 12px 2px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.persistent-search-message .quiet-button { margin-left: 8px; }
+.persistent-workspace .tree-heading { padding-top: 10px; }
+.tree-message { padding: 5px 12px; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.tree-message button { color: var(--accent); margin-left: 4px; }
+.persistent-workspace .document-layout { max-width: 960px; }
+.persistent-workspace .document-paper { max-width: 765px; }
+.nbase-page-footer { display: flex; gap: 8px; justify-content: flex-end; border-top: 1px solid var(--line); padding: 10px 25px; background: var(--panel); }
+.nbase-conflict h1 { margin: 0 0 15px; font-size: 25px; }
+.nbase-conflict-actions { display: flex; gap: 9px; margin: 24px 0; }
+.nbase-conflict details { max-width: 780px; font-size: 12px; color: var(--muted); }
+.nbase-conflict pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--sidebar); padding: 16px; max-height: 40vh; overflow: auto; }
+.nbase-unsupported { background: var(--warning); padding: 24px; border: 1px solid var(--line); border-radius: 6px; }
+.nbase-unsupported h2 { font-size: 18px; margin: 0 0 10px; }
+.nbase-unsupported p { line-height: 1.7; color: var(--muted); }
+.nbase-reauth-backdrop { position: fixed; z-index: 90; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #202820df; color: #fff; padding: 20px; }
+.nbase-reauth-banner { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 10px; padding: 9px 16px; background: #fff4db; color: #6d4c16; font-size: 12px; }
+.nbase-reauth-banner button { color: #456a52; text-decoration: underline; }
+.nbase-reauth-backdrop .nbase-login { color: #30352f; }
+.nbase-reauth-backdrop>p { font-size: 12px; line-height: 1.7; text-align: center; }
+.nbase-reauth-backdrop>.quiet-button { color: #30352f; }
+.nbase-recovery-grid { display: grid; grid-template-columns: 210px minmax(0, 1fr); height: min(58vh, 520px); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.nbase-version-list { overflow-y: auto; padding: 7px; border-right: 1px solid var(--line); background: var(--sidebar); }
+.nbase-version-list>button { width: 100%; display: block; padding: 12px 9px; border-radius: 4px; text-align: left; }
+.nbase-version-list>button.selected { background: var(--hover); color: var(--accent); }
+.nbase-version-list strong { display: block; overflow-wrap: anywhere; font-size: 12px; font-weight: 600; }
+.nbase-version-list span { display: block; margin-top: 6px; font-size: 10px; color: var(--muted); line-height: 1.6; }
+.nbase-version-list p, .nbase-recovery-body>p { padding: 8px; color: var(--muted); font-size: 12px; line-height: 1.7; }
+.nbase-version-list p button, .nbase-recovery-body>p button { margin-left: 7px; color: var(--accent); }
+.nbase-recovery-body { min-width: 0; overflow: auto; padding: 20px; }
+.nbase-history-preview h3 { font-size: 20px; margin: 0 0 20px; overflow-wrap: anywhere; }
+.nbase-history-preview .nbase-editor-tools { display: none; }
+.nbase-history-preview .nbase-editor-content { min-height: 160px; padding: 0; }
+.persistent-workspace .page-title:disabled { opacity: 1; color: inherit; }
+@media (max-width: 700px) { .nbase-page-footer { padding: 8px 12px; } .nbase-conflict-actions { flex-wrap: wrap; } }
+@media (max-width: 600px) { .nbase-recovery-grid { grid-template-columns: 1fr; grid-template-rows: 130px minmax(0, 1fr); } .nbase-version-list { border-right: 0; border-bottom: 1px solid var(--line); } .nbase-page-footer { flex-wrap: wrap; } }
