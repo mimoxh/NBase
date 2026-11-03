@@ -11,7 +11,7 @@ import { isSafeLinkUrl } from '../markdown';
 import { $insertAttachments } from '../nodes/AttachmentNode';
 import type { AttachmentMetadata } from '@nbase/contracts';
 
-const knownNodeTypes = new Set(['paragraph', 'heading', 'quote', 'list', 'listitem', 'code', 'code-highlight', 'link', 'autolink', 'table', 'tablerow', 'tablecell', 'horizontalrule', 'image-reference', 'attachment', 'text', 'linebreak', 'tab']);
+const knownNodeTypes = new Set(['paragraph', 'heading', 'quote', 'list', 'listitem', 'code', 'code-highlight', 'link', 'autolink', 'table', 'tablerow', 'tablecell', 'horizontalrule', 'image-reference', 'attachment', 'equation', 'text', 'linebreak', 'tab']);
 function safeInternalNodes(nodes: unknown, insideTable = false, depth = 0): nodes is BaseSerializedNode[] {
   return depth < 64 && Array.isArray(nodes) && nodes.every((node: unknown) => {
     if (!node || typeof node !== 'object') return false;
@@ -20,6 +20,8 @@ function safeInternalNodes(nodes: unknown, insideTable = false, depth = 0): node
     if ((value.type === 'link' || value.type === 'autolink') && (typeof value.url !== 'string' || !isSafeLinkUrl(value.url))) return false;
     if (value.type === 'table' && insideTable) return false;
     if (value.type === 'tablecell' && (Number(value.colSpan ?? 1) !== 1 || Number(value.rowSpan ?? 1) !== 1)) return false;
+    if (value.type === 'equation' && (typeof value.equation !== 'string' || value.equation.length > 10_000
+      || typeof value.inline !== 'boolean')) return false;
     if (value.type === 'attachment' && (typeof value.attachmentId !== 'string'
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.attachmentId)
       || typeof value.fileName !== 'string' || value.fileName.length > 180

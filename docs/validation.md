@@ -347,3 +347,32 @@ P3-05 本机出口通过：已验证完整数据包、配套旧镜像、空目�
 `npm audit` 仍报告 `@fastify/static 10.1.7 → glob 13.0.6 → minimatch 10.2.6` 共 3 项 moderate（GHSA-3g3m-2fjr-6pw4、GHSA-g3hv-75wg-m249）。npm 给出的修复是大版本降级到 6.12.0，不采用。修复版本 glob 14.0.3 / minimatch 11.0.2 发布不足 7 天，且超出 @fastify/static 声明的 `glob ^13` 范围，不使用 overrides 强制替换。核对源码：glob 只在 `wildcard: false` 分支里以固定模式 `**/**` 枚举静态目录，不使用 AbortSignal，也不接收用户输入；本项目使用默认 wildcard，该路径不会执行。结论是记录并接受当前风险，待上游 @fastify/static 更新依赖后再升级。详见 [依赖记录](architecture/dependencies.md)。
 
 P3-06 本机出口通过（桌面范围）：核心任务冒烟、性能基线、优化前后对比和依赖审计都有证据。实机手机按用户决定跳过；P3-07 外网验收已放弃，不能据此宣称外网可用；NAS 资源基线也未测。
+
+## 2026-11-03：斜杠命令、代码高亮与公式编辑器
+
+依据 docs/product/editing-commands.md 实现三组编辑能力。`npm run check` 一次通过（typecheck + test + build）；构建无新增体积警告，KaTeX 独立 vendor chunk，字体随包本地分发无外部请求。
+
+| 检查 | 结果 |
+| --- | --- |
+| npm run typecheck | contracts、server、web 全部通过 |
+| npm test（web） | 96 项通过（normalize、语言别名、代码块打开不产生编辑、公式 JSON 再开、弹层错误恢复等） |
+| npm test（server） | 24 项通过（新增 equation 校验与搜索提取用例） |
+| npm run test:db（server，本机 54329/nbase_p2） | 3 项通过 |
+| npm run test:backup | 12 项通过、1 项跳过 |
+| npm run build | 通过；katex 独立 chunk，KaTeX 字体进入 dist/assets，无外链 |
+| Edge CDP 浏览器验证 | 斜杠 `、`/`/` 触发与 `/公式` 过滤、代码块行号/工具条/复制、行内与块级公式弹层（错误显示→修正→预览恢复）、`$x^2$` 键入转换、`$$`+Enter、KaTeX 错误渲染、阅读模式复制按钮、Markdown 源码面板。控制台无错误。截图 .data/verify-shots/ |
+| 持久化工作台（本机 PG） | owner 登录→新建页含块公式+代码块→自动保存→刷新重开渲染一致（KaTeX、行号、复制按钮）→切页往返 revision/page_versions 不变 |
+
+发现并已修复的实现问题：
+
+- `$$`+Enter 替换段落时选择仍指向被删文本节点，触发 `selection has been lost` 回滚；替换后 `selectNext()`。
+- 公式弹层 `useLayoutEffect` 无依赖导致定位 setState 循环渲染（Maximum update depth），已限依赖并加防重比较。
+- 弹层错误分支下预览元素被卸载，修正源码后错误不消失；预览元素常驻、错误单独元素展示（已有测试覆盖）。
+- 斜杠执行行内公式时先删除触发文本再对同一节点 `replace`，修正为先替换后删。
+- 键入 `$$` 由 EquationPlugin 在高优先级 KEY_ENTER 直接处理，避免多行 transformer 先 splitText 再拒绝造成选择毒化。
+- 公式弹层挂载聚焦与提交后选择竞争，插入后编辑请求延迟到提交完成再开弹层、聚焦延后一拍。
+- CodeCopyPlugin 曾每次更新/观察变化遍历全文；改为 CodeNode mutation 监听跟踪键集合，仅在需要时按帧合并测量并 diff 后 setState；隐藏页 rAF 饥饿用 60ms 定时兜底。
+- 撤销行为实测：键入 `$x^2$` 转换后一次 Ctrl+Z 还原为字面 `$x^2$` 文本；斜杠插入并确认后一次撤销回退到插入的空公式状态（插入与确认是两步历史）。
+- 表格内 `\|`：`| $a\|b$ |` 导入为公式源码 `a|b`（管道反转义在公式匹配前执行），导出仍为 `| $a\|b$ |`（字节级往返，但源码语义由 `\|` 变为 `|`）。属已接受限制，见 markdown-support.md 明确限制。
+
+未验证：真实中文 IME 候选窗口手感（以 Input.imeSetComposition 模拟）；`\|` 之外的更多 LaTeX 表格边界；表格内公式编辑交互细节。

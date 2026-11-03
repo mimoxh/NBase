@@ -8,7 +8,9 @@ export function extractSearchText(content: StoredDocumentContent): string {
   const visit = (node: unknown, depth: number): void => {
     if (!node || typeof node !== 'object' || depth > 64) return;
     const value = node as Record<string, unknown>;
-    if (value.type === 'attachment') {
+    if (value.type === 'equation') {
+      if (typeof value.equation === 'string') pieces.push(` ${value.equation} `);
+    } else if (value.type === 'attachment') {
       if (typeof value.fileName === 'string') pieces.push(` ${value.fileName} `);
       if (typeof value.alt === 'string' && value.alt !== value.fileName) pieces.push(` ${value.alt} `);
     } else if (typeof value.text === 'string') pieces.push(value.text);

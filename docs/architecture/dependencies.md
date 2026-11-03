@@ -8,6 +8,9 @@
 | jsdom（开发依赖） | 30.1.3 | MIT；Vitest 中挂载 React / 编辑器与 HTML 粘贴边界测试，不用于产品运行服务 |
 | pg | 8.23.1 | MIT；P2 PostgreSQL 连接池、参数化查询与事务；不自动连接现有 NAS 数据库 |
 | @types/pg（开发依赖） | 8.23.1 | MIT；pg 的 TypeScript 类型声明，不进入产品运行依赖 |
+| @lexical/code-prism | 0.52.0 | MIT；与 lexical 同版本，Prism 代码高亮、行号 gutter 与代码块缩进 |
+| prismjs | 1.30.0 | MIT；Prism 语法高亮内核，组件形式按需加载语言 |
+| katex | 0.19.1 | MIT；公式本地渲染，字体随构建打包，不产生外部请求 |
 
 版本、许可和兼容条件以 npm 官方 registry 元数据及实际安装包的 package.json / LICENSE 核对。Lexical React 包要求 React >=18、TypeScript >=5.2；当前 React 19 / TypeScript 5.9 满足。jsdom 的 Node 24 条件为 >=24.15，当前 Node 24.19 满足。直接依赖锁定精确版本，完整传递依赖见 package-lock.json。
 

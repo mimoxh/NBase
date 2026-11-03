@@ -5,6 +5,7 @@ import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { DocumentEditor } from '../editor/DocumentEditor';
 import { assessMarkdown, createContentFromMarkdown } from '../editor/markdown';
+import { normalizeDocumentContent } from '../editor/normalize';
 import type { DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
 import { ApiError, attachmentClient, loadPageTree, pageClient } from './client';
 import { draftKey, draftVersion, localDrafts, sameDraftVersion,
@@ -117,12 +118,17 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 
+/** Code blocks compare in canonical text form so highlight tokens never register as edits. */
+function canonicalContent(content: StoredDocumentContent): string {
+  return canonical(content.schemaVersion === 1 ? normalizeDocumentContent(content as DocumentContent) : content);
+}
+
 function matchesServer(draft: LocalPageDraft, server: PageDocument): boolean {
-  return draft.title === server.title && canonical(draft.content) === canonical(server.content);
+  return draft.title === server.title && canonicalContent(draft.content) === canonicalContent(server.content);
 }
 
 function contentMatchesServer(content: StoredDocumentContent, server: PageDocument | undefined): boolean {
-  return !!server && canonical(content) === canonical(server.content);
+  return !!server && canonicalContent(content) === canonicalContent(server.content);
 }
 
 export function PersistentWorkspace() {
@@ -677,7 +683,7 @@ export function PersistentWorkspace() {
           const server = docsRef.current.get(active);
           const existingDraft = draftsRef.current.get(active);
           const changed = snapshot && (existingDraft
-            ? titleRef.current !== existingDraft.title || canonical(snapshot.content) !== canonical(existingDraft.content)
+            ? titleRef.current !== existingDraft.title || canonicalContent(snapshot.content) !== canonicalContent(existingDraft.content)
             : titleRef.current !== server?.title || !contentMatchesServer(snapshot.content, server));
           if (snapshot && changed) {
             markDraft(active, titleRef.current, snapshot);

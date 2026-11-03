@@ -10,6 +10,7 @@ export default defineConfig({
           groups: [
             { name: 'react', test: /node_modules[\\/](?:react|react-dom|scheduler)[\\/]/ },
             { name: 'lexical', test: /node_modules[\\/]@?lexical[\\/]/ },
+            { name: 'katex', test: /node_modules[\\/]katex[\\/]/ },
           ],
         },
       },

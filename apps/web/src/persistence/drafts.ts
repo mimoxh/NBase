@@ -1,4 +1,6 @@
 import type { CreatePageRequest, PageStateRequest, StoredDocumentContent, UpdatePageRequest } from '@nbase/contracts';
+import { normalizeDocumentContent } from '../editor/normalize';
+import type { DocumentContent } from '../editor/types';
 
 const databaseName = 'nbase-local-drafts';
 const storeName = 'page-drafts';
@@ -64,7 +66,7 @@ export function sameDraftVersion(draft: LocalPageDraft, version: DraftVersion): 
   return draft.key === version.key && draft.sequence === version.sequence
     && draft.updatedAt === version.updatedAt && draft.title === version.title
     && draft.pending?.clientMutationId === version.pendingMutationId
-    && JSON.stringify(draft.content) === JSON.stringify(version.content);
+    && JSON.stringify(normalizeDocumentContent(draft.content as DocumentContent)) === JSON.stringify(normalizeDocumentContent(version.content as DocumentContent));
 }
 
 export function draftKey(userId: string, workspaceId: string, pageId: string, tabId: string): string {

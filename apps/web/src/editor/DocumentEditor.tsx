@@ -18,7 +18,12 @@ import { EDITOR_NODES } from './nodes';
 import type { DocumentEditorHandle, DocumentEditorProps } from './types';
 import { ToolbarPlugin } from './plugins/ToolbarPlugin';
 import { SafePastePlugin } from './plugins/SafePastePlugin';
+import { CodeHighlightPlugin } from './plugins/CodeHighlightPlugin';
+import { CodeCopyPlugin } from './plugins/CodeCopyPlugin';
+import { EquationPlugin } from './plugins/EquationPlugin';
+import { SlashCommandPlugin } from './plugins/SlashCommandPlugin';
 import { $insertAttachments, AttachmentWorkspaceContext } from './nodes/AttachmentNode';
+import 'katex/dist/katex.min.css';
 import './editor.css';
 
 const theme = {
@@ -27,6 +32,17 @@ const theme = {
   text: { bold: 'nbase-bold', italic: 'nbase-italic', strikethrough: 'nbase-strikethrough', code: 'nbase-inline-code' },
   list: { ul: 'nbase-list-ul', ol: 'nbase-list-ol', listitem: 'nbase-list-item', listitemChecked: 'nbase-check-checked', listitemUnchecked: 'nbase-check-unchecked', nested: { listitem: 'nbase-list-nested' } },
   code: 'nbase-code-block', table: 'nbase-table', tableCell: 'nbase-table-cell', tableCellHeader: 'nbase-table-header', tableCellSelected: 'nbase-table-selected', tableSelection: 'nbase-table-selection', tableRow: 'nbase-table-row', hr: 'nbase-rule',
+  codeHighlight: {
+    atrule: 'nbase-token-attr', attr: 'nbase-token-attr', boolean: 'nbase-token-property', builtin: 'nbase-token-selector',
+    cdata: 'nbase-token-comment', char: 'nbase-token-selector', class: 'nbase-token-function', 'class-name': 'nbase-token-function',
+    comment: 'nbase-token-comment', constant: 'nbase-token-property', deleted: 'nbase-token-property', doctype: 'nbase-token-comment',
+    entity: 'nbase-token-operator', 'env-var': 'nbase-token-variable', environment: 'nbase-token-variable', 'file-descriptor': 'nbase-token-variable',
+    function: 'nbase-token-function', important: 'nbase-token-variable', inserted: 'nbase-token-selector',
+    keyword: 'nbase-token-attr', namespace: 'nbase-token-variable', number: 'nbase-token-property', operator: 'nbase-token-variable',
+    parameter: 'nbase-token-variable', prolog: 'nbase-token-comment', property: 'nbase-token-property', punctuation: 'nbase-token-punctuation',
+    regex: 'nbase-token-variable', selector: 'nbase-token-selector', shebang: 'nbase-token-comment', string: 'nbase-token-selector',
+    symbol: 'nbase-token-property', tag: 'nbase-token-property', url: 'nbase-token-operator', variable: 'nbase-token-variable',
+  },
 };
 
 class EditorBoundary extends Component<{ children: ReactNode; original: string }, { failed: boolean }> {
@@ -42,7 +58,7 @@ function findVisibleText(root: HTMLElement, phrase: string): boolean {
   if (!phrase) return false;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
-      if (!node.textContent || node.parentElement?.closest('.nbase-attachment-download,.nbase-attachment-loading,.nbase-attachment-error')) return NodeFilter.FILTER_REJECT;
+      if (!node.textContent || node.parentElement?.closest('.nbase-attachment-download,.nbase-attachment-loading,.nbase-attachment-error,.nbase-equation-node')) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     },
   });
@@ -76,6 +92,9 @@ function findVisibleText(root: HTMLElement, phrase: string): boolean {
   const attachment = [...root.querySelectorAll<HTMLElement>('.nbase-attachment-node')].find(item =>
     [item.dataset.fileName, item.dataset.alt].some(value => value?.toLocaleLowerCase().includes(phrase.toLocaleLowerCase())));
   if (attachment) { attachment.scrollIntoView?.({ behavior: 'smooth', block: 'center' }); return true; }
+  const equation = [...root.querySelectorAll<HTMLElement>('.nbase-equation-node')].find(item =>
+    item.dataset.equation?.toLocaleLowerCase().includes(phrase.toLocaleLowerCase()));
+  if (equation) { equation.scrollIntoView?.({ behavior: 'smooth', block: 'center' }); return true; }
   return false;
 }
 
@@ -143,12 +162,14 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       {failure && <div className="nbase-editor-error" role="alert"><strong>编辑器发生错误，原始内容仍保留。</strong><span>{failure}</span><details><summary>查看打开时的原始内容</summary><pre>{props.initialMarkdown ?? JSON.stringify(props.initialContent, null, 2)}</pre></details></div>}
       <ToolbarPlugin readOnly={Boolean(props.readOnly)} onNotice={props.onNotice} />
       <div className="nbase-editor-surface">
-        <RichTextPlugin contentEditable={<ContentEditable className="nbase-editor-content" aria-label="文档正文" spellCheck={false} />} placeholder={<div className="nbase-editor-placeholder">{props.readOnly ? '这篇文档暂无正文。' : '从一个想法开始，输入 # 标题或 - 列表…'}</div>} ErrorBoundary={LexicalErrorBoundary} />
+        <RichTextPlugin contentEditable={<ContentEditable className="nbase-editor-content" aria-label="文档正文" spellCheck={false} />} placeholder={<div className="nbase-editor-placeholder">{props.readOnly ? '这篇文档暂无正文。' : '输入 / 选择样式，或 # 标题、- 列表…'}</div>} ErrorBoundary={LexicalErrorBoundary} />
       </div>
       <HistoryPlugin /><ListPlugin /><CheckListPlugin />
       <LinkPlugin validateUrl={isSafeLinkUrl} attributes={{ rel: 'noopener noreferrer' }} />
       <TablePlugin hasTabHandler hasHorizontalScroll hasNestedTables={false} />
       <HorizontalRulePlugin /><MarkdownShortcutPlugin transformers={MARKDOWN_TRANSFORMERS} />
+      <CodeHighlightPlugin /><CodeCopyPlugin onNotice={props.onNotice} />
+      <EquationPlugin /><SlashCommandPlugin />
       <SafePastePlugin onNotice={props.onNotice} onUploadFiles={props.onUploadFiles} />
       <StateBridge props={props} editorRef={editorRef} />
     </div>

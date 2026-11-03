@@ -1,21 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
-import { $createParagraphNode, $createTextNode, $getRoot, $getSelection, $isRangeSelection, $setSelection, CAN_REDO_COMMAND, CAN_UNDO_COMMAND, COMMAND_PRIORITY_LOW, FORMAT_TEXT_COMMAND, REDO_COMMAND, UNDO_COMMAND } from 'lexical';
-import type { BaseSelection, TextFormatType } from 'lexical';
-import { $createHeadingNode, $createQuoteNode, $isHeadingNode } from '@lexical/rich-text';
-import { $createCodeNode } from '@lexical/code';
-import { $isListNode, INSERT_CHECK_LIST_COMMAND, INSERT_ORDERED_LIST_COMMAND, INSERT_UNORDERED_LIST_COMMAND, REMOVE_LIST_COMMAND } from '@lexical/list';
+import { $createTextNode, $getNodeByKey, $getRoot, $getSelection, $isRangeSelection, $setSelection, CAN_REDO_COMMAND, CAN_UNDO_COMMAND, COMMAND_PRIORITY_LOW, FORMAT_TEXT_COMMAND, REDO_COMMAND, UNDO_COMMAND } from 'lexical';
+import type { BaseSelection, LexicalNode, TextFormatType } from 'lexical';
+import { $isHeadingNode } from '@lexical/rich-text';
+import { $isCodeNode } from '@lexical/code';
+import { $isListNode } from '@lexical/list';
 import { $createLinkNode, $isLinkNode, TOGGLE_LINK_COMMAND } from '@lexical/link';
-import { $setBlocksType } from '@lexical/selection';
 import { $deleteTableColumnAtSelection, $deleteTableRowAtSelection, $getTableCellNodeFromLexicalNode, $insertTableColumnAtSelection, $insertTableRowAtSelection, $isTableSelection, INSERT_TABLE_COMMAND } from '@lexical/table';
 import { INSERT_HORIZONTAL_RULE_COMMAND } from '@lexical/react/LexicalHorizontalRuleNode';
 import { mergeRegister } from '@lexical/utils';
 import { isSafeLinkUrl } from '../markdown';
+import { $applyBlockStyle } from '../blockStyles';
+import type { BlockStyle } from '../blockStyles';
+import { CODE_LANGUAGES } from '../codeLanguages';
 
 type Props = { readOnly: boolean; onNotice?: ((message: string) => void) | undefined };
-type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; code: boolean; link: string; table: boolean };
-const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, code: false, link: '', table: false };
+type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; code: boolean; link: string; table: boolean; codeKey: string; codeLanguage: string };
+const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, code: false, link: '', table: false, codeKey: '', codeLanguage: '' };
+
+function $enclosingCodeBlock(node: LexicalNode): LexicalNode | null {
+  for (let current: LexicalNode | null = node; current; current = current.getParent()) {
+    if ($isCodeNode(current)) return current;
+  }
+  return null;
+}
 
 export function ToolbarPlugin({ readOnly, onNotice }: Props) {
   const [editor] = useLexicalComposerContext();
@@ -42,9 +51,11 @@ export function ToolbarPlugin({ readOnly, onNotice }: Props) {
           else if (['paragraph', 'quote', 'code'].includes(parent.getType())) block = parent.getType();
           parent = parent.getParent();
         }
-        setState({ block, bold: selection.hasFormat('bold'), italic: selection.hasFormat('italic'), strikethrough: selection.hasFormat('strikethrough'), code: selection.hasFormat('code'), link, table: Boolean($getTableCellNodeFromLexicalNode(node)) });
+        const codeBlock = $enclosingCodeBlock(node);
+        setState({ block, bold: selection.hasFormat('bold'), italic: selection.hasFormat('italic'), strikethrough: selection.hasFormat('strikethrough'), code: selection.hasFormat('code'), link, table: Boolean($getTableCellNodeFromLexicalNode(node)),
+          codeKey: codeBlock?.getKey() ?? '', codeLanguage: $isCodeNode(codeBlock) ? codeBlock.getLanguage() ?? '' : '' });
       } else if ($isTableSelection(selection)) {
-        setState((previous) => ({ ...previous, table: true }));
+        setState((previous) => ({ ...previous, table: true, codeKey: '', codeLanguage: '' }));
       }
     };
     editor.read('latest', update);
@@ -63,21 +74,21 @@ export function ToolbarPlugin({ readOnly, onNotice }: Props) {
     });
     editor.focus();
   };
-  const blockChange = (value: string) => edit(() => {
-    if (value === 'bullet') editor.dispatchCommand(INSERT_UNORDERED_LIST_COMMAND, undefined);
-    else if (value === 'number') editor.dispatchCommand(INSERT_ORDERED_LIST_COMMAND, undefined);
-    else if (value === 'check') editor.dispatchCommand(INSERT_CHECK_LIST_COMMAND, undefined);
-    else {
-      if (['bullet', 'number', 'check'].includes(state.block)) editor.dispatchCommand(REMOVE_LIST_COMMAND, undefined);
-      const selection = $getSelection();
-      if ($isRangeSelection(selection)) {
-        if (value === 'h1' || value === 'h2' || value === 'h3') $setBlocksType(selection, () => $createHeadingNode(value));
-        else if (value === 'quote') $setBlocksType(selection, () => $createQuoteNode());
-        else if (value === 'code') $setBlocksType(selection, () => $createCodeNode());
-        else $setBlocksType(selection, () => $createParagraphNode());
-      }
-    }
+  const blockChange = (value: string) => edit(() => $applyBlockStyle(editor, value as BlockStyle));
+  const codeLanguageChange = (value: string) => edit(() => {
+    const node = $getNodeByKey(state.codeKey);
+    if ($isCodeNode(node)) node.setLanguage(value);
   });
+  const copyCode = () => {
+    const text = editor.read('latest', () => {
+      const node = $getNodeByKey(state.codeKey);
+      return $isCodeNode(node) ? node.getTextContent() : null;
+    });
+    if (text === null) return;
+    void navigator.clipboard.writeText(text).then(
+      () => onNotice?.('已复制代码。'),
+      () => onNotice?.('复制失败，请在代码块中手动选择内容复制。'));
+  };
   const button = (label: string, content: ReactNode, action: () => void, active = false, disabled = false) => <button type="button" title={label} aria-label={label} aria-pressed={active} disabled={readOnly || disabled} className={active ? 'is-active' : ''} onMouseDown={(event) => event.preventDefault()} onClick={action}>{content}</button>;
   const format = (type: TextFormatType) => edit(() => editor.dispatchCommand(FORMAT_TEXT_COMMAND, type));
   const applyLink = () => {
@@ -128,6 +139,17 @@ export function ToolbarPlugin({ readOnly, onNotice }: Props) {
       {button('删除当前行', '删除行', () => edit($deleteTableRowAtSelection))}
       {button('删除当前列', '删除列', () => edit($deleteTableColumnAtSelection))}
       <small>Tab 切换单元格</small>
+    </div>}
+    {state.codeKey && !readOnly && <div className="nbase-code-toolbar" role="toolbar" aria-label="代码操作">
+      <span>代码</span>
+      <select aria-label="代码语言" value={state.codeLanguage || 'plain'}
+        onChange={(event) => codeLanguageChange(event.target.value)}>
+        {CODE_LANGUAGES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        {state.codeLanguage && !CODE_LANGUAGES.some(([value]) => value === state.codeLanguage)
+          && <option value={state.codeLanguage}>{state.codeLanguage}</option>}
+      </select>
+      {button('复制代码', '复制代码', copyCode)}
+      <small>Tab 缩进</small>
     </div>}
     {linkOpen && !readOnly && <form className="nbase-link-form" onSubmit={(event) => { event.preventDefault(); applyLink(); }}>
       <label htmlFor={`link-${editor.getKey()}`}>链接地址</label>

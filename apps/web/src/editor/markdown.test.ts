@@ -10,6 +10,7 @@ import { $createSnapshot, assessMarkdown, createContentFromMarkdown, isSafeLinkU
 import { EDITOR_NODES } from './nodes';
 import { ImageReferenceNode } from './nodes/ImageReferenceNode';
 import { $createAttachmentNode, AttachmentNode } from './nodes/AttachmentNode';
+import { EquationNode } from './nodes/EquationNode';
 import type { DocumentContent } from './types';
 
 function reopen(content: DocumentContent) {
@@ -31,7 +32,7 @@ describe('Markdown common document subset', () => {
     expect(first.content.schemaVersion).toBe(1);
     expect(first.outline.map(item => [item.text, item.level])).toEqual([['日常文档', 1], ['结构与格式', 2]]);
     expect(first.outline.every(item => /^heading-/.test(item.id))).toBe(true);
-    for (const text of ['**粗体**', '*斜体*', '~~删除线~~', '`inline`', '> 引用内容', '```ts', '---', '[文档](https://example.com/docs)']) expect(first.markdown).toContain(text);
+    for (const text of ['**粗体**', '*斜体*', '~~删除线~~', '`inline`', '> 引用内容', '```typescript', '---', '[文档](https://example.com/docs)']) expect(first.markdown).toContain(text);
     const second = reopen(first.content).getEditorState().read($createSnapshot);
     expect(second.markdown).toBe(first.markdown);
     expect(snapshot(first.markdown).markdown).toBe(first.markdown);
@@ -126,8 +127,8 @@ describe('untrusted and unsupported Markdown', () => {
     expect(assessMarkdown(input).warnings).toEqual([]);
     expect(snapshot(input).plainText).toContain('<script>alert(1)</script>');
   });
-  it('warns and preserves tilde fences, front matter, formula and reference links', () => {
-    for (const input of ['~~~js\nconst a=1\n~~~', '---\ntitle: 文档\n---\n# body', '公式 $a+b$', '[ref][id]\n\n[id]: https://example.com']) {
+  it('warns and preserves tilde fences, front matter, \\( \\) math and reference links', () => {
+    for (const input of ['~~~js\nconst a=1\n~~~', '---\ntitle: 文档\n---\n# body', '公式 \\(a+b\\)', '\\[\nx^2\n\\]', '[ref][id]\n\n[id]: https://example.com']) {
       expect(assessMarkdown(input).warnings.length).toBeGreaterThan(0);
       expect(snapshot(input).plainText).toBe(input);
     }
@@ -160,5 +161,100 @@ describe('Markdown boundary regressions', () => {
     const first = snapshot('中文输入：\\*不是斜体\\* 与 \\[方括号\\]。\n\n下一段。');
     expect(first.plainText).toContain('中文输入：*不是斜体* 与 [方括号]。');
     expect(snapshot(first.markdown).plainText).toBe(first.plainText);
+  });
+});
+
+describe('equations and code language aliases', () => {
+  it('imports inline $...$ as equations and keeps non-matching $ samples as text', () => {
+    const editor = reopen(createContentFromMarkdown('求 $x^2$ 的值'));
+    editor.getEditorState().read(() => {
+      const equations = walk().filter(node => node instanceof EquationNode);
+      expect(equations).toHaveLength(1);
+      expect((equations[0] as EquationNode).getEquation()).toBe('x^2');
+      expect(equations[0]!.isInline()).toBe(true);
+    });
+    for (const [input, expected] of [['$ x$', '$ x$'], ['$x $', '$x $'], ['价格 $5 到 $10', '价格 $5 到 $10'], ['\\$x$', '$x$'], ['$x$5', '$x$5']] as const) {
+      const snapshot_ = snapshot(input);
+      expect(snapshot_.markdown).not.toContain('$$');
+      expect(snapshot_.plainText).toBe(expected);
+      reopen(snapshot_.content).getEditorState().read(() =>
+        expect(walk().filter(node => node instanceof EquationNode)).toHaveLength(0));
+    }
+  });
+
+  it('imports single-line and fenced $$ blocks, exports them back, and rejects unclosed blocks', () => {
+    const single = snapshot('$$x^2$$');
+    reopen(single.content).getEditorState().read(() => {
+      const equations = walk().filter(node => node instanceof EquationNode);
+      expect(equations).toHaveLength(1);
+      expect(equations[0]!.isInline()).toBe(false);
+      expect((equations[0] as EquationNode).getEquation()).toBe('x^2');
+    });
+    const multi = snapshot('$$\n\\frac{a}{b}\n$$');
+    expect(multi.markdown).toContain('$$\n\\frac{a}{b}\n$$');
+    expect(snapshot(multi.markdown).markdown).toBe(multi.markdown);
+    expect(assessMarkdown('$$\nx^2\n下一段').warnings.join()).toContain('未闭合的公式块');
+    expect(snapshot('$$\nx^2\n下一段').plainText).toContain('$$');
+  });
+
+  it('keeps literal $ through markdown round trips', () => {
+    for (const input of ['a\\$b\\$c', '价格 \\$5 到 \\$10']) {
+      const first = snapshot(input);
+      expect(first.markdown).toContain('\\$');
+      const second = snapshot(first.markdown);
+      expect(second.plainText).toBe(first.plainText);
+      expect(second.markdown).toBe(first.markdown);
+      reopen(second.content).getEditorState().read(() =>
+        expect(walk().filter(node => node instanceof EquationNode)).toHaveLength(0));
+    }
+  });
+
+  it('round-trips equation JSON through reopen', () => {
+    const first = snapshot('求 $x^2$ 与块\n\n$$\ny^2\n$$');
+    const second = reopen(first.content).getEditorState().read($createSnapshot);
+    expect(second.markdown).toBe(first.markdown);
+    expect(second.content).toEqual(first.content);
+  });
+
+  it('does not convert $ inside inline code or fenced code', () => {
+    const first = snapshot('`$a$` 和\n\n```\n$x$\n```');
+    reopen(first.content).getEditorState().read(() =>
+      expect(walk().filter(node => node instanceof EquationNode)).toHaveLength(0));
+    expect(first.markdown).toContain('`$a$`');
+  });
+
+  it('strips the backslash of an escaped pipe inside a table-cell equation', () => {
+    // Documented limitation: the table's pipe unescape runs before inline math,
+    // so `\|` in LaTeX source is stored as `|`. Export re-escapes it, keeping
+    // the Markdown byte-identical but the source semantics changed.
+    const first = snapshot('| a | b |\n| --- | --- |\n| $x\\|y$ | 1 |');
+    reopen(first.content).getEditorState().read(() => {
+      const equation = walk().find(node => node instanceof EquationNode) as InstanceType<typeof EquationNode> | undefined;
+      expect(equation?.getEquation()).toBe('x|y');
+      expect(equation?.isInline()).toBe(true);
+    });
+    expect(first.markdown).toContain('$x\\|y$');
+  });
+
+  it.each([
+    ['js', 'javascript'], ['jsx', 'javascript'], ['ts', 'typescript'], ['tsx', 'typescript'],
+    ['sh', 'bash'], ['shell', 'bash'], ['zsh', 'bash'], ['yml', 'yaml'], ['py', 'python'],
+    ['html', 'markup'], ['xml', 'markup'], ['golang', 'go'], ['ps1', 'powershell'],
+    ['md', 'markdown'], ['objc', 'objectivec'],
+  ])('maps code fence language %s to %s on import and exports it', (alias, canonical) => {
+    const first = snapshot('```' + alias + '\nx = 1\n```');
+    reopen(first.content).getEditorState().read(() => {
+      const code = walk().find($isCodeNode);
+      expect(code?.getLanguage()).toBe(canonical);
+    });
+    expect(first.markdown).toContain('```' + canonical);
+  });
+
+  it('keeps unknown code fence languages verbatim', () => {
+    const first = snapshot('```brainfuck\n++[>++<-]\n```');
+    reopen(first.content).getEditorState().read(() => {
+      expect(walk().find($isCodeNode)?.getLanguage()).toBe('brainfuck');
+    });
+    expect(first.markdown).toContain('```brainfuck');
   });
 });

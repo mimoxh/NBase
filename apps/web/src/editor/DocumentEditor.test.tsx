@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DocumentEditor } from './DocumentEditor';
 import { createContentFromMarkdown } from './markdown';
 import { preparePastedHtml } from './plugins/SafePastePlugin';
-import type { DocumentEditorHandle } from './types';
+import type { DocumentContent, DocumentEditorHandle } from './types';
 
 let host: HTMLDivElement;
 let root: Root;
@@ -136,6 +136,85 @@ describe('mounted document editor', () => {
     expect(ref.current!.getSnapshot().plainText).toContain('保留文字');
     expect(host.querySelector('a')).toBeNull();
     expect(notice).toHaveBeenCalledWith(expect.stringContaining('不安全的结构'));
+  });
+
+  it('opens a code block, highlights it, and does not report an edit', async () => {
+    const ref = createRef<DocumentEditorHandle>();
+    const onChange = vi.fn();
+    const content = createContentFromMarkdown('```js\nconst x = 1\n\treturn x\n```');
+    await act(() => root.render(<DocumentEditor ref={ref} documentId="code" initialContent={content} onChange={onChange} />));
+    await act(async () => new Promise(resolve => setTimeout(resolve, 50)));
+    expect(host.querySelector('.nbase-code-block')?.getAttribute('data-gutter')).toBe('1\n2');
+    expect(ref.current!.getSnapshot().markdown).toContain('```javascript\nconst x = 1\n\treturn x\n```');
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('renders Prism tokens for javascript and bash without reporting an edit', async () => {
+    const ref = createRef<DocumentEditorHandle>();
+    const onChange = vi.fn();
+    const content = createContentFromMarkdown('```js\nconst x = 1\n```\n\n```bash\necho $HOME\n```');
+    await act(() => root.render(<DocumentEditor ref={ref} documentId="hl" initialContent={content} onChange={onChange} />));
+    await act(async () => new Promise(resolve => setTimeout(resolve, 80)));
+    const blocks = host.querySelectorAll('.nbase-code-block');
+    expect(blocks).toHaveLength(2);
+    // js: `const` is a keyword token mapped to nbase-token-attr.
+    const keyword = blocks[0]!.querySelector('.nbase-token-attr');
+    expect(keyword?.textContent).toBe('const');
+    // bash: `echo` is a builtin token, `$HOME` a variable — both need the
+    // extra prism-bash grammar loaded by prism-languages.ts.
+    expect(blocks[1]!.querySelector('[class*="nbase-token"]')?.textContent).toContain('echo');
+    expect(blocks[1]!.querySelector('.nbase-token-variable')?.textContent).toContain('$HOME');
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('opens a stored normalized code block shape without an edit', async () => {
+    const ref = createRef<DocumentEditorHandle>();
+    const onChange = vi.fn();
+    const stored = { schemaVersion: 1 as const, editorState: { root: { type: 'root', version: 1, children: [
+      { type: 'code', version: 1, format: '', indent: 0, direction: null, language: 'javascript', children: [
+        { type: 'text', detail: 0, format: 0, mode: 'normal', style: '', text: 'const y = 2', version: 1 },
+        { type: 'linebreak', version: 1 },
+        { type: 'text', detail: 0, format: 0, mode: 'normal', style: '', text: 'y++', version: 1 },
+      ] },
+    ] } } } as unknown as DocumentContent;
+    await act(() => root.render(<DocumentEditor ref={ref} documentId="stored" initialContent={stored} onChange={onChange} />));
+    await act(async () => new Promise(resolve => setTimeout(resolve, 50)));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('reopens stored equation JSON and locates its source for search', async () => {
+    const ref = createRef<DocumentEditorHandle>();
+    const onChange = vi.fn();
+    const content = createContentFromMarkdown('面积 $\\pi r^2$\n\n$$\n\\int_0^1 x\\,dx\n$$');
+    await act(() => root.render(<DocumentEditor ref={ref} documentId="eq" initialContent={content} onChange={onChange} />));
+    expect(host.querySelectorAll('.nbase-equation-node')).toHaveLength(2);
+    expect(ref.current!.getSnapshot().markdown).toContain('$\\pi r^2$');
+    expect(ref.current!.getSnapshot().markdown).toContain('$$\n\\int_0^1 x\\,dx\n$$');
+    expect(ref.current!.findText('r^2')).toBe(true);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('clears the equation popover error after the LaTeX source is fixed', async () => {
+    const ref = createRef<DocumentEditorHandle>();
+    const content = createContentFromMarkdown('面积 $\\pi r^2$');
+    await act(() => root.render(<DocumentEditor ref={ref} documentId="eq-err" initialContent={content} onChange={() => {}} />));
+    const render = host.querySelector('.nbase-equation-render')!;
+    await act(() => { render.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true })); });
+    const popover = document.body.querySelector('.nbase-equation-popover');
+    expect(popover).not.toBeNull();
+    const textarea = popover!.querySelector('textarea')!;
+    const setValue = async (value: string) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!;
+      await act(() => {
+        setter.call(textarea, value);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+    };
+    await setValue('\\frac{');
+    expect(document.body.querySelector('.nbase-equation-preview-error')?.textContent).toBeTruthy();
+    await setValue('\\frac{1}{2}');
+    expect(document.body.querySelector('.nbase-equation-preview-error')).toBeNull();
+    expect(document.body.querySelector('.nbase-equation-preview .katex')).not.toBeNull();
   });
 
   it('inserts a pasted uploaded image only into the document that began the upload', async () => {

@@ -2,7 +2,7 @@ import { $createCodeNode } from '@lexical/code';
 import { createEditor } from 'lexical';
 import { $isLinkNode } from '@lexical/link';
 import {
-  $convertFromMarkdownString, $convertToMarkdownString, CHECK_LIST, LINK, TRANSFORMERS,
+  $convertFromMarkdownString, $convertToMarkdownString, CHECK_LIST, CODE, LINK, TRANSFORMERS,
 } from '@lexical/markdown';
 import type { ElementTransformer, MultilineElementTransformer, TextMatchTransformer, Transformer } from '@lexical/markdown';
 import { $createHorizontalRuleNode, $isHorizontalRuleNode, HorizontalRuleNode } from '@lexical/react/LexicalHorizontalRuleNode';
@@ -11,11 +11,14 @@ import {
   $createTableCellNode, $createTableNode, $createTableRowNode, $isTableCellNode,
   $isTableNode, $isTableRowNode, TableCellHeaderStates, TableCellNode, TableNode, TableRowNode,
 } from '@lexical/table';
-import { $createTextNode, $getRoot, $isElementNode } from 'lexical';
+import { $createTextNode, $getRoot, $isElementNode, $isTextNode } from 'lexical';
 import type { LexicalNode, SerializedLexicalNode, SerializedRootNode } from 'lexical';
 import { EDITOR_NODES } from './nodes';
 import { $createImageReferenceNode, ImageReferenceNode } from './nodes/ImageReferenceNode';
 import { AttachmentNode } from './nodes/AttachmentNode';
+import { $createEquationNode, $isEquationNode, $requestEquationEdit, EquationNode } from './nodes/EquationNode';
+import { normalizeCodeBlockLanguage } from './codeLanguages';
+import { normalizeDocumentContent } from './normalize';
 import type { DocumentContent, EditorSnapshot, MarkdownAssessment, OutlineItem } from './types';
 
 /** Relative paths and explicit web/mail protocols only. Reject control-character scheme obfuscation. */
@@ -64,6 +67,93 @@ const HORIZONTAL_RULE: ElementTransformer = {
   replace(parent) { parent.replace($createHorizontalRuleNode()); },
   triggerOnEnter: true,
 };
+
+/** RegExpMatchArray is a real array plus index/input; copy it so the captured language can be rewritten. */
+function withCodeLanguage(match: RegExpMatchArray): RegExpMatchArray {
+  const normalized = normalizeCodeBlockLanguage(match[2]);
+  if (normalized === match[2]) return match;
+  const copy = match.slice() as RegExpMatchArray;
+  if (match.index !== undefined) copy.index = match.index;
+  if (match.input !== undefined) copy.input = match.input;
+  if (match.groups !== undefined) copy.groups = match.groups;
+  copy[2] = normalized ?? '';
+  return copy;
+}
+
+/** Fenced-code language aliases resolve to selector values; unknown names persist and export verbatim. */
+const CODE_ALIASED: MultilineElementTransformer = {
+  ...CODE,
+  handleImportAfterStartMatch: args => CODE.handleImportAfterStartMatch?.({ ...args, startMatch: withCodeLanguage(args.startMatch) }) ?? null,
+  replace: (rootNode, children, startMatch, endMatch, linesInBetween, isImport) => {
+    const normalized = normalizeCodeBlockLanguage(startMatch[2]);
+    const match = normalized === startMatch[2] ? startMatch : [...startMatch.slice(0, 2), normalized ?? '', ...startMatch.slice(3)];
+    return CODE.replace(rootNode, children, match, endMatch, linesInBetween, isImport);
+  },
+};
+
+// Inline math: `$src$` — non-space at both edges, no unescaped `$` or newline
+// inside, opening `$` not escaped or doubled, closing `$` not before a digit.
+const MATH_CHAR = String.raw`(?:\\.|[^\s$\\])`;
+const MATH_INNER = String.raw`(?:\\.|[^$\\\n])*`;
+const INLINE_MATH = String.raw`(?<![\\$])\$(${MATH_CHAR}(?:${MATH_INNER}${MATH_CHAR})?)\$(?!\d)`;
+
+const EQUATION_INLINE: TextMatchTransformer = {
+  type: 'text-match', dependencies: [EquationNode],
+  importRegExp: new RegExp(INLINE_MATH), regExp: new RegExp(`${INLINE_MATH}$`), trigger: '$',
+  export: node => $isEquationNode(node) && node.isInline() ? `$${node.getEquation().replace(/\n+/g, ' ')}$` : null,
+  replace(node, match) { node.replace($createEquationNode(match[1] ?? '', true)); },
+};
+
+const EQUATION_BLOCK: MultilineElementTransformer = {
+  type: 'multiline-element', dependencies: [EquationNode],
+  regExpStart: /^\s*\$\$/,
+  // Imports are consumed by handleImportAfterStartMatch, and the typed
+  // `$$`+Enter shortcut is handled in EquationPlugin — this transformer only
+  // matches fenced blocks on import, so replace always declines here.
+  replace: () => false,
+  handleImportAfterStartMatch({ lines, rootNode, startLineIndex }) {
+    const line = lines[startLineIndex]!;
+    const single = /^\s*\$\$([\s\S]*)\$\$\s*$/.exec(line);
+    if (single) {
+      rootNode.append($createEquationNode(single[1] ?? '', false));
+      return [true, startLineIndex];
+    }
+    if (!/^\s*\$\$\s*$/.test(line)) return null;
+    const content: string[] = [];
+    for (let index = startLineIndex + 1; index < lines.length; index++) {
+      if (/^\s*\$\$\s*$/.test(lines[index]!)) {
+        rootNode.append($createEquationNode(content.join('\n'), false));
+        return [true, index];
+      }
+      content.push(lines[index]!);
+    }
+    return null;
+  },
+  export(node) {
+    return $isEquationNode(node) && !node.isInline() ? `$$\n${node.getEquation()}\n$$` : null;
+  },
+};
+
+// Plain text `$` must round-trip as a literal: export escapes it to `\$`, and
+// the importer's unescapeText turns `\$` back into `$`. A private-use sentinel
+// carries the `$` through format escaping so it stays a literal on the way out.
+const DOLLAR_SENTINEL = '';
+const DOLLAR_ESCAPE: TextMatchTransformer = {
+  type: 'text-match', dependencies: [],
+  importRegExp: /(?!)x/, regExp: /(?!)x/,
+  export: (node, _children, exportFormat) => {
+    if (!$isTextNode(node) || node.hasFormat('code')) return null;
+    const text = node.getTextContent();
+    if (!text.includes('$') || text.includes(DOLLAR_SENTINEL)) return null;
+    return exportFormat(node, text.replace(/\$/g, DOLLAR_SENTINEL));
+  },
+  replace: () => {},
+};
+
+/** Sentinels left by DOLLAR_ESCAPE become literal `\$` escapes in Markdown output. */
+function restoreDollarEscapes(markdown: string): string {
+  return markdown.replaceAll(DOLLAR_SENTINEL, '\\$');
+}
 
 /** Split only unescaped pipes. GFM requires pipes inside code spans to be escaped too. */
 function tableCells(line: string): string[] {
@@ -144,8 +234,12 @@ const TABLE: MultilineElementTransformer = {
   },
 };
 
-const INLINE_TRANSFORMERS: Transformer[] = [IMAGE, SAFE_LINK, ...TRANSFORMERS.filter(item => item.type === 'text-format')];
-export const MARKDOWN_TRANSFORMERS: Transformer[] = [TABLE, HORIZONTAL_RULE, CHECK_LIST, ATTACHMENT, IMAGE, SAFE_LINK, ...TRANSFORMERS.filter(item => item !== LINK && item !== CHECK_LIST)];
+const INLINE_TRANSFORMERS: Transformer[] = [IMAGE, SAFE_LINK, EQUATION_INLINE, ...TRANSFORMERS.filter(item => item.type === 'text-format')];
+export const MARKDOWN_TRANSFORMERS: Transformer[] = [
+  EQUATION_BLOCK, TABLE, HORIZONTAL_RULE, CHECK_LIST,
+  ATTACHMENT, IMAGE, SAFE_LINK, EQUATION_INLINE, DOLLAR_ESCAPE,
+  CODE_ALIASED, ...TRANSFORMERS.filter(item => item !== LINK && item !== CHECK_LIST && item !== CODE),
+];
 
 /** Exclude fenced examples from feature detection, honoring marker and opening length. */
 function proseLines(markdown: string): string[] {
@@ -168,7 +262,8 @@ function unsupportedReasons(markdown: string): string[] {
   if (/<\/?[a-z][\w:-]*(?:\s|\/?>)|<!--/i.test(prose)) reasons.push('HTML（含合并或嵌套表格）');
   if (/^\s*\[[^\]]+\]:\s*\S/m.test(prose) || /\[[^\]]+\]\[[^\]]*\]/.test(prose)) reasons.push('引用式链接或脚注');
   if (/\[\^[^\]]+\]/.test(prose)) reasons.push('脚注');
-  if (/^\s*\$\$|\$[^\s$][^\n$]*\$|\\\([^\n]+\\\)|^\s*\\\[\s*$/m.test(prose)) reasons.push('数学公式');
+  if (/(?<!\\)\\\(|^\s*(?<!\\)\\\[/m.test(prose)) reasons.push('数学公式（\\( \\) 或 \\[ \\] 语法）');
+  if (lines.filter(line => /^\s*\$\$\s*$/.test(line)).length % 2) reasons.push('未闭合的公式块');
   if (/^\s*(?:~~~|:::)\s*$/m.test(prose)) reasons.push('波浪号围栏或自定义容器');
   if (/^\S[^\n]*\n(?:={3,}|-{3,})\s*$/m.test(prose)) reasons.push('Setext 标题');
     if (/\[\[[^\]]+\]\]/.test(prose)) reasons.push('双链');
@@ -224,8 +319,8 @@ export function $collectOutline(): OutlineItem[] {
 /** Call inside an EditorState.read callback. Anchors are view-only and never persisted IDs. */
 export function $createSnapshot(): EditorSnapshot {
   return {
-    content: { schemaVersion: 1, editorState: { root: serializeNode($getRoot()) as SerializedRootNode } },
-    markdown: $convertToMarkdownString(MARKDOWN_TRANSFORMERS),
+    content: normalizeDocumentContent({ schemaVersion: 1, editorState: { root: serializeNode($getRoot()) as SerializedRootNode } }),
+    markdown: restoreDollarEscapes($convertToMarkdownString(MARKDOWN_TRANSFORMERS)),
     plainText: $getRoot().getTextContent(), outline: $collectOutline(),
   };
 }

@@ -19,3 +19,15 @@ test('search text follows visible Chinese content across formatting without inde
   assert.equal(text.includes('private.example'), false);
   assert.equal(text.includes('attachmentId'), false);
 });
+
+test('search text includes equation source', () => {
+  const content = { schemaVersion: 1, editorState: { root: { type: 'root', version: 1, children: [
+    { type: 'paragraph', version: 1, children: [
+      { type: 'text', version: 1, text: '面积' },
+      { type: 'equation', version: 1, equation: '\\pi r^2', inline: true },
+    ] },
+    { type: 'equation', version: 1, equation: '\\int_0^1 x dx', inline: false },
+  ] } } };
+  const text = extractSearchText(content);
+  assert.equal(text, '面积 \\pi r^2 \\int_0^1 x dx');
+});

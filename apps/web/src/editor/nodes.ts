@@ -6,10 +6,11 @@ import { HeadingNode, QuoteNode } from '@lexical/rich-text';
 import { TableCellNode, TableNode, TableRowNode } from '@lexical/table';
 import { ImageReferenceNode } from './nodes/ImageReferenceNode';
 import { AttachmentNode } from './nodes/AttachmentNode';
+import { EquationNode } from './nodes/EquationNode';
 
 /** The same registry is used for the UI, Markdown import and JSON reopening. */
 export const EDITOR_NODES = [
   HeadingNode, QuoteNode, ListNode, ListItemNode, CodeNode, CodeHighlightNode,
   LinkNode, AutoLinkNode, TableNode, TableRowNode, TableCellNode,
-  HorizontalRuleNode, ImageReferenceNode, AttachmentNode,
+  HorizontalRuleNode, ImageReferenceNode, AttachmentNode, EquationNode,
 ];

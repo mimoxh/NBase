@@ -7,7 +7,7 @@ const elementTypes = new Set([
   'root', 'paragraph', 'heading', 'quote', 'list', 'listitem', 'code',
   'link', 'autolink', 'table', 'tablerow', 'tablecell',
 ]);
-const leafTypes = new Set(['text', 'code-highlight', 'linebreak', 'tab', 'horizontalrule', 'image-reference', 'attachment']);
+const leafTypes = new Set(['text', 'code-highlight', 'linebreak', 'tab', 'horizontalrule', 'image-reference', 'attachment', 'equation']);
 const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype']);
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -55,6 +55,8 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
     if (node.type === 'tablecell' && (node.colSpan !== 1 || node.rowSpan !== 1)) invalid();
     if (node.type === 'image-reference'
       && (typeof node.markdown !== 'string' || typeof node.alt !== 'string')) invalid();
+    if (node.type === 'equation' && (typeof node.equation !== 'string' || node.equation.length > 10_000
+      || typeof node.inline !== 'boolean')) invalid();
     if (node.type === 'attachment' && (!uuidPattern.test(String(node.attachmentId))
       || typeof node.alt !== 'string' || node.alt.length > 500
       || typeof node.fileName !== 'string' || node.fileName.length < 1 || node.fileName.length > 180

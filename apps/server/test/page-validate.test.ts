@@ -46,6 +46,24 @@ test('rejects executable links, custom CSS, nested tables and merged cells', () 
   reject(cell, 'CONTENT_INVALID');
 });
 
+test('accepts equation nodes and rejects malformed ones', () => {
+  const valid = content();
+  valid.editorState.root.children[0]!.children = [
+    { type: 'equation', version: 1, equation: 'x^2', inline: true },
+    { type: 'equation', version: 1, equation: '\\frac{a}{b}', inline: false },
+  ] as never;
+  assert.equal(validateDocumentContent(valid).schemaVersion, 1);
+  const badSource = content();
+  badSource.editorState.root.children[0]!.children = [{ type: 'equation', version: 1, equation: 42, inline: true }] as never;
+  reject(badSource, 'CONTENT_INVALID');
+  const badInline = content();
+  badInline.editorState.root.children[0]!.children = [{ type: 'equation', version: 1, equation: 'x', inline: 'yes' }] as never;
+  reject(badInline, 'CONTENT_INVALID');
+  const tooLong = content();
+  tooLong.editorState.root.children[0]!.children = [{ type: 'equation', version: 1, equation: 'x'.repeat(10_001), inline: true }] as never;
+  reject(tooLong, 'CONTENT_INVALID');
+});
+
 test('rejects excessive content size', () => {
   const large = content();
   large.editorState.root.children[0]!.children[0]!.text = '字'.repeat(400_000);
