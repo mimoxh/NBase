@@ -18,3 +18,5 @@ P2 的 `pg` 版本与许可见 [npm 包](https://www.npmjs.com/package/pg)及[�
 此次曾安装 @lexical/headless，其传递依赖 happy-dom 被 npm audit 报告 GHSA-834v-8h66-3h79。内容转换只需要 Lexical createEditor，不需要该包的 DOM 适配器，因此移除 @lexical/headless 及传递依赖，没有降级整个编辑器版本或自动执行 audit fix。移除后 npm audit --json 返回 0 项已知漏洞；这是当次数据库检查结果，不是永续安全保证。
 
 安装提示 esbuild 的 postinstall 未获脚本白名单批准，本次没有扩大脚本执行许可。能否运行由实际类型检查、测试和构建结果记录，不凭安装成功推断。
+
+2026-11-03 P3-06 复核：`npm audit` 报告 `@fastify/static 10.1.7 → glob 13.0.6 → minimatch 10.2.6` 共 3 项 moderate（GHSA-3g3m-2fjr-6pw4、GHSA-g3hv-75wg-m249）。glob 只在 `wildcard: false` 时以固定模式枚举静态目录，本项目使用默认 wildcard，该代码路径不执行。npm 建议的大版本降级不采用；修复版本发布不足 7 天且超出上游声明的 `glob ^13` 范围，也不使用 overrides。结论是记录并接受当前风险，待 @fastify/static 更新依赖后再升级。本轮没有新增依赖。

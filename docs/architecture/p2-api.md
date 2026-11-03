@@ -17,6 +17,7 @@
 | 接口 | 行为 |
 | --- | --- |
 | `GET /pages?parentId=&cursor=&limit=` | 按父页面分页读取同工作区未删除子页面；单页上限 100，稳定排序 |
+| `GET /page-tree` | P3-06 新增：一次返回从未删除根页经未删除父页可达的全部页面摘要，按 created_at、id 排序，上限 2000，超出时 `truncated: true`；网页目录只用此接口 |
 | `GET /pages/:pageId` | 读取页面元数据、当前修订与版本化正文 |
 | `POST /pages` | 创建页面，正文采用已支持的 `schemaVersion`，初始 revision 为字符串 `"1"` |
 | `PATCH /pages/:pageId` | 修改标题、正文或父页面；携带 `expectedRevision` 与 `clientMutationId` |

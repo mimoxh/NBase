@@ -87,4 +87,4 @@ CLI 从 `instance_state` 定位 owner，核对显式 `NBASE_OWNER_LOGIN`，拒�
 
 配置依据：[Compose 启动顺序](https://docs.docker.com/compose/how-tos/startup-order/)、[Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/)、[PostgreSQL 官方镜像的 PGDATA/秘密文件约定](https://hub.docker.com/_/postgres)、[Node 官方镜像](https://hub.docker.com/_/node)。基础组件版本保持本阶段已验证基线，新增/更新依赖和镜像需另核版本、许可证与检查结果；不自动决定项目分发许可证。
 
-本机执行证据放 [验证记录](../validation.md)。`scripts/check-p3-deployment.mjs` 只接受独立 `nbase-p3-deploy-YYYYMMDD` 配置及 4325 回环端口，创建可丢弃验收样例；它不是业务库维护命令。NAS 路径权限、资源基线、手机与外网仍需对应环境的后续验收。
+本机执行证据放 [验证记录](../validation.md)。`scripts/check-p3-deployment.mjs` 只接受独立 `nbase-p3-deploy-YYYYMMDD` 配置及 4325 回环端口，创建可丢弃验收样例；它不是业务库维护命令。本机资源基线见 P3-06 验证记录；NAS 路径权限与资源仍未验收。手机验收已跳过，外网验收（P3-07）已放弃，所以不要把端口暴露到公网。
