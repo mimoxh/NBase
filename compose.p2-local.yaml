@@ -1,0 +1,25 @@
+# Disposable local P2 PostgreSQL. Keep separate from the P1 preview compose file.
+name: nbase-p2-local
+
+services:
+  postgres:
+    image: postgres:18.6@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+    environment:
+      POSTGRES_USER: nbase_p2
+      POSTGRES_DB: nbase_p2
+      POSTGRES_PASSWORD: ${NBASE_PG_PASSWORD:?Set NBASE_PG_PASSWORD in .env.p2.local}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    ports:
+      - "127.0.0.1:${NBASE_PG_PORT:-54329}:5432"
+    volumes:
+      - nbase_p2_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nbase_p2 -d nbase_p2"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  nbase_p2_data:
+    name: nbase-p2-local-pgdata

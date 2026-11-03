@@ -1,0 +1,76 @@
+name: ${NBASE_COMPOSE_PROJECT:-nbase}
+
+x-app: &app
+  image: nbase:${NBASE_IMAGE_TAG:-local}
+  build: .
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  environment: &app-env
+    NBASE_REQUIRE_DATABASE: "1"
+    NBASE_DATABASE_HOST: postgres
+    NBASE_DATABASE_NAME: nbase
+    NBASE_DATABASE_USER: nbase
+    NBASE_DATABASE_PASSWORD_FILE: /run/secrets/db_password
+    NBASE_PUBLIC_ORIGIN: ${NBASE_PUBLIC_ORIGIN:?Set an exact origin in .env.docker}
+    NBASE_ATTACHMENT_DIR: /data/attachments
+  secrets:
+    - db_password
+  volumes:
+    - attachments:/data/attachments
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:18.6@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
+    environment:
+      POSTGRES_USER: nbase
+      POSTGRES_DB: nbase
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    secrets:
+      - db_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U nbase -d nbase"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+  nbase:
+    <<: *app
+    ports:
+      - "127.0.0.1:${NBASE_PORT:-3000}:3001"
+    restart: unless-stopped
+  # Explicitly invoked one-off local CLI; never started by compose up.
+  admin:
+    <<: *app
+    profiles: [maintenance]
+    restart: "no"
+    healthcheck:
+      disable: true
+    environment:
+      <<: *app-env
+      NBASE_OWNER_LOGIN: ${NBASE_OWNER_LOGIN:-owner}
+      NBASE_OWNER_PASSWORD_FILE: /run/secrets/owner_password
+      NBASE_OWNER_WORKSPACE_NAME: ${NBASE_OWNER_WORKSPACE_NAME:-我的空间}
+    secrets:
+      - db_password
+      - owner_password
+    command: [node, apps/server/dist/auth/init-owner-cli.js]
+
+secrets:
+  db_password:
+    file: ${NBASE_DB_PASSWORD_SOURCE:?Set the database password file path}
+  owner_password:
+    file: ${NBASE_OWNER_PASSWORD_SOURCE:?Set the owner password file path}
+
+volumes:
+  postgres_data:
+  attachments:
