@@ -210,18 +210,23 @@ function serializeNode(node: LexicalNode): SerializedLexicalNode {
   return $isElementNode(node) ? { ...serialized, children: node.getChildren().map(serializeNode) } as SerializedLexicalNode : serialized;
 }
 
-/** Call inside an EditorState.read callback. Anchors are view-only and never persisted IDs. */
-export function $createSnapshot(): EditorSnapshot {
+/** Call inside an EditorState.read callback. Heading ids are view-only anchors and never persisted IDs. */
+export function $collectOutline(): OutlineItem[] {
   const outline: OutlineItem[] = [];
   const visit = (node: LexicalNode): void => {
     if ($isHeadingNode(node)) outline.push({ id: `heading-${node.getKey()}`, text: node.getTextContent(), level: Number(node.getTag().slice(1)) });
     if ($isElementNode(node)) node.getChildren().forEach(visit);
   };
   visit($getRoot());
+  return outline;
+}
+
+/** Call inside an EditorState.read callback. Anchors are view-only and never persisted IDs. */
+export function $createSnapshot(): EditorSnapshot {
   return {
     content: { schemaVersion: 1, editorState: { root: serializeNode($getRoot()) as SerializedRootNode } },
     markdown: $convertToMarkdownString(MARKDOWN_TRANSFORMERS),
-    plainText: $getRoot().getTextContent(), outline,
+    plainText: $getRoot().getTextContent(), outline: $collectOutline(),
   };
 }
 

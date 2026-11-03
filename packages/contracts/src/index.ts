@@ -12,6 +12,7 @@ export type {
   PageDocument,
   PageListResponse,
   PageStateRequest,
+  PageTreeResponse,
   PageSummary,
   StoredDocumentContent,
   TrashPageRequest,

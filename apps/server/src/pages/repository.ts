@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { CreatePageRequest, PageDocument, PageHistoryResponse, PageListResponse, PageStateRequest,
-  PageSummary, PageVersion, PageVersionOperation, PageVersionSummary, RestorePageVersionRequest,
+  PageSummary, PageTreeResponse, PageVersion, PageVersionOperation, PageVersionSummary, RestorePageVersionRequest,
   SearchResponse, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest } from '@nbase/contracts';
 import type { Pool, PoolClient, QueryResult } from 'pg';
 import { attachmentReferences, validateDocumentContent } from './validate.js';
@@ -202,6 +202,24 @@ export class PgPageRepository {
         ? Buffer.from(JSON.stringify({ createdAt: last.cursor_created_at, id: last.id })).toString('base64url')
         : null,
     };
+  }
+
+  /** Pages reachable from active roots through active parents; membership gates the anchor like `list`. */
+  async tree(workspaceId: string, actorId: string, limit = 2000): Promise<PageTreeResponse> {
+    const result = await this.pool.query<PageRow>(`
+      WITH RECURSIVE tree AS (
+        SELECT p.id FROM pages p
+        JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
+        WHERE p.workspace_id = $1 AND p.parent_id IS NULL AND p.deleted_at IS NULL
+        UNION
+        SELECT c.id FROM pages c JOIN tree t ON c.parent_id = t.id
+        WHERE c.workspace_id = $1 AND c.deleted_at IS NULL
+      )
+      SELECT ${joinedPageColumns} FROM pages p
+      JOIN tree t ON t.id = p.id
+      ORDER BY p.created_at, p.id LIMIT $3
+    `, [workspaceId, actorId, limit + 1]);
+    return { pages: result.rows.slice(0, limit).map(summaryFromRow), truncated: result.rows.length > limit };
   }
 
   async receipt(workspaceId: string, actorId: string, mutationId: string): Promise<MutationResult<PageDocument> | null> {

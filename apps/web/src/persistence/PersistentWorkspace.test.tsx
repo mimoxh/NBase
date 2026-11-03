@@ -19,7 +19,7 @@ it('keeps writing and export available when pending-action storage cannot be rea
   const page: PageDocument = { id: 'page', workspaceId: 'workspace', parentId: null, title: '故障样例', revision: '1',
     content: createContentFromMarkdown('已有正文'), createdAt: '2026-10-27T00:00:00Z', updatedAt: '2026-10-27T00:00:00Z' };
   vi.spyOn(pageClient, 'session').mockResolvedValue(session);
-  vi.spyOn(pageClient, 'list').mockImplementation(async (_workspace, parentId) => ({ pages: parentId ? [] : [page], nextCursor: null }));
+  vi.spyOn(pageClient, 'tree').mockResolvedValue({ pages: [page], truncated: false });
   vi.spyOn(pageClient, 'get').mockResolvedValue(page);
   vi.spyOn(localDrafts, 'forScopeActions').mockRejectedValue(new Error('storage denied'));
   vi.spyOn(localDrafts, 'forScopeCreates').mockResolvedValue([]);
@@ -46,9 +46,8 @@ it('refreshes the deletion subtree and refuses to delete a newly moved child wit
   const child: PageDocument = { ...parent, id: 'child', title: '移动来的子页', content: createContentFromMarkdown('已保存的子页') };
   let moved = false;
   vi.spyOn(pageClient, 'session').mockResolvedValue(session);
-  vi.spyOn(pageClient, 'list').mockImplementation(async (_workspace, parentId) => ({
-    pages: moved ? parentId === null ? [parent] : parentId === parent.id ? [{ ...child, parentId: parent.id }] : []
-      : parentId === null ? [parent, child] : [], nextCursor: null,
+  vi.spyOn(pageClient, 'tree').mockImplementation(async () => ({
+    pages: moved ? [parent, { ...child, parentId: parent.id }] : [parent, child], truncated: false,
   }));
   vi.spyOn(pageClient, 'get').mockImplementation(async (_workspace, id) => id === child.id ? { ...child, parentId: parent.id } : parent);
   vi.spyOn(localDrafts, 'forScopeActions').mockResolvedValue([]);

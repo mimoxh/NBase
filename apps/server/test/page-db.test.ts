@@ -446,3 +446,86 @@ test('isolated PostgreSQL page path protects identity, revisions and retries', {
     }
   }
 });
+
+test('page-tree returns the reachable subtree in created order with bounded results', {
+  skip: !sourceUrl && 'Set NBASE_TEST_DATABASE_URL to a disposable local PostgreSQL instance',
+}, async () => {
+  assert.ok(sourceUrl);
+  const source = new URL(sourceUrl);
+  assert.equal(source.hostname, '127.0.0.1');
+  assert.equal(source.port, '54329');
+  assert.equal(source.pathname, '/nbase_p2');
+  const admin = new pg.Pool({ connectionString: sourceUrl, max: 2, connectionTimeoutMillis: 5000 });
+  const databaseName = `nbase_p2_test_${randomUUID().replaceAll('-', '')}`;
+  let created = false;
+  let pool: pg.Pool | undefined;
+  let app: Awaited<ReturnType<typeof buildApp>> | undefined;
+  let attachmentRoot: string | undefined;
+  try {
+    await admin.query(`CREATE DATABASE "${databaseName}"`);
+    created = true;
+    const url = new URL(sourceUrl);
+    url.pathname = `/${databaseName}`;
+    pool = new pg.Pool({ connectionString: url.toString(), max: 4, connectionTimeoutMillis: 5000 });
+    attachmentRoot = await mkdtemp(join(tmpdir(), 'nbase-attachment-test-'));
+    assert.equal(await runMigrations(pool), 5);
+    const owner = await initializeOwner(pool, 'owner', await hashPassword(ownerPassword), '测试空间');
+    const pages = new PgPageRepository(pool);
+    app = await buildApp({
+      auth: { repository: new PgAuthRepository(pool), publicOrigin: origin },
+      pages, attachments: new PgAttachmentRepository(pool, attachmentRoot),
+    });
+    const base = `/api/workspaces/${owner.workspaceId}`;
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login',
+      headers: { origin }, payload: { loginName: 'owner', password: ownerPassword } });
+    assert.equal(login.statusCode, 200);
+    const cookie = String(login.headers['set-cookie']).split(';', 1)[0]!;
+    const csrfToken = login.json().csrfToken as string;
+    const readHeaders = { cookie };
+    const writeHeaders = { cookie, origin, 'x-csrf-token': csrfToken };
+
+    const unauthenticated = await app.inject({ method: 'GET', url: `${base}/page-tree` });
+    assert.equal(unauthenticated.statusCode, 401);
+    const wrongWorkspaceList = await app.inject({ method: 'GET', url: `/api/workspaces/${randomUUID()}/pages`, headers: readHeaders });
+    const wrongWorkspace = await app.inject({ method: 'GET', url: `/api/workspaces/${randomUUID()}/page-tree`, headers: readHeaders });
+    assert.equal(wrongWorkspace.statusCode, wrongWorkspaceList.statusCode);
+
+    const create = async (parentId: string | null, title: string) => {
+      const response = await app!.inject({ method: 'POST', url: `${base}/pages`, headers: writeHeaders,
+        payload: { clientMutationId: randomUUID(), parentId, title, content: content(title) } });
+      assert.equal(response.statusCode, 201, response.body);
+      return response.json().id as string;
+    };
+    const rootId = await create(null, '根页面');
+    const childId = await create(rootId, '子页面');
+    const grandchildId = await create(childId, '孙页面');
+    const trashRootId = await create(null, '待删根页面');
+    const trashChildId = await create(trashRootId, '待删子页面');
+
+    const first = await app.inject({ method: 'GET', url: `${base}/page-tree`, headers: readHeaders });
+    assert.equal(first.statusCode, 200, first.body);
+    assert.equal(first.json().truncated, false);
+    assert.deepEqual(first.json().pages.map((page: { id: string }) => page.id),
+      [rootId, childId, grandchildId, trashRootId, trashChildId]);
+
+    const trashed = await app.inject({ method: 'POST', url: `${base}/pages/${trashRootId}/trash`, headers: writeHeaders,
+      payload: { clientMutationId: randomUUID(), expectedRevision: '1' } });
+    assert.equal(trashed.statusCode, 200, trashed.body);
+    const after = await app.inject({ method: 'GET', url: `${base}/page-tree`, headers: readHeaders });
+    assert.equal(after.statusCode, 200, after.body);
+    assert.equal(after.json().truncated, false);
+    assert.deepEqual(after.json().pages.map((page: { id: string }) => page.id), [rootId, childId, grandchildId]);
+
+    const limited = await pages.tree(owner.workspaceId, owner.userId, 2);
+    assert.equal(limited.truncated, true);
+    assert.deepEqual(limited.pages.map(page => page.id), [rootId, childId]);
+  } finally {
+    if (app) await app.close();
+    if (pool) await pool.end();
+    if (created) await admin.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
+    await admin.end();
+    if (attachmentRoot && dirname(attachmentRoot) === tmpdir() && basename(attachmentRoot).startsWith('nbase-attachment-test-')) {
+      await rm(attachmentRoot, { recursive: true, force: true });
+    }
+  }
+});

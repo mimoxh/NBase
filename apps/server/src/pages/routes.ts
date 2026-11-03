@@ -98,6 +98,14 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
     } catch (error) { return sendError(request, reply, error, secure); }
   });
 
+  app.get<{ Params: WorkspaceParams }>('/api/workspaces/:workspaceId/page-tree', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const actorId = await authorize(request, request.params.workspaceId, false);
+      return reply.send(await pages.tree(request.params.workspaceId, actorId));
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
   app.get<{ Params: WorkspaceParams }>('/api/workspaces/:workspaceId/search', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     try {

@@ -23,6 +23,11 @@ export interface PageListResponse {
   nextCursor: string | null;
 }
 
+export interface PageTreeResponse {
+  pages: PageSummary[];
+  truncated: boolean;
+}
+
 export interface CreatePageRequest {
   clientMutationId: string;
   parentId: string | null;

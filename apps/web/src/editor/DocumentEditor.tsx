@@ -13,7 +13,7 @@ import { LinkPlugin } from '@lexical/react/LexicalLinkPlugin';
 import { TablePlugin } from '@lexical/react/LexicalTablePlugin';
 import { HorizontalRulePlugin } from '@lexical/react/LexicalHorizontalRulePlugin';
 import { MarkdownShortcutPlugin } from '@lexical/react/LexicalMarkdownShortcutPlugin';
-import { $createSnapshot, createContentFromMarkdown, isSafeLinkUrl, MARKDOWN_TRANSFORMERS } from './markdown';
+import { $collectOutline, $createSnapshot, createContentFromMarkdown, isSafeLinkUrl, MARKDOWN_TRANSFORMERS } from './markdown';
 import { EDITOR_NODES } from './nodes';
 import type { DocumentEditorHandle, DocumentEditorProps } from './types';
 import { ToolbarPlugin } from './plugins/ToolbarPlugin';
@@ -100,7 +100,7 @@ function StateBridge({ props, editorRef }: { props: DocumentEditorProps; editorR
     let signature = JSON.stringify(initial.content.editorState);
     callbacks.current.onReady?.(props.documentId, initial);
     const updateAnchors = () => editor.read('latest', () => {
-      for (const item of $createSnapshot().outline) {
+      for (const item of $collectOutline()) {
         const element = editor.getElementByKey(item.id.replace(/^heading-/, ''));
         if (element) element.id = item.id;
       }

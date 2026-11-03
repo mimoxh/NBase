@@ -1,5 +1,5 @@
 import type {
-  AttachmentMetadata, AuthSessionResponse, CreatePageRequest, PageDocument, PageListResponse, SearchResponse,
+  AttachmentMetadata, AuthSessionResponse, CreatePageRequest, PageDocument, PageTreeResponse, SearchResponse,
   PageSummary, PageHistoryResponse, PageVersion, PageStateRequest, RestorePageVersionRequest,
   TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest,
 } from '@nbase/contracts';
@@ -57,12 +57,8 @@ export const pageClient = {
   login: (loginName: string, password: string) =>
     request<AuthSessionResponse>('/api/auth/login', 'POST', { loginName, password }),
   logout: (csrfToken: string) => request<void>('/api/auth/logout', 'POST', {}, csrfToken),
-  list: (workspaceId: string, parentId: string | null, cursor?: string, signal?: AbortSignal) => {
-    const query = new URLSearchParams({ limit: '100' });
-    if (parentId) query.set('parentId', parentId);
-    if (cursor) query.set('cursor', cursor);
-    return request<PageListResponse>(`${workspacePath(workspaceId)}/pages?${query}`, 'GET', undefined, undefined, signal);
-  },
+  tree: (workspaceId: string, signal?: AbortSignal) =>
+    request<PageTreeResponse>(`${workspacePath(workspaceId)}/page-tree`, 'GET', undefined, undefined, signal),
   get: (workspaceId: string, pageId: string, signal?: AbortSignal) =>
     request<PageDocument>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}`, 'GET', undefined, undefined, signal),
   receipt: (workspaceId: string, mutationId: string) =>
@@ -136,23 +132,12 @@ export const attachmentClient = {
 
 /** Loads the bounded page tree without silently hiding later pages. */
 export async function loadPageTree(workspaceId: string, signal?: AbortSignal): Promise<PageSummary[]> {
-  const pending: (string | null)[] = [null];
+  const { pages, truncated } = await pageClient.tree(workspaceId, signal);
+  if (truncated) throw new ApiError(0, 'PAGE_LIMIT_EXCEEDED');
   const seen = new Set<string>();
-  const pages: PageSummary[] = [];
-  while (pending.length) {
-    const parentId = pending.shift()!;
-    let cursor: string | undefined;
-    do {
-      const batch = await pageClient.list(workspaceId, parentId, cursor, signal);
-      for (const page of batch.pages) {
-        if (seen.has(page.id)) throw new ApiError(0, 'PAGE_TREE_INVALID');
-        seen.add(page.id);
-        pages.push(page);
-        pending.push(page.id);
-        if (pages.length > 2_000) throw new ApiError(0, 'PAGE_LIMIT_EXCEEDED');
-      }
-      cursor = batch.nextCursor ?? undefined;
-    } while (cursor);
+  for (const page of pages) {
+    if (seen.has(page.id)) throw new ApiError(0, 'PAGE_TREE_INVALID');
+    seen.add(page.id);
   }
   return pages;
 }

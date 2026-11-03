@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { AttachmentMetadata, AuthSessionResponse, PageDocument, PageSummary, PageVersion, SearchResult,
   StoredDocumentContent, TrashedPageDocument, UpdatePageRequest } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
@@ -57,10 +57,19 @@ function downloadBlob(name: string, blob: Blob, extension: string) {
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
-function Tree({ pages, activeId, onOpen }: { pages: PageSummary[]; activeId: string | null; onOpen: (id: string) => void }) {
+const Tree = memo(function Tree({ pages, activeId, onOpen }: { pages: PageSummary[]; activeId: string | null; onOpen: (id: string) => void }) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const branch = (parentId: string | null, depth: number): ReactNode => pages.filter(page => page.parentId === parentId).map(page => {
-    const hasChildren = pages.some(item => item.parentId === page.id);
+  const childrenByParent = useMemo(() => {
+    const groups = new Map<string | null, PageSummary[]>();
+    for (const page of pages) {
+      const siblings = groups.get(page.parentId);
+      if (siblings) siblings.push(page);
+      else groups.set(page.parentId, [page]);
+    }
+    return groups;
+  }, [pages]);
+  const branch = (parentId: string | null, depth: number): ReactNode => (childrenByParent.get(parentId) ?? []).map(page => {
+    const hasChildren = childrenByParent.has(page.id);
     return <div key={page.id}>
       <div className={`tree-row ${activeId === page.id ? 'selected' : ''}`} style={{ paddingLeft: 8 + depth * 15 }}>
         {hasChildren ? <button className={`tree-toggle ${collapsed.has(page.id) ? '' : 'expanded'}`}
@@ -76,7 +85,7 @@ function Tree({ pages, activeId, onOpen }: { pages: PageSummary[]; activeId: str
     </div>;
   });
   return <div className="page-tree">{branch(null, 0)}</div>;
-}
+});
 
 function Login({ onLogin, error, busy, title = '登录 NBase' }: {
   onLogin: (name: string, password: string) => Promise<void>; error: string; busy: boolean; title?: string;
@@ -448,6 +457,9 @@ export function PersistentWorkspace() {
       return false;
     } finally { if (sequence === openSequence.current) setLoadingPage(false); }
   }, [session, workspace, tabId, markDraft, persistDraft, queueWrite, scheduleSave]);
+  const openPageRef = useRef(openPage);
+  openPageRef.current = openPage;
+  const openTreePage = useCallback((id: string) => { void openPageRef.current(id); }, []);
 
   const locatePendingSearch = (pageId: string) => {
     const pending = pendingSearchRef.current;
@@ -799,7 +811,6 @@ export function PersistentWorkspace() {
   const currentLocked = pageActionBusy || pendingActions.some(item => activeId && item.affectedIds.includes(activeId));
   const rawContent = initialContent ?? current?.content;
   const supported = rawContent?.schemaVersion === 1;
-  const currentMarkdown = editorRef.current?.getSnapshot().markdown ?? editorSnapshot?.markdown ?? '';
   const downloadPage = async (name: string, markdown: string, content: StoredDocumentContent) => {
     const attachments = exportAttachments(content);
     if (!attachments.length) { download(name, markdown); return; }
@@ -815,8 +826,11 @@ export function PersistentWorkspace() {
     if (!current) return;
     if (conflict) { void downloadPage(conflict.draft.title || '未命名页面', conflict.draft.markdown, conflict.draft.content); return; }
     if (!supported) download(`${current.title || '页面'}-原始数据`, JSON.stringify(current.content, null, 2), 'application/json', '.json');
-    else void downloadPage(title || '未命名页面', currentMarkdown,
-      editorRef.current?.getSnapshot().content ?? editorSnapshot?.content ?? current.content);
+    else {
+      const snapshot = editorRef.current?.getSnapshot();
+      void downloadPage(title || '未命名页面', snapshot?.markdown ?? editorSnapshot?.markdown ?? '',
+        snapshot?.content ?? editorSnapshot?.content ?? current.content);
+    }
   };
   const uploadFiles = async (files: File[]): Promise<AttachmentMetadata[]> => {
     const pageId = activeIdRef.current;
@@ -893,7 +907,7 @@ export function PersistentWorkspace() {
         onClick={() => void createPage(null)}><Icon name="plus" /></button></div>
       <div className="tree-scroll">{treeLoading && <p className="tree-message">正在加载目录…</p>}
         {treeError && <p className="tree-message" role="alert">{treeError}<button onClick={() => void reloadTree(session)}>重试</button></p>}
-        <Tree pages={pages} activeId={activeId} onOpen={id => void openPage(id)} /></div>
+        <Tree pages={pages} activeId={activeId} onOpen={openTreePage} /></div>
       <div className="sidebar-footer"><button onClick={() => { fileRef.current?.click(); }}><Icon name="upload" /><span>导入 Markdown</span></button>
         <button onClick={() => setDialog('trash')}><Icon name="trash" /><span>回收站</span></button>
         <button onClick={() => void logout()}><Icon name="close" /><span>退出登录</span></button>
@@ -994,7 +1008,8 @@ export function PersistentWorkspace() {
       <button className="quiet-button" onClick={() => setShowReauthForm(false)}>继续写作</button></div>}
     {dialog === 'source' && <Modal title="Markdown 源码" wide onClose={() => setDialog(null)}>
       <p className="dialog-description">只读视图，包含当前编辑器尚未保存的内容。</p>
-      <textarea className="source-view" readOnly aria-label="Markdown 源码，只读" value={currentMarkdown} />
+      <textarea className="source-view" readOnly aria-label="Markdown 源码，只读"
+        value={editorRef.current?.getSnapshot().markdown ?? editorSnapshot?.markdown ?? ''} />
       <div className="dialog-actions"><button className="primary-button" onClick={exportCurrent}>下载页面（含附件）</button></div></Modal>}
     {dialog === 'search' && workspace && <PersistentSearchDialog workspaceId={workspace.id}
       onClose={() => setDialog(null)} onOpen={openSearchResult}
