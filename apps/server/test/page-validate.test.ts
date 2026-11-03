@@ -1,0 +1,53 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { ContentValidationError, validateDocumentContent } from '../src/pages/validate.js';
+
+function content() {
+  return {
+    schemaVersion: 1,
+    editorState: { root: {
+      type: 'root', version: 1, children: [{
+        type: 'paragraph', version: 1, children: [{ type: 'text', version: 1, text: '测试', style: '' }],
+      }],
+    } },
+  };
+}
+
+function reject(value: unknown, code: ContentValidationError['code']) {
+  assert.throws(() => validateDocumentContent(value), (error: unknown) => error instanceof ContentValidationError && error.code === code);
+}
+
+test('accepts supported versioned Lexical content', () => {
+  assert.equal(validateDocumentContent(content()).schemaVersion, 1);
+});
+
+test('rejects unknown versions and nodes rather than replacing stored content', () => {
+  const unknownVersion = content();
+  unknownVersion.schemaVersion = 2;
+  reject(unknownVersion, 'CONTENT_VERSION_UNSUPPORTED');
+  const unknownNode = content();
+  unknownNode.editorState.root.children[0]!.type = 'future-widget';
+  reject(unknownNode, 'CONTENT_INVALID');
+});
+
+test('rejects executable links, custom CSS, nested tables and merged cells', () => {
+  const link = content();
+  link.editorState.root.children[0] = {
+    type: 'link', version: 1, url: 'javascript:alert(1)', children: [{ type: 'text', version: 1, text: 'bad', style: '' }],
+  } as never;
+  reject(link, 'CONTENT_INVALID');
+  const style = content();
+  style.editorState.root.children[0]!.children[0]!.style = 'background:url(https://example.test/x)';
+  reject(style, 'CONTENT_INVALID');
+  const cell = content();
+  cell.editorState.root.children[0] = {
+    type: 'tablecell', version: 1, colSpan: 2, rowSpan: 1, children: [],
+  } as never;
+  reject(cell, 'CONTENT_INVALID');
+});
+
+test('rejects excessive content size', () => {
+  const large = content();
+  large.editorState.root.children[0]!.children[0]!.text = '字'.repeat(400_000);
+  reject(large, 'CONTENT_INVALID');
+});
