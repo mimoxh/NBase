@@ -1,0 +1,23 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "NBase 文档工作台": {
+      "versions": [
+        {
+          "path": "index.html",
+          "createdAt": "2026-10-24T19:26:44.014Z",
+          "status": "needs-review",
+          "subtitle": "Docmost / Notion 参考方向 · 个人文档交互原型",
+          "viewport": {
+            "width": 1440,
+            "height": 960
+          }
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-10-24T19:26:44.016Z",
+  "updatedAt": "2026-10-24T19:26:44.016Z"
+}
