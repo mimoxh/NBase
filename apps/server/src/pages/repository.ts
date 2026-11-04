@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { CreatePageRequest, PageDocument, PageHistoryResponse, PageListResponse, PageStateRequest,
+import type { CreatePageRequest, FavoriteListResponse, PageCoverId, PageDocument, PageHistoryResponse, PageListResponse, PageStateRequest,
   PageSummary, PageTreeResponse, PageVersion, PageVersionOperation, PageVersionSummary, RestorePageVersionRequest,
   SearchResponse, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest } from '@nbase/contracts';
 import type { Pool, PoolClient, QueryResult } from 'pg';
@@ -21,7 +21,8 @@ export class PageError extends Error {
   constructor(
     public readonly statusCode: number,
     public readonly code: 'NOT_FOUND' | 'FORBIDDEN' | 'REVISION_CONFLICT' | 'MUTATION_CONFLICT'
-      | 'PAGE_TREE_INVALID' | 'PAGE_TREE_CHANGED' | 'CONTENT_VERSION_UNSUPPORTED' | 'ATTACHMENT_INVALID',
+      | 'PAGE_TREE_INVALID' | 'PAGE_TREE_CHANGED' | 'CONTENT_VERSION_UNSUPPORTED' | 'ATTACHMENT_INVALID'
+      | 'FAVORITE_LIMIT',
     public readonly currentRevision?: string,
   ) { super(code); }
 
@@ -35,6 +36,8 @@ interface PageRow {
   workspace_id: string;
   parent_id: string | null;
   title: string;
+  icon: string | null;
+  cover: PageCoverId | null;
   content_json: PageDocument['content'];
   content_schema_version: number;
   revision: string;
@@ -52,6 +55,7 @@ interface ReceiptRow {
 
 interface VersionRow {
   page_id: string; revision: string; title: string; parent_id: string | null;
+  icon: string | null; cover: PageCoverId | null;
   content_json: PageDocument['content']; saved_at: Date; operation: PageVersionOperation;
   deleted_at: Date | null;
 }
@@ -76,6 +80,8 @@ function pageFromRow(row: PageRow): PageDocument {
     workspaceId: row.workspace_id,
     parentId: row.parent_id,
     title: row.title,
+    icon: row.icon ?? null,
+    cover: row.cover ?? null,
     content: row.content_json,
     revision: row.revision,
     createdAt: row.created_at.toISOString(),
@@ -111,9 +117,9 @@ function requestHash(operation: string, pageId: string | null, body: unknown): B
   return createHash('sha256').update(canonicalJson({ operation, pageId, body })).digest();
 }
 
-const pageColumns = `id, workspace_id, parent_id, title, content_json, content_schema_version, revision::text AS revision,
+const pageColumns = `id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, revision::text AS revision,
   created_at, updated_at`;
-const joinedPageColumns = `p.id, p.workspace_id, p.parent_id, p.title, p.content_json, p.content_schema_version,
+const joinedPageColumns = `p.id, p.workspace_id, p.parent_id, p.title, p.icon, p.cover, p.content_json, p.content_schema_version,
   p.revision::text AS revision, p.created_at, p.updated_at`;
 
 export class PgPageRepository {
@@ -121,9 +127,9 @@ export class PgPageRepository {
 
   private async snapshot(client: PoolClient, workspaceId: string, ids: string[], actorId: string,
     operation: PageVersionOperation): Promise<void> {
-    await client.query(`INSERT INTO page_versions (workspace_id, page_id, revision, title, parent_id,
+    await client.query(`INSERT INTO page_versions (workspace_id, page_id, revision, title, parent_id, icon, cover,
       content_json, content_schema_version, deleted_at, saved_at, actor_user_id, operation)
-      SELECT workspace_id, id, revision, title, parent_id, content_json, content_schema_version,
+      SELECT workspace_id, id, revision, title, parent_id, icon, cover, content_json, content_schema_version,
         deleted_at, updated_at, $3, $4 FROM pages WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
     [workspaceId, ids, actorId, operation]);
   }
@@ -142,12 +148,13 @@ export class PgPageRepository {
 
   async version(workspaceId: string, actorId: string, pageId: string, revision: string): Promise<PageVersion | null> {
     const result = await this.pool.query<VersionRow>(`SELECT h.page_id, h.revision::text AS revision,
-      h.title, h.parent_id, h.content_json, h.saved_at, h.operation, h.deleted_at FROM page_versions h
+      h.title, h.parent_id, h.icon, h.cover, h.content_json, h.saved_at, h.operation, h.deleted_at FROM page_versions h
       JOIN workspace_memberships m ON m.workspace_id = h.workspace_id AND m.user_id = $2
       WHERE h.workspace_id = $1 AND h.page_id = $3 AND h.revision = $4::bigint`,
     [workspaceId, actorId, pageId, revision]);
     const row = result.rows[0];
-    return row ? { ...versionSummary(row), pageId: row.page_id, parentId: row.parent_id, content: row.content_json } : null;
+    return row ? { ...versionSummary(row), pageId: row.page_id, parentId: row.parent_id,
+      icon: row.icon ?? null, cover: row.cover ?? null, content: row.content_json } : null;
   }
 
   async trashList(workspaceId: string, actorId: string, limit: number,
@@ -234,9 +241,9 @@ export class PgPageRepository {
   }
 
   async search(workspaceId: string, actorId: string, phrase: string, limit: number): Promise<SearchResponse> {
-    const result = await this.pool.query<{ id: string; parent_id: string | null; title: string;
+    const result = await this.pool.query<{ id: string; parent_id: string | null; title: string; icon: string | null;
       revision: string; updated_at: Date; search_text: string; title_match: boolean }>(`
-      SELECT p.id, p.parent_id, p.title, p.revision::text AS revision, p.updated_at, p.search_text,
+      SELECT p.id, p.parent_id, p.title, p.icon, p.revision::text AS revision, p.updated_at, p.search_text,
         (position(lower($3) in lower(p.title)) > 0) AS title_match
       FROM pages p
       JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
@@ -246,7 +253,7 @@ export class PgPageRepository {
       ORDER BY title_match DESC, p.updated_at DESC, p.id
       LIMIT $4
     `, [workspaceId, actorId, phrase, limit + 1]);
-    return { results: result.rows.slice(0, limit).map(row => ({ pageId: row.id, title: row.title,
+    return { results: result.rows.slice(0, limit).map(row => ({ pageId: row.id, title: row.title, icon: row.icon ?? null,
       parentId: row.parent_id, revision: row.revision, updatedAt: row.updated_at.toISOString(),
       snippet: searchSnippet(row.search_text, phrase), matchField: row.title_match ? 'title' as const : 'content' as const })),
     truncated: result.rows.length > limit };
@@ -331,10 +338,11 @@ export class PgPageRepository {
         if (!parent.rows[0]) throw new PageError(422, 'PAGE_TREE_INVALID');
       }
       const result = await client.query<PageRow>(`
-        INSERT INTO pages (id, workspace_id, parent_id, title, content_json, content_schema_version, search_text)
-        VALUES ($1, $2, $3, $4, $5::jsonb, 1, $6)
+        INSERT INTO pages (id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, search_text)
+        VALUES ($1, $2, $3, $4, $7, $8, $5::jsonb, 1, $6)
         RETURNING ${pageColumns}
-      `, [randomUUID(), workspaceId, body.parentId, body.title, JSON.stringify(body.content), extractSearchText(body.content)]);
+      `, [randomUUID(), workspaceId, body.parentId, body.title, JSON.stringify(body.content),
+        extractSearchText(body.content), body.icon ?? null, body.cover ?? null]);
       await this.snapshot(client, workspaceId, [result.rows[0]!.id], actorId, 'create');
       return { statusCode: 201, body: pageFromRow(result.rows[0]!) };
     });
@@ -370,15 +378,18 @@ export class PgPageRepository {
       if (body.content) await this.validateAttachments(client, workspaceId, body.content);
       const parentId = body.parentId === undefined ? row.parent_id : body.parentId;
       if (parentId !== null && parentId !== row.parent_id) await this.validateParent(client, workspaceId, pageId, parentId);
+      const icon = body.icon === undefined ? row.icon : body.icon;
+      const cover = body.cover === undefined ? row.cover : body.cover;
 
       const result = await client.query<PageRow>(`
         UPDATE pages SET title = $3, parent_id = $4, content_json = $5::jsonb,
-          content_schema_version = 1, search_text = $7, revision = revision + 1, updated_at = now()
+          content_schema_version = 1, search_text = $7, icon = $8, cover = $9,
+          revision = revision + 1, updated_at = now()
         WHERE workspace_id = $1 AND id = $2 AND revision = $6::bigint AND deleted_at IS NULL
         RETURNING ${pageColumns}
       `, [workspaceId, pageId, body.title ?? row.title, parentId,
         JSON.stringify(body.content ?? row.content_json), body.expectedRevision,
-        body.content ? extractSearchText(body.content) : extractSearchText(row.content_json)]);
+        body.content ? extractSearchText(body.content) : extractSearchText(row.content_json), icon, cover]);
       if (!result.rows[0]) throw new PageError(409, 'REVISION_CONFLICT');
       await this.snapshot(client, workspaceId, [pageId], actorId, 'update');
       return { statusCode: 200, body: pageFromRow(result.rows[0]) };
@@ -476,12 +487,78 @@ export class PgPageRepository {
       if (!version) throw new PageError(404, 'NOT_FOUND');
       const content = validateDocumentContent(version.content_json);
       await this.validateAttachments(client, workspaceId, content);
+      // Restore only title/body; the current icon, cover and tree position are kept.
       const result = await client.query<PageRow>(`UPDATE pages SET title = $3, content_json = $4::jsonb,
         content_schema_version = 1, search_text = $5, revision = revision + 1, updated_at = now()
         WHERE workspace_id = $1 AND id = $2 RETURNING ${pageColumns}`,
       [workspaceId, pageId, version.title, JSON.stringify(content), extractSearchText(content)]);
       await this.snapshot(client, workspaceId, [pageId], actorId, 'restore-version');
       return { statusCode: 200, body: pageFromRow(result.rows[0]!) };
+    });
+  }
+
+  /* ================= favorites =================
+     Personal preference data: idempotent writes, no mutation receipts,
+     no revision bump and no page_versions rows. */
+
+  private async workspaceLock<T>(workspaceId: string, actorId: string,
+    action: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    let transactionOpen = false;
+    try {
+      await client.query('BEGIN');
+      transactionOpen = true;
+      const membership = await client.query<{ role: string }>(`
+        SELECT m.role FROM workspaces w
+        JOIN workspace_memberships m ON m.workspace_id = w.id AND m.user_id = $2
+        WHERE w.id = $1 FOR UPDATE OF w
+      `, [workspaceId, actorId]);
+      if (!membership.rows[0]) throw new PageError(404, 'NOT_FOUND');
+      if (membership.rows[0].role === 'viewer') throw new PageError(403, 'FORBIDDEN');
+      const result = await action(client);
+      await client.query('COMMIT');
+      transactionOpen = false;
+      return result;
+    } catch (error) {
+      if (transactionOpen) {
+        try { await client.query('ROLLBACK'); } catch { /* Preserve the original write error. */ }
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async favorites(workspaceId: string, actorId: string): Promise<FavoriteListResponse> {
+    const result = await this.pool.query<{ page_id: string }>(`
+      SELECT f.page_id FROM page_favorites f
+      JOIN workspace_memberships m ON m.workspace_id = f.workspace_id AND m.user_id = $2 AND m.user_id = f.user_id
+      JOIN pages p ON p.workspace_id = f.workspace_id AND p.id = f.page_id AND p.deleted_at IS NULL
+      WHERE f.workspace_id = $1 AND f.user_id = $2
+      ORDER BY f.created_at, f.page_id
+    `, [workspaceId, actorId]);
+    return { pageIds: result.rows.map(row => row.page_id) };
+  }
+
+  async favoriteAdd(workspaceId: string, actorId: string, pageId: string): Promise<void> {
+    await this.workspaceLock(workspaceId, actorId, async (client) => {
+      const page = await client.query(
+        'SELECT 1 FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL', [workspaceId, pageId]);
+      if (!page.rows[0]) throw new PageError(404, 'NOT_FOUND');
+      const count = await client.query<{ n: number }>(
+        'SELECT count(*)::int AS n FROM page_favorites WHERE workspace_id = $1 AND user_id = $2', [workspaceId, actorId]);
+      if ((count.rows[0]?.n ?? 0) >= 200) throw new PageError(409, 'FAVORITE_LIMIT');
+      await client.query(
+        'INSERT INTO page_favorites (workspace_id, user_id, page_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [workspaceId, actorId, pageId]);
+    });
+  }
+
+  async favoriteRemove(workspaceId: string, actorId: string, pageId: string): Promise<void> {
+    await this.workspaceLock(workspaceId, actorId, async (client) => {
+      await client.query(
+        'DELETE FROM page_favorites WHERE workspace_id = $1 AND user_id = $2 AND page_id = $3',
+        [workspaceId, actorId, pageId]);
     });
   }
 }

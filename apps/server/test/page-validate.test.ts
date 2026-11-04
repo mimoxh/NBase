@@ -69,3 +69,33 @@ test('rejects excessive content size', () => {
   large.editorState.root.children[0]!.children[0]!.text = '字'.repeat(400_000);
   reject(large, 'CONTENT_INVALID');
 });
+
+import { PageFieldError, validatePageCover, validatePageIcon } from '../src/pages/validate.js';
+
+function iconReject(value: unknown) {
+  assert.throws(() => validatePageIcon(value), (error: unknown) => error instanceof PageFieldError);
+}
+
+test('page icon accepts a single emoji grapheme', () => {
+  for (const icon of ['📄', '👨‍👩‍👧‍👦', '🇨🇳', '1️⃣', '👍🏽', '❤️', '#️⃣']) {
+    assert.equal(validatePageIcon(icon), icon, icon);
+  }
+  assert.equal(validatePageIcon(null), null);
+});
+
+test('page icon rejects non-emoji, multi-grapheme and hostile values', () => {
+  for (const bad of ['AB', 'A', 'a', '页', 'x📄', '📄x', '📄📄', ' ', '', '📄 ', '📄\n',
+    '📄\u202e', '\u2066📄', '📄\u0000', 'x'.repeat(33), '📄'.repeat(2), 5, {}, ['📄'], undefined]) {
+    iconReject(bad);
+  }
+});
+
+test('page cover only accepts preset identifiers', () => {
+  assert.equal(validatePageCover(null), null);
+  for (const cover of ['sage', 'ochre', 'slate', 'rose', 'sand', 'sky']) {
+    assert.equal(validatePageCover(cover), cover);
+  }
+  for (const bad of ['beige', 'SAGE', 'https://x', 'sage ', '', 1, {}, ['sage'], undefined]) {
+    assert.throws(() => validatePageCover(bad), (error: unknown) => error instanceof PageFieldError);
+  }
+});

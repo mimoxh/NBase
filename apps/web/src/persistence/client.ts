@@ -1,5 +1,5 @@
 import type {
-  AttachmentMetadata, AuthSessionResponse, CreatePageRequest, PageDocument, PageTreeResponse, SearchResponse,
+  AttachmentMetadata, AuthSessionResponse, CreatePageRequest, FavoriteListResponse, PageDocument, PageTreeResponse, SearchResponse,
   PageSummary, PageHistoryResponse, PageVersion, PageStateRequest, RestorePageVersionRequest,
   TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest,
 } from '@nbase/contracts';
@@ -71,6 +71,12 @@ export const pageClient = {
   search: (workspaceId: string, phrase: string, signal?: AbortSignal) =>
     request<SearchResponse>(`${workspacePath(workspaceId)}/search?q=${encodeURIComponent(phrase)}&limit=30`,
       'GET', undefined, undefined, signal),
+  favorites: (workspaceId: string, signal?: AbortSignal) =>
+    request<FavoriteListResponse>(`${workspacePath(workspaceId)}/favorites`, 'GET', undefined, undefined, signal),
+  addFavorite: (workspaceId: string, pageId: string, csrfToken: string) =>
+    request<void>(`${workspacePath(workspaceId)}/favorites/${encodeURIComponent(pageId)}`, 'PUT', {}, csrfToken),
+  removeFavorite: (workspaceId: string, pageId: string, csrfToken: string) =>
+    request<void>(`${workspacePath(workspaceId)}/favorites/${encodeURIComponent(pageId)}`, 'DELETE', {}, csrfToken),
   history: (workspaceId: string, pageId: string, before?: string, signal?: AbortSignal) =>
     request<PageHistoryResponse>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}/history?limit=30${before ? `&beforeRevision=${encodeURIComponent(before)}` : ''}`,
       'GET', undefined, undefined, signal),

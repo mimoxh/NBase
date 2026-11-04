@@ -1,0 +1,37 @@
+{
+  "type": "design",
+  "designSystems": [],
+  "primaryDesignSystem": null,
+  "assets": {
+    "Workspace": {
+      "versions": [
+        {
+          "path": "Workspace.html",
+          "createdAt": "2026-11-03T15:39:32.089Z",
+          "status": "needs-review",
+          "subtitle": "Notion 家族三方向 · 交互原型",
+          "viewport": {
+            "width": 1440,
+            "height": 900
+          }
+        }
+      ]
+    },
+    "Compare Directions": {
+      "versions": [
+        {
+          "path": "Compare Directions.html",
+          "createdAt": "2026-11-03T15:39:32.174Z",
+          "status": "needs-review",
+          "subtitle": "Notion 家族三方向 · 交互原型",
+          "viewport": {
+            "width": 1440,
+            "height": 900
+          }
+        }
+      ]
+    }
+  },
+  "createdAt": "2026-11-03T15:39:32.090Z",
+  "updatedAt": "2026-11-04T03:55:13.938Z"
+}

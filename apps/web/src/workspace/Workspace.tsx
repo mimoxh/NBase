@@ -1,53 +1,166 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ChangeEvent, type ReactNode } from 'react';
-import { getHealth } from '../api';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ChangeEvent } from 'react';
+import type { PageCoverId, PageSummary } from '@nbase/contracts';
 import { DocumentEditor } from '../editor/DocumentEditor';
 import { assessMarkdown, createContentFromMarkdown } from '../editor/markdown';
 import type { DocumentEditorHandle, EditorSnapshot } from '../editor/types';
-import { Icon, type IconName } from '../components/Icon';
+import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { initialWorkspace } from './fixtures';
-import { ancestors, canMove, descendants, workspaceReducer, type Collection, type Page } from './model';
+import { ancestors, canMove, descendants, workspaceReducer, type Page } from './model';
+import { useTheme } from '../shell/theme';
+import { Sidebar } from '../shell/Sidebar';
+import { Topbar } from '../shell/Topbar';
+import { PageHeader } from '../shell/PageHeader';
+import { Toc } from '../shell/Toc';
+import { Toast } from '../shell/Toast';
+import { NoticeBar } from '../shell/NoticeBar';
+import type { MenuItem } from '../shell/Menu';
+import type { TreeRowActions } from '../shell/PageTree';
+import '../shell/shell.css';
 
-const collectionLabels: Record<Collection, string> = { overview: '工作台', recent: '最近访问', favorites: '我的收藏', trash: '回收站' };
-type Dialog = 'search' | 'settings' | 'source' | 'move' | 'more' | 'delete' | 'import' | null;
-function ActionButton({ label, icon, onClick, active = false }: { label: string; icon: IconName; onClick: () => void; active?: boolean }) {
-  return <button className={`icon-button ${active ? 'active' : ''}`} title={label} aria-label={label} onClick={onClick}><Icon name={icon} /></button>;
-}
+const toSummary = (page: Page): PageSummary => ({
+  id: page.id, workspaceId: 'demo', parentId: page.parentId, title: page.title,
+  icon: page.icon, cover: page.cover, revision: '1', createdAt: '', updatedAt: '',
+});
+
 function download(name: string, text: string) {
   const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
   const link = document.createElement('a'); link.href = url; link.download = `${name.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_') || '未命名页面'}.md`; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-function PageTree({ pages, currentId, onOpen }: { pages: Page[]; currentId: string | null; onOpen: (id: string) => void }) {
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const branch = (parentId: string | null, depth: number): ReactNode => pages.filter(p => !p.deleted && p.parentId === parentId).map(page => {
-    const children = pages.some(p => !p.deleted && p.parentId === page.id);
-    return <div key={page.id}><div className={`tree-row ${currentId === page.id ? 'selected' : ''}`} style={{ paddingLeft: 8 + depth * 15 }}>
-      {children ? <button className={`tree-toggle ${collapsed.has(page.id) ? '' : 'expanded'}`} aria-label={`${collapsed.has(page.id) ? '展开' : '收起'} ${page.title || '未命名页面'}`} aria-expanded={!collapsed.has(page.id)} onClick={() => setCollapsed(previous => { const next = new Set(previous); if (next.has(page.id)) next.delete(page.id); else next.add(page.id); return next; })}><Icon name="chevron" size={13} /></button> : <span className="tree-spacer" />}
-      <button className="tree-page" onClick={() => onOpen(page.id)} aria-current={currentId === page.id ? 'page' : undefined}><Icon name="page" size={16} /><span>{page.title || '未命名页面'}</span>{page.starred && <span className="tree-star">✧</span>}</button>
-    </div>{children && !collapsed.has(page.id) && branch(page.id, depth + 1)}</div>;
-  });
-  return <div className="page-tree">{branch(null, 0)}</div>;
+const escapeRe = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function Mark({ text, query }: { text: string; query: string }) {
+  if (!query) return <>{text}</>;
+  const parts = text.split(new RegExp(`(${escapeRe(query)})`, 'gi'));
+  return <>{parts.map((part, i) => i % 2 ? <mark key={i}>{part}</mark> : part)}</>;
 }
+const snippet = (text: string, query: string) => {
+  const index = text.toLocaleLowerCase().indexOf(query.toLocaleLowerCase());
+  if (index < 0) return text.slice(0, 90);
+  const start = Math.max(0, index - 20), end = Math.min(text.length, index + query.length + 20);
+  return `${start > 0 ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}`;
+};
 
-function SearchDialog({ pages, onOpen, onClose }: { pages: Page[]; onOpen: (id: string) => void; onClose: () => void }) {
+type PalItem =
+  | { kind: 'recent' | 'title' | 'body'; page: Page; snippet?: string }
+  | { kind: 'command'; key: string; icon: string; label: string };
+
+function DemoSearch({ pages, recentIds, onOpen, onCommand, onClose }: {
+  pages: Page[]; recentIds: string[]; onOpen: (id: string) => void;
+  onCommand: (key: string) => void; onClose: () => void;
+}) {
   const [query, setQuery] = useState(''); const [index, setIndex] = useState(0); const composing = useRef(false);
-  const result = pages.filter(page => !page.deleted && `${page.title}\n${page.snapshot?.plainText ?? page.markdown}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-  const active = Math.min(index, Math.max(0, result.length - 1));
-  useEffect(() => { document.getElementById(`search-result-${active}`)?.scrollIntoView({ block: 'nearest' }); }, [active]);
-  return <Modal title="搜索文档" onClose={onClose}><div className="search-field"><Icon name="search" /><input autoFocus aria-label="搜索标题或正文" placeholder="搜索标题或正文…" value={query} onChange={event => { setQuery(event.target.value); setIndex(0); }} onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }} onKeyDown={event => { if (event.nativeEvent.isComposing || event.keyCode === 229 || composing.current) return; if (event.key === 'ArrowDown') { event.preventDefault(); setIndex(Math.min(active + 1, result.length - 1)); } if (event.key === 'ArrowUp') { event.preventDefault(); setIndex(Math.max(0, active - 1)); } if (event.key === 'Enter' && result[active]) { event.preventDefault(); onOpen(result[active].id); } }} /></div>
-    <div className="search-results">{result.length ? result.map((page, i) => <button id={`search-result-${i}`} key={page.id} className={`search-result ${i === active ? 'highlighted' : ''}`} onClick={() => onOpen(page.id)} onMouseEnter={() => setIndex(i)}><Icon name="page" /><span><strong>{page.title || '未命名页面'}</strong><small>{(page.snapshot?.plainText ?? page.markdown).replace(/[#*>`]/g, '').slice(0, 95)}</small></span><Icon name="arrow" size={15} /></button>) : <div className="empty-state">没有找到相关页面，试试其他关键词。</div>}</div><div className="modal-footnote">↑ ↓ 选择 · Enter 打开 · Esc 关闭 · 仅搜索本次会话内容</div>
+  const pathOf = (page: Page) => ancestors(pages, page.id).map(p => p.title || '未命名页面').join(' / ') || '个人空间';
+  const q = query.trim();
+  const titleItems: PalItem[] = []; const bodyItems: PalItem[] = [];
+  if (q) for (const page of pages.filter(p => !p.deleted)) {
+    const body = page.snapshot?.plainText ?? page.markdown;
+    const titleHit = (page.title || '未命名页面').toLocaleLowerCase().includes(q.toLocaleLowerCase());
+    const bodyHit = body.toLocaleLowerCase().includes(q.toLocaleLowerCase());
+    if (titleHit) titleItems.push(bodyHit ? { kind: 'title', page, snippet: snippet(body, q) } : { kind: 'title', page });
+    else if (bodyHit) bodyItems.push({ kind: 'body', page, snippet: snippet(body, q) });
+  }
+  const commands: PalItem[] = [
+    { kind: 'command', key: 'new', icon: 'plus', label: '新建页面' },
+    { kind: 'command', key: 'import', icon: 'upload', label: '导入 Markdown' },
+    { kind: 'command', key: 'trash', icon: 'trash', label: '打开回收站' },
+    { kind: 'command', key: 'theme', icon: 'moon', label: '切换深色模式' },
+  ];
+  const flat: PalItem[] = q ? [...titleItems, ...bodyItems]
+    : [...recentIds.flatMap(id => pages.filter(p => p.id === id && !p.deleted).map(p => ({ kind: 'recent' as const, page: p }))), ...commands];
+  const active = Math.min(index, Math.max(0, flat.length - 1));
+  const row = (item: PalItem, i: number) => {
+    if (item.kind === 'command') return <button key={`c-${item.key}`} className={`nb-pal-item ${i === active ? 'sel' : ''}`}
+      onClick={() => onCommand(item.key)} onMouseEnter={() => setIndex(i)}>
+      <Icon name={item.icon as never} size={15} /><span className="nb-pal-main"><span className="nb-pal-title">{item.label}</span></span></button>;
+    const page = item.page;
+    return <button key={page.id} className={`nb-pal-item ${i === active ? 'sel' : ''}`}
+      onClick={() => onOpen(page.id)} onMouseEnter={() => setIndex(i)}>
+      <span className="nb-page-icon">{page.icon ?? '📄'}</span>
+      <span className="nb-pal-main"><span className="nb-pal-title"><Mark text={page.title || '未命名页面'} query={q} /></span>
+        <span className="nb-pal-path">{pathOf(page)}</span>
+        {item.snippet && <span className="nb-pal-snip"><Mark text={item.snippet} query={q} /></span>}</span></button>;
+  };
+  let i = -1;
+  return <Modal title="搜索" variant="palette" hideHeader onClose={onClose}>
+    <div className="nb-pal-input"><Icon name="search" size={15} />
+      <input autoFocus aria-label="搜索标题或正文" placeholder="搜索标题或正文…" value={query}
+        onChange={event => { setQuery(event.target.value); setIndex(0); }}
+        onCompositionStart={() => { composing.current = true; }} onCompositionEnd={() => { composing.current = false; }}
+        onKeyDown={event => {
+          if (event.nativeEvent.isComposing || event.keyCode === 229 || composing.current) return;
+          if (event.key === 'ArrowDown') { event.preventDefault(); setIndex(Math.min(active + 1, flat.length - 1)); }
+          if (event.key === 'ArrowUp') { event.preventDefault(); setIndex(Math.max(0, active - 1)); }
+          if (event.key === 'Enter' && flat[active]) {
+            event.preventDefault();
+            const item = flat[active];
+            if (item.kind === 'command') onCommand(item.key); else onOpen(item.page.id);
+          }
+        }} /></div>
+    <div className="nb-pal-list">
+      {q && !flat.length && <p className="nb-pal-msg">没有找到相关页面，试试其他关键词。</p>}
+      {!q && flat.filter(f => f.kind === 'recent').length > 0 && <div className="nb-pal-group">最近访问</div>}
+      {!q && flat.filter(f => f.kind === 'recent').map(item => row(item, ++i))}
+      {titleItems.length > 0 && <div className="nb-pal-group">标题</div>}
+      {titleItems.map(item => row(item, ++i))}
+      {bodyItems.length > 0 && <div className="nb-pal-group">正文</div>}
+      {bodyItems.map(item => row(item, ++i))}
+      {!q && <div className="nb-pal-group">命令</div>}
+      {!q && commands.map(item => row(item, ++i))}
+    </div>
+    <div className="modal-footnote">↑ ↓ 选择 · Enter 打开 · Esc 关闭 · 仅搜索本次会话内容</div>
   </Modal>;
 }
 
+function DemoTrash({ pages, onRestore, onClose }: { pages: Page[]; onRestore: (id: string) => void; onClose: () => void }) {
+  const trashed = pages.filter(p => p.deleted);
+  const [filter, setFilter] = useState(''); const [selected, setSelected] = useState<string | null>(trashed[0]?.id ?? null);
+  const visible = trashed.filter(p => (p.title || '未命名页面').toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()));
+  const page = trashed.find(p => p.id === selected) ?? null;
+  const pathOf = (p: Page) => {
+    const parent = pages.find(item => item.id === p.parentId);
+    return parent && !parent.deleted ? `原位置：${[...ancestors(pages, parent.id), parent].map(a => a.title || '未命名页面').join(' / ')}` : '原位置：已不在 · 将恢复到根目录';
+  };
+  return <Modal title="回收站" variant="large" onClose={onClose}>
+    <div className="nb-trash-head"><h2>回收站</h2><p>页面不会自动清理；演示数据在刷新后重置。</p></div>
+    <div className="nb-trash-filter"><input type="text" aria-label="在回收站中搜索" placeholder="在回收站中搜索" value={filter} onChange={event => setFilter(event.target.value)} /></div>
+    <div className="nb-trash-grid">
+      <div className="nb-trash-list" aria-label="回收站页面">
+        {visible.map(p => <button key={p.id} className={`nb-trash-row ${selected === p.id ? 'selected' : ''}`} onClick={() => setSelected(p.id)}>
+          <span className="nb-page-icon">{p.icon ?? '📄'}</span>
+          <span className="nb-trash-main"><strong>{p.title || '未命名页面'}</strong><small>{pathOf(p)}</small></span>
+          {trashed.filter(o => o.id !== p.id && o.deletionRoot === p.deletionRoot).length > 0
+            && <span className="nb-trash-badge">含 {trashed.filter(o => o.id !== p.id && o.deletionRoot === p.deletionRoot).length} 个子页面</span>}
+          <span className="nb-trash-restore" role="button" tabIndex={0}
+            onClick={event => { event.stopPropagation(); onRestore(p.id); }}
+            onKeyDown={event => { if (event.key === 'Enter') { event.stopPropagation(); event.preventDefault(); onRestore(p.id); } }}>恢复</span>
+        </button>)}
+        {!trashed.length && <p className="nb-pal-msg">回收站是空的</p>}
+        {trashed.length > 0 && !visible.length && <p className="nb-pal-msg">没有匹配的页面</p>}
+      </div>
+      <div className="nb-trash-body">
+        {page ? <>
+          <div className="nb-trash-body-head"><h3 style={{ margin: 0 }}>{page.title || '未命名页面'}</h3>
+            <button className="nb-btn nb-btn-primary" onClick={() => onRestore(page.id)}>恢复</button></div>
+          <p className="dialog-description">{pathOf(page)} · 会话内删除</p>
+          <pre className="nb-demo-preview">{(page.snapshot?.plainText ?? page.markdown).slice(0, 800) || '（空页面）'}</pre>
+        </> : <p className="nb-pal-msg">选择左侧页面查看内容</p>}
+      </div>
+    </div>
+  </Modal>;
+}
+
+type Dialog = 'search' | 'source' | 'move' | 'delete' | 'import' | 'trash' | null;
+
 export function WorkspaceApp() {
   const [state, dispatch] = useReducer(workspaceReducer, undefined, initialWorkspace);
+  const [theme, setTheme] = useTheme();
   const [dialog, setDialog] = useState<Dialog>(null);
-  const [readOnly, setReadOnly] = useState(false); const [focusMode, setFocusMode] = useState(false); const [mobileOpen, setMobileOpen] = useState(false);
-  const [theme, setTheme] = useState<'light' | 'paper' | 'dark'>('light'); const [toast, setToast] = useState(''); const [source, setSource] = useState('');
-  const [moveTarget, setMoveTarget] = useState('');
-  const [health, setHealth] = useState('正在检查本机服务…'); const [healthVersion, setHealthVersion] = useState(0);
+  const [readOnly, setReadOnly] = useState(false); const [mobileOpen, setMobileOpen] = useState(false);
+  const [sidebarHidden, setSidebarHidden] = useState(() => { try { return localStorage.getItem('nbase.sidebar') === 'collapsed'; } catch { return false; } });
+  const [toast, setToast] = useState(''); const [source, setSource] = useState('');
+  const [moveTarget, setMoveTarget] = useState(''); const [dialogFor, setDialogFor] = useState<string | null>(null);
   const [pendingImport, setPendingImport] = useState<{ title: string; text: string; warnings: string[] } | null>(null);
   const [importAccepted, setImportAccepted] = useState(false);
   const editorRef = useRef<DocumentEditorHandle>(null); const fileRef = useRef<HTMLInputElement>(null); const mainRef = useRef<HTMLElement>(null);
@@ -65,16 +178,29 @@ export function WorkspaceApp() {
     return snapshot;
   }, []);
   const openPage = useCallback((id: string) => { flush(); dispatch({ type: 'open', id }); setDialog(null); setMobileOpen(false); mainRef.current?.scrollTo({ top: 0 }); }, [flush]);
-  const openCollection = (view: Collection) => { flush(); dispatch({ type: 'view', view }); setFocusMode(false); setMobileOpen(false); mainRef.current?.scrollTo({ top: 0 }); };
   const newPage = (parentId: string | null = null) => {
-    flush(); dispatch({ type: 'create', page: { id: crypto.randomUUID(), title: '未命名页面', parentId, markdown: '', starred: false, deleted: false, dirty: true } });
+    flush(); dispatch({ type: 'create', page: { id: crypto.randomUUID(), title: '未命名页面', parentId, markdown: '', starred: false, deleted: false, dirty: true, icon: null, cover: null } });
     setDialog(null); setReadOnly(false); setMobileOpen(false); notice('已在当前会话中新建页面，请下载以保留内容。');
     requestAnimationFrame(() => { const title = document.querySelector<HTMLInputElement>('[aria-label="页面标题"]'); title?.focus(); title?.select(); });
   };
-  useEffect(() => { const controller = new AbortController(); setHealth('正在检查本机服务…'); getHealth(controller.signal).then(result => setHealth(result.persistence === 'page-api' ? '服务进程已连接 · 页面 API 已配置，当前界面仍为会话演示' : result.persistence === 'accounts-only' ? '服务进程已连接 · 账号存储已配置，文档仍为会话演示' : '服务进程已连接 · 文档持久化尚未配置')).catch(error => { if (!controller.signal.aborted) setHealth(error instanceof Error ? error.message : '服务暂时无法连接'); }); return () => controller.abort(); }, [healthVersion]);
+  const toggleSidebar = () => {
+    if (window.innerWidth <= 720) { setMobileOpen(value => !value); return; }
+    setSidebarHidden(previous => { try { localStorage.setItem('nbase.sidebar', previous ? '' : 'collapsed'); } catch { /* best effort */ } return !previous; });
+  };
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(''), 5000); return () => clearTimeout(timer); }, [toast]);
-  useEffect(() => { const handler = (event: KeyboardEvent) => { if (event.isComposing || event.keyCode === 229) return; if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); flush(); setDialog('search'); } if (event.key === 'Escape') { setMobileOpen(false); setFocusMode(false); } }; window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler); }, [flush]);
-  useEffect(() => { const handler = (event: BeforeUnloadEvent) => { if (stateRef.current.pages.some(page => page.dirty)) { event.preventDefault(); event.returnValue = ''; } }; window.addEventListener('beforeunload', handler); return () => window.removeEventListener('beforeunload', handler); }, []);
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); flush(); setDialog('search'); }
+      if ((event.ctrlKey || event.metaKey) && event.key === '\\') { event.preventDefault(); toggleSidebar(); }
+      if (event.key === 'Escape') setMobileOpen(false);
+    };
+    window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
+  }, [flush]);
+  useEffect(() => {
+    const handler = (event: BeforeUnloadEvent) => { if (stateRef.current.pages.some(page => page.dirty)) { event.preventDefault(); event.returnValue = ''; } };
+    window.addEventListener('beforeunload', handler); return () => window.removeEventListener('beforeunload', handler);
+  }, []);
   const currentMarkdown = () => current ? `# ${current.title || '未命名页面'}\n\n${flush()?.markdown ?? current.markdown}` : '';
   const exportCurrent = () => { if (current) { download(current.title, currentMarkdown()); notice('已发起 Markdown 下载，请检查浏览器下载记录。'); } };
   const importFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -85,49 +211,108 @@ export function WorkspaceApp() {
   };
   const completeImport = () => {
     if (!pendingImport || !importAccepted) return;
-    try { const content = createContentFromMarkdown(pendingImport.text); flush(); dispatch({ type: 'create', page: { id: crypto.randomUUID(), title: pendingImport.title, markdown: pendingImport.text, originalMarkdown: pendingImport.text, snapshot: { content, markdown: pendingImport.text, plainText: pendingImport.text, outline: [] }, parentId: null, starred: false, deleted: false, dirty: true } }); setDialog(null); setReadOnly(false); setPendingImport(null); notice('已转换为会话内页面，原始 Markdown 可在页面菜单下载。'); } catch { notice('转换失败，原始文件未被修改。'); }
+    try {
+      const content = createContentFromMarkdown(pendingImport.text); flush();
+      dispatch({ type: 'create', page: { id: crypto.randomUUID(), title: pendingImport.title, markdown: pendingImport.text, originalMarkdown: pendingImport.text, snapshot: { content, markdown: pendingImport.text, plainText: pendingImport.text, outline: [] }, parentId: null, starred: false, deleted: false, dirty: true, icon: null, cover: null } });
+      setDialog(null); setReadOnly(false); setPendingImport(null); notice('已转换为会话内页面，原始 Markdown 可在页面菜单下载。');
+    } catch { notice('转换失败，原始文件未被修改。'); }
   };
-  const collectionPages = useMemo(() => {
-    if (state.view === 'trash') return state.pages.filter(p => p.deleted);
-    if (state.view === 'favorites') return state.pages.filter(p => !p.deleted && p.starred);
-    if (state.view === 'recent') return state.recent.flatMap(id => state.pages.filter(p => p.id === id && !p.deleted));
-    return state.pages.filter(p => !p.deleted);
-  }, [state.pages, state.recent, state.view]);
+  const onCommand = (key: string) => {
+    setDialog(null);
+    if (key === 'new') newPage();
+    else if (key === 'import') fileRef.current?.click();
+    else if (key === 'trash') setDialog('trash');
+    else if (key === 'theme') setTheme(theme === 'dark' ? 'light' : 'dark');
+  };
+  const summaries = useMemo(() => state.pages.filter(p => !p.deleted).map(toSummary), [state.pages]);
+  const favoriteSet = useMemo(() => new Set(state.pages.filter(p => p.starred && !p.deleted).map(p => p.id)), [state.pages]);
+  const favoritePages = useMemo(() => state.pages.filter(p => p.starred && !p.deleted).map(toSummary), [state.pages]);
+  const recentPages = useMemo(() => state.recent.slice(0, 5).flatMap(id => state.pages.filter(p => p.id === id && !p.deleted).map(toSummary)), [state.pages, state.recent]);
+  const breadcrumbs = useMemo(() => (current ? ancestors(state.pages, current.id).map(toSummary) : []), [state.pages, current]);
+  const treeActions: TreeRowActions = useMemo(() => ({
+    onOpen: openPage,
+    onAddChild: (id: string) => newPage(id),
+    onFavorite: (id: string) => dispatch({ type: 'star', id }),
+    onMove: (id: string) => { const page = state.pages.find(p => p.id === id); setMoveTarget(page?.parentId ?? ''); setDialogFor(id); setDialog('move'); },
+    onTrash: (id: string) => { setDialogFor(id); setDialog('delete'); },
+  }), [openPage, state.pages]);
+  const target = dialogFor ? state.pages.find(p => p.id === dialogFor) : undefined;
+  const pageMenuItems: (MenuItem | 'divider')[] = current ? [
+    { key: 'mode', label: readOnly ? '切换到编辑' : '切换到阅读', icon: 'page', onSelect: () => { flush(); setReadOnly(!readOnly); } },
+    { key: 'source', label: '查看 Markdown 源码', icon: 'code', onSelect: () => { setSource(currentMarkdown()); setDialog('source'); } },
+    { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
+    ...(current.originalMarkdown !== undefined ? [{ key: 'raw', label: '下载导入原文', icon: 'download' as const, onSelect: () => download(`${current.title}-原始文件`, current.originalMarkdown ?? '') }] : []),
+    'divider',
+    { key: 'child', label: '添加子页面', icon: 'plus', onSelect: () => newPage(current.id) },
+    { key: 'move', label: '移动到…', icon: 'folder', onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialogFor(current.id); setDialog('move'); } },
+    'divider',
+    { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, onSelect: () => { setDialogFor(current.id); setDialog('delete'); } },
+  ] : [];
+  const subtreeCount = target ? state.pages.filter(p => !p.deleted && p.id !== target.id && descendants(state.pages, target.id).has(p.id)).length : 0;
 
-  return <div className={`workspace theme-${theme} ${focusMode ? 'focus-mode' : ''}`}>
-    {mobileOpen && <button className="mobile-backdrop" aria-label="收起导航" onClick={() => setMobileOpen(false)} />}
-    <aside className={`sidebar ${mobileOpen ? 'mobile-open' : ''}`} aria-label="工作台导航">
-      <div className="brand-row"><span className="brand-mark">N</span><span><strong>NBase</strong><small>我的个人空间</small></span><ActionButton label="关闭导航" icon="close" onClick={() => setMobileOpen(false)} /></div>
-      <div className="sidebar-search"><button onClick={() => { flush(); setDialog('search'); }}><Icon name="search" /><span>搜索</span><kbd>Ctrl K</kbd></button><ActionButton label="新建页面" icon="plus" onClick={() => newPage()} /></div>
-      <nav className="main-nav">{([['overview', 'home'], ['recent', 'clock'], ['favorites', 'star']] as const).map(([view, icon]) => <button key={view} className={state.view === view ? 'selected' : ''} onClick={() => openCollection(view)}><Icon name={icon} /><span>{collectionLabels[view]}</span>{view === 'favorites' && <small>{state.pages.filter(p => p.starred && !p.deleted).length}</small>}</button>)}</nav>
-      <div className="tree-heading"><span>个人页面</span><ActionButton label="添加根页面" icon="plus" onClick={() => newPage()} /></div>
-      <div className="tree-scroll"><PageTree pages={state.pages} currentId={isDocument ? state.currentId : null} onOpen={openPage} /></div>
-      <div className="sidebar-footer"><button className={state.view === 'trash' ? 'selected' : ''} onClick={() => openCollection('trash')}><Icon name="trash" /><span>回收站</span><small>{state.pages.filter(p => p.deleted).length}</small></button><button onClick={() => setDialog('settings')}><Icon name="settings" /><span>设置与外观</span></button><div className="session-label"><span />演示模式 · 仅当前会话</div></div>
-    </aside>
-    <section className="main-panel">
-      <header className="topbar"><div className="breadcrumb"><span className="mobile-menu"><ActionButton label="打开导航" icon="menu" onClick={() => setMobileOpen(true)} /></span>{focusMode && <ActionButton label="退出专注模式" icon="focus" onClick={() => setFocusMode(false)} />}<button onClick={() => openCollection('overview')}>个人空间</button><span>/</span>{isDocument ? <>{ancestors(state.pages, current.id).map(page => <span className="ancestor" key={page.id}><button onClick={() => openPage(page.id)}>{page.title || '未命名页面'}</button><span>/</span></span>)}<strong>{current.title || '未命名页面'}</strong></> : <strong>{collectionLabels[state.view as Collection]}</strong>}</div>
-        {isDocument && <div className="page-actions"><span className="draft-status">{current.dirty ? '本页会话草稿' : '示例文档'}</span><div className="mode-toggle" aria-label="页面模式"><button aria-pressed={!readOnly} className={!readOnly ? 'active' : ''} onClick={() => { flush(); setReadOnly(false); }}>编辑</button><button aria-pressed={readOnly} className={readOnly ? 'active' : ''} onClick={() => { flush(); setReadOnly(true); }}>阅读</button></div><ActionButton label="查看 Markdown" icon="code" onClick={() => { setSource(currentMarkdown()); setDialog('source'); }} /><ActionButton label={current.starred ? '取消收藏' : '收藏页面'} icon="star" active={current.starred} onClick={() => dispatch({ type: 'star', id: current.id })} /><ActionButton label={focusMode ? '退出专注模式' : '专注模式'} icon="focus" active={focusMode} onClick={() => setFocusMode(!focusMode)} /><ActionButton label="页面菜单" icon="more" onClick={() => setDialog('more')} /></div>}
-      </header>
-      <div className="session-banner"><span className="status-dot" />演示模式 · 内容仅保留在当前会话，刷新后重置。<button onClick={isDocument ? exportCurrent : () => notice('打开需要保留的页面，再从页面菜单下载 Markdown。')}>{isDocument ? '下载此页' : '如何保留内容'}<Icon name="download" size={13} /></button></div>
-      <main ref={mainRef} className="main-scroll" tabIndex={-1}>
-        {isDocument ? <div className="document-layout"><article className="document-paper"><div className="document-heading"><span className="document-eyebrow"><Icon name="page" size={15} />{readOnly ? '阅读模式' : '个人文档'}</span>{readOnly ? <h1>{current.title || '未命名页面'}</h1> : <input className="page-title" aria-label="页面标题" value={current.title} placeholder="未命名页面" onChange={event => dispatch({ type: 'rename', id: current.id, title: event.target.value })} />}<div className="document-meta"><span className="avatar">我</span><span>我的空间</span><span>·</span><span>{current.snapshot?.plainText.length ?? current.markdown.length} 字符</span><span>·</span><span>会话内示例</span></div></div>
-          <DocumentEditor key={current.id} ref={editorRef} documentId={current.id} initialContent={current.snapshot?.content} initialMarkdown={current.markdown} readOnly={readOnly} onChange={onChange} onReady={onReady} onNotice={notice} />
-          <div className="document-end"><span />写下值得留下的想法<span /></div>
-        </article><aside className="outline" aria-label="页面目录"><div>本页目录</div>{current.snapshot?.outline.length ? current.snapshot.outline.map(item => <button key={item.id} style={{ paddingLeft: (item.level - 1) * 10 }} onClick={() => document.getElementById(item.id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>{item.text}</button>) : <small>添加标题后显示目录</small>}</aside></div> : <section className="collection"><div className="collection-eyebrow">我的个人空间</div><div className="collection-heading"><div><h1>{collectionLabels[state.view as Collection]}</h1><p>{state.view === 'overview' ? '给想法一个位置，让知识慢慢生长。' : state.view === 'recent' ? '继续上一次的思考。按本次会话访问顺序排列。' : state.view === 'favorites' ? '把经常回看的内容放在手边。' : '删除的页面暂时留在这里，可以恢复。刷新后演示数据会重置。'}</p></div>{state.view !== 'trash' && <button className="primary-button" onClick={() => newPage()}><Icon name="plus" size={16} />新建页面</button>}</div>
-          {state.view === 'overview' && <div className="overview-note"><Icon name="folder" size={25} /><div><strong>从一页开始，建立自己的知识库</strong><p>在侧边栏整理页面，使用搜索找到内容。此阶段的修改仅保留在当前会话。</p></div><button className="quiet-button" onClick={() => fileRef.current?.click()}><Icon name="upload" size={16} />导入 Markdown</button></div>}
-          <div className="list-heading"><span>{state.view === 'trash' ? '已删除页面' : '页面'}</span><span>{collectionPages.length} 篇</span></div>
-          {collectionPages.length ? <div className="document-list">{collectionPages.map(page => <div key={page.id} className="document-row"><Icon name="page" size={20} /><button className="document-row-main" disabled={page.deleted} onClick={() => openPage(page.id)}><strong>{page.title || '未命名页面'}</strong><small>{ancestors(state.pages, page.id).map(p => p.title || '未命名页面').join(' / ') || '个人空间'}{page.dirty ? ' · 会话内修改' : ' · 示例'}</small></button>{page.deleted ? <button className="quiet-button" onClick={() => { dispatch({ type: 'restore', id: page.id }); notice('已在当前会话恢复页面及本次删除的子页面。'); }}><Icon name="restore" size={16} />恢复</button> : <ActionButton label={`${page.starred ? '取消收藏' : '收藏'} ${page.title}`} icon="star" active={page.starred} onClick={() => dispatch({ type: 'star', id: page.id })} />}</div>)}</div> : <div className="empty-state"><Icon name={state.view === 'trash' ? 'trash' : 'page'} size={32} /><h3>{state.view === 'trash' ? '回收站是空的' : '这里还没有页面'}</h3><p>{state.view === 'favorites' ? '点击页面右上角的星标，将它加入收藏。' : '你的页面会出现在这里。'}</p></div>}
+  return <div className={`nb-app demo-workspace ${sidebarHidden ? 'nb-sidebar-collapsed' : ''}`}>
+    <Sidebar workspaceName="演示空间" loginName="演示会话" accountLabel="演示模式 · 未登录" theme={theme} onTheme={setTheme}
+      onLogout={() => notice('演示模式没有账号；刷新页面即可重置。')}
+      onSearch={() => { flush(); setDialog('search'); }} onTrash={() => setDialog('trash')}
+      onNewPage={() => newPage()} onImport={() => fileRef.current?.click()}
+      createBusy={false} pages={summaries} activeId={isDocument ? current.id : null}
+      favorites={favoriteSet} favoritePages={favoritePages} recentPages={recentPages}
+      treeLoading={false} treeError="" onTreeRetry={() => undefined}
+      treeActions={treeActions} open={mobileOpen} onClose={() => setMobileOpen(false)} />
+    <section className="nb-main">
+      {isDocument && <Topbar status={{ tone: 'idle', text: '' }} hasDraft={false} demo
+        onRetrySave={() => undefined} onDownload={exportCurrent}
+        breadcrumbs={breadcrumbs} currentTitle={current.title} updatedAt={null}
+        favorite={current.starred} onFavorite={() => dispatch({ type: 'star', id: current.id })}
+        onSidebarToggle={toggleSidebar}
+        onOpenBreadcrumb={id => { if (id) openPage(id); else { flush(); dispatch({ type: 'view', view: 'overview' }); } }}
+        readOnly={readOnly} onToggleReadOnly={() => { flush(); setReadOnly(!readOnly); }}
+        onHistory={() => undefined} hideHistory disabled={false} pageMenuItems={pageMenuItems} />}
+      {!isDocument && <header className="nb-topbar">
+        <button className="icon-button nb-sidebar-toggle" aria-label="切换导航" onClick={toggleSidebar}><Icon name="sidebar" size={17} /></button>
+        <nav className="nb-crumbs" aria-label="页面位置"><strong>工作台</strong></nav></header>}
+      <NoticeBar tone="info">演示模式 · 内容仅保留在当前会话，刷新后重置
+        <button onClick={isDocument ? exportCurrent : () => notice('打开需要保留的页面，再从页面菜单下载 Markdown。')}>{isDocument ? '下载此页' : '如何保留内容'}</button></NoticeBar>
+      <main ref={mainRef} className="nb-scroll" tabIndex={-1}>
+        {isDocument ? <>
+          <PageHeader icon={current.icon} cover={current.cover} editable={!readOnly}
+            onIcon={icon => dispatch({ type: 'icon', id: current.id, icon })}
+            onCover={(cover: PageCoverId | null) => dispatch({ type: 'cover', id: current.id, cover })}
+            title={readOnly ? <div className="nb-doc-title-static">{current.title || '未命名页面'}</div>
+              : <input className="nb-doc-title page-title" aria-label="页面标题" value={current.title} placeholder="未命名页面"
+                onChange={event => dispatch({ type: 'rename', id: current.id, title: event.target.value })} />} />
+          <div className="nb-doc-body">
+            <DocumentEditor key={current.id} ref={editorRef} documentId={current.id}
+              initialContent={current.snapshot?.content} initialMarkdown={current.markdown}
+              readOnly={readOnly} onChange={onChange} onReady={onReady} onNotice={notice} />
+          </div>
+          <Toc outline={current.snapshot?.outline ?? []} />
+        </> : <section className="nb-home">
+          {summaries.length ? <>
+            <div className="nb-home-eyebrow">演示空间</div><h1>最近编辑</h1>
+            <div className="nb-home-list">{recentPages.map(page => <button key={page.id} className="nb-home-row" onClick={() => openPage(page.id)}>
+              <span className="nb-page-icon">{page.icon ?? '📄'}</span><span>
+                <strong>{page.title || '未命名页面'}</strong>
+                <small>{ancestors(state.pages, page.id).map(p => p.title || '未命名页面').join(' / ') || '个人空间'}</small></span>
+            </button>)}</div>
+            <div style={{ marginTop: 22 }}><button className="nb-btn nb-btn-primary" onClick={() => newPage()}><Icon name="plus" size={15} /> 新建页面</button></div>
+          </> : <div className="nb-empty"><div>
+            <div className="nb-empty-emoji">📝</div>
+            <h1>开始写第一篇页面</h1>
+            <p>页面可以层层嵌套，组织你的笔记、计划和资料。</p>
+            <div className="nb-empty-actions">
+              <button className="nb-btn nb-btn-primary" onClick={() => newPage()}>新建页面</button>
+              <button className="nb-btn" onClick={() => fileRef.current?.click()}>导入 Markdown</button></div></div></div>}
         </section>}
       </main>
     </section>
     <input ref={fileRef} type="file" accept=".md,text/markdown" className="visually-hidden" aria-label="选择 Markdown 文件" onChange={event => { void importFile(event); }} />
-    {toast && <div className="toast" role="status"><Icon name="check" size={16} /><span>{toast}</span><ActionButton label="关闭提示" icon="close" onClick={() => setToast('')} /></div>}
-    {dialog === 'search' && <SearchDialog pages={state.pages} onOpen={openPage} onClose={() => setDialog(null)} />}
-    {dialog === 'source' && <Modal title="Markdown 源码" wide onClose={() => setDialog(null)}><p className="dialog-description">只读视图，来自当前编辑器内容。转换可能不保留所有扩展语法。</p><textarea className="source-view" aria-label="Markdown 源码，只读" readOnly value={source} spellCheck={false} /><div className="dialog-actions"><button className="quiet-button" onClick={() => { void navigator.clipboard.writeText(source).then(() => notice('已复制 Markdown。')).catch(() => notice('剪贴板不可用，请在源码框中手动选择并复制。')); }}>复制源码</button><button className="primary-button" onClick={() => current && download(current.title, source)}><Icon name="download" size={16} />下载 Markdown</button></div></Modal>}
-    {dialog === 'more' && current && <Modal title="页面操作" onClose={() => setDialog(null)}><div className="action-list"><button onClick={() => newPage(current.id)}><Icon name="plus" />添加子页面</button><button onClick={() => { setMoveTarget(current.parentId ?? ''); setDialog('move'); }}><Icon name="folder" />移动页面</button><button onClick={() => { exportCurrent(); setDialog(null); }}><Icon name="download" />下载 Markdown</button>{current.originalMarkdown !== undefined && <button onClick={() => download(`${current.title}-原始文件`, current.originalMarkdown ?? '')}><Icon name="download" />下载导入原文</button>}<button onClick={() => { setDialog(null); fileRef.current?.click(); }}><Icon name="upload" />导入 Markdown 为新页面</button><button className="danger" onClick={() => setDialog('delete')}><Icon name="trash" />移到回收站</button></div></Modal>}
-    {dialog === 'move' && current && <Modal title="移动页面" onClose={() => setDialog(null)}><p className="dialog-description">选择「{current.title || '未命名页面'}」的新位置。子页面会一起移动。</p><label className="field-label" htmlFor="move-parent">移动到</label><select id="move-parent" className="select-field" value={moveTarget} onChange={event => setMoveTarget(event.target.value)}><option value="">个人空间（根目录）</option>{state.pages.filter(page => canMove(state.pages, current.id, page.id)).map(page => <option key={page.id} value={page.id}>{[...ancestors(state.pages, page.id), page].map(p => p.title || '未命名页面').join(' / ')}</option>)}</select><div className="dialog-actions"><button className="quiet-button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" onClick={() => { dispatch({ type: 'move', id: current.id, parentId: moveTarget || null }); setDialog(null); notice('已在当前会话移动页面。'); }}>移动</button></div></Modal>}
-    {dialog === 'delete' && current && <Modal title="移到回收站" onClose={() => setDialog(null)}><p className="dialog-description">「{current.title || '未命名页面'}」及其 {state.pages.filter(p => !p.deleted && p.id !== current.id && descendants(state.pages, current.id).has(p.id)).length} 个子页面将移到回收站，你可以在当前会话内恢复。</p><div className="dialog-actions"><button className="quiet-button" onClick={() => setDialog(null)}>取消</button><button className="danger-button" onClick={() => { flush(); dispatch({ type: 'delete', id: current.id }); setFocusMode(false); setDialog(null); }}>移到回收站</button></div></Modal>}
-    {dialog === 'settings' && <Modal title="设置与外观" onClose={() => setDialog(null)}><div className="settings-section"><h3>让工作台更合心意</h3><p>外观设置仅在本次会话生效。</p><div className="theme-options">{(['light', 'paper', 'dark'] as const).map(value => <button key={value} aria-pressed={theme === value} className={theme === value ? 'chosen' : ''} onClick={() => setTheme(value)}><span className={`theme-preview preview-${value}`}><i /><i /><i /></span>{value === 'light' ? '浅色' : value === 'paper' ? '纸张' : '深色'}{theme === value && <Icon name="check" size={15} />}</button>)}</div></div><div className="settings-section"><h3>个人空间</h3><p>当前为个人使用的界面演示。账号、权限、协作和持久化尚未接入。</p></div><div className="settings-section"><h3>服务连接</h3><p role="status">{health}</p><button className="quiet-button" onClick={() => setHealthVersion(value => value + 1)}>重新检查</button><small>这里只检查服务进程，不代表文档已写入存储。</small></div><div className="settings-section"><h3>快捷键</h3><p><kbd>Ctrl / ⌘ K</kbd> 搜索页面　<kbd>Esc</kbd> 关闭窗口或退出专注</p></div></Modal>}
-    {dialog === 'import' && pendingImport && <Modal title="导入 Markdown" onClose={() => setDialog(null)}><p className="dialog-description">将「{pendingImport.title}.md」转换为新的会话内页面。原始文本会保留，可从页面菜单下载。</p><div className="import-warning"><strong>导入是格式转换，不保证无损</strong>{pendingImport.warnings.length ? <ul>{pendingImport.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul> : <p>未发现明显的扩展语法，但复杂排版或自定义样式仍可能变化。</p>}</div><details className="import-preview"><summary>查看原始文本</summary><pre>{pendingImport.text}</pre></details><label className="confirmation-check"><input type="checkbox" checked={importAccepted} onChange={event => setImportAccepted(event.target.checked)} />我理解转换可能改变格式，继续创建页面</label><div className="dialog-actions"><button className="quiet-button" onClick={() => setDialog(null)}>取消</button><button className="primary-button" disabled={!importAccepted} onClick={completeImport}>转换并创建</button></div></Modal>}
+    {toast && <Toast text={toast} onClose={() => setToast('')} />}
+    {dialog === 'search' && <DemoSearch pages={state.pages} recentIds={state.recent} onOpen={openPage} onCommand={onCommand} onClose={() => setDialog(null)} />}
+    {dialog === 'trash' && <DemoTrash pages={state.pages} onRestore={id => { dispatch({ type: 'restore', id }); notice('已在当前会话恢复页面及本次删除的子页面。'); }} onClose={() => setDialog(null)} />}
+    {dialog === 'source' && <Modal title="Markdown 源码" wide onClose={() => setDialog(null)}><p className="dialog-description">只读视图，来自当前编辑器内容。转换可能不保留所有扩展语法。</p><textarea className="source-view" aria-label="Markdown 源码，只读" readOnly value={source} spellCheck={false} /><div className="dialog-actions"><button className="nb-btn" onClick={() => { void navigator.clipboard.writeText(source).then(() => notice('已复制 Markdown。')).catch(() => notice('剪贴板不可用，请在源码框中手动选择并复制。')); }}>复制源码</button><button className="nb-btn nb-btn-primary" onClick={() => current && download(current.title, source)}><Icon name="download" size={16} />下载 Markdown</button></div></Modal>}
+    {dialog === 'move' && target && <Modal title="移动页面" onClose={() => setDialog(null)}><p className="dialog-description">选择「{target.title || '未命名页面'}」的新位置。子页面会一起移动。</p><label className="field-label" htmlFor="move-parent">移动到</label><select id="move-parent" className="select-field" value={moveTarget} onChange={event => setMoveTarget(event.target.value)}><option value="">个人空间（根目录）</option>{state.pages.filter(page => canMove(state.pages, target.id, page.id)).map(page => <option key={page.id} value={page.id}>{[...ancestors(state.pages, page.id), page].map(p => p.title || '未命名页面').join(' / ')}</option>)}</select><div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button><button className="nb-btn nb-btn-primary" onClick={() => { dispatch({ type: 'move', id: target.id, parentId: moveTarget || null }); setDialog(null); setDialogFor(null); notice('已在当前会话移动页面。'); }}>移动</button></div></Modal>}
+    {dialog === 'delete' && target && <Modal title="移入回收站" onClose={() => setDialog(null)}><p className="dialog-description">「{target.title || '未命名页面'}」{subtreeCount ? `及 ${subtreeCount} 篇子页面` : ''}将移到回收站，你可以在当前会话内恢复。</p><div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button><button className="nb-btn nb-btn-primary" onClick={() => { flush(); dispatch({ type: 'delete', id: target.id }); setDialog(null); setDialogFor(null); }}>确认移入回收站</button></div></Modal>}
+    {dialog === 'import' && pendingImport && <Modal title="导入 Markdown" onClose={() => setDialog(null)}><p className="dialog-description">将「{pendingImport.title}.md」转换为新的会话内页面。原始文本会保留，可从页面菜单下载。</p><div className="import-warning"><strong>导入是格式转换，不保证无损</strong>{pendingImport.warnings.length ? <ul>{pendingImport.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul> : <p>未发现明显的扩展语法，但复杂排版或自定义样式仍可能变化。</p>}</div><details className="import-preview"><summary>查看原始文本</summary><pre>{pendingImport.text}</pre></details><label className="confirmation-check"><input type="checkbox" checked={importAccepted} onChange={event => setImportAccepted(event.target.checked)} />我理解转换可能改变格式，继续创建页面</label><div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button><button className="nb-btn nb-btn-primary" disabled={!importAccepted} onClick={completeImport}>转换并创建</button></div></Modal>}
   </div>;
 }

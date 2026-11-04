@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NBase v2 · 方向对比</title>
+<style>
+:root{
+  --bg:#f0efec; --card:#ffffff; --text:#2b2a27; --muted:#77736b; --line:#e0deda; --accent:#3e63dd;
+}
+*{box-sizing:border-box; margin:0; padding:0;}
+body{font-family:-apple-system,"Segoe UI Variable Text","Segoe UI","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  background:var(--bg); color:var(--text); padding:28px 32px 60px;}
+header{display:flex; align-items:baseline; gap:18px; flex-wrap:wrap; margin-bottom:8px;}
+h1{font-size:20px; font-weight:650;}
+.theme-toggle{display:flex; background:#e4e2dd; border-radius:8px; padding:3px; gap:2px;}
+.theme-toggle button{font-family:inherit; font-size:12.5px; padding:5px 14px; border:none; border-radius:6px;
+  background:transparent; color:var(--muted); cursor:pointer;}
+.theme-toggle button.on{background:#fff; color:var(--text); font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.12);}
+.intro{font-size:13px; color:var(--muted); margin-bottom:24px; max-width:860px; line-height:1.7;}
+.grid{display:grid; grid-template-columns:64px repeat(3, 1fr); gap:18px 22px; align-items:start;}
+.col-head .c-name{font-size:15px; font-weight:650;}
+.col-head .c-why{font-size:12px; color:var(--muted); line-height:1.6; margin-top:4px;}
+.row-label{writing-mode:vertical-rl; transform:rotate(180deg); font-size:12px; color:var(--muted);
+  font-weight:600; letter-spacing:.08em; justify-self:center; padding-top:6px;}
+.cell{background:var(--card); border:1px solid var(--line); border-radius:10px; overflow:hidden;
+  display:flex; flex-direction:column; cursor:pointer; transition:box-shadow .15s, border-color .15s;}
+.cell:hover{border-color:#c9c7c1; box-shadow:0 6px 20px rgba(43,42,39,.1);}
+.frame{position:relative; overflow:hidden; background:#e9e7e2; border-bottom:1px solid var(--line);}
+.frame iframe{position:absolute; top:0; left:0; border:none; pointer-events:none; transform-origin:top left;}
+.cell-label{display:flex; align-items:center; gap:8px; padding:8px 12px; font-size:12px; color:var(--muted);}
+.cell-label .open{margin-left:auto; color:var(--accent); text-decoration:none; font-size:12px;}
+.cell-label .open:hover{text-decoration:underline;}
+.frame.desk{height:262px;}
+.frame.desk iframe{width:1440px; height:900px; transform:scale(0.2917);}
+.frame.mob{height:262px; display:flex; justify-content:center;}
+.frame.mob iframe{position:relative; width:390px; height:844px; transform:scale(0.30); transform-origin:top center;}
+@media (max-width: 1480px){ .grid{grid-template-columns:64px repeat(3,1fr);} }
+@media (max-width: 1100px){ .grid{grid-template-columns:48px 1fr;} .cell{display:none;} }
+</style>
+</head>
+<body>
+<header>
+  <h1>NBase v2 · 方向对比</h1>
+  <div class="theme-toggle" role="group" aria-label="主题">
+    <button id="t-light" class="on">浅色</button>
+    <button id="t-dark">深色</button>
+  </div>
+</header>
+<p class="intro">三个方向均属 Notion 家族（Emoji 图标 + 封面）。单元格为实时渲染缩略图，点击任意一格在新标签页打开完整交互原型（含 Tweaks 面板）。</p>
+<div class="grid" id="grid"></div>
+<script>
+(function () {
+  var theme = new URLSearchParams(location.search).get('theme') === 'dark' ? 'dark' : 'light';
+  var dirs = [
+    { id: 'a', name: 'A · 经典 Notion', why: '暖白、chrome 退后。30vh 大封面 + 半压 emoji、40px 标题、240px 窄侧栏。最稳妥，“这就是 Notion”。' },
+    { id: 'b', name: 'B · Notion × Outline', why: '更多结构：分区侧栏、面包屑顶栏、右侧大纲 TOC、140px 窄横幅。适合手册型长文档。' },
+    { id: 'c', name: 'C · 专注写作', why: '纸感极简：隐藏侧栏悬停唤起、打字时顶栏淡出、衬线正文。适合以写为主的场景。' }
+  ];
+  var rows = [
+    { label: '编辑主页', screen: 'editor' },
+    { label: '搜索', screen: 'search' },
+    { label: '历史', screen: 'history' },
+    { label: '回收站', screen: 'trash' },
+    { label: '登录', screen: 'login' },
+    { label: '空工作区', screen: 'empty' },
+    { label: '冲突', screen: 'conflict' },
+    { label: '手机', screen: 'editor', vp: 'mobile' }
+  ];
+  function url(dir, row, interactive) {
+    var u = 'Workspace.html?dir=' + dir + '&theme=' + theme + '&screen=' + row.screen +
+      (row.vp ? '&vp=' + row.vp : '') + (interactive ? '&tweaks=1' : '&chrome=0');
+    return u;
+  }
+  var grid = document.getElementById('grid');
+  var html = '<div></div>' + dirs.map(function (d) {
+    return '<div class="col-head"><div class="c-name">' + d.name + '</div><div class="c-why">' + d.why + '</div></div>';
+  }).join('');
+  rows.forEach(function (row) {
+    html += '<div class="row-label">' + row.label + '</div>';
+    dirs.forEach(function (d) {
+      var cls = row.vp === 'mobile' ? 'frame mob' : 'frame desk';
+      html += '<div class="cell" data-url="' + url(d.id, row, true) + '">' +
+        '<div class="' + cls + '"><iframe src="' + url(d.id, row, false) + '" loading="lazy" title="' + d.name + ' ' + row.label + '"></iframe></div>' +
+        '<div class="cell-label"><span>' + row.label + '</span><a class="open" href="' + url(d.id, row, true) + '" target="_blank" rel="noopener">打开 ↗</a></div></div>';
+    });
+  });
+  grid.innerHTML = html;
+  grid.addEventListener('click', function (e) {
+    if (e.target.closest('a')) return;
+    var cell = e.target.closest('.cell');
+    if (cell) window.open(cell.dataset.url, '_blank');
+  });
+  function setTheme(t) {
+    theme = t;
+    document.getElementById('t-light').classList.toggle('on', t === 'light');
+    document.getElementById('t-dark').classList.toggle('on', t === 'dark');
+    grid.querySelectorAll('iframe').forEach(function (f) {
+      f.src = f.src.replace(/theme=(light|dark)/, 'theme=' + t);
+    });
+    grid.querySelectorAll('.cell').forEach(function (c) {
+      c.dataset.url = c.dataset.url.replace(/theme=(light|dark)/, 'theme=' + t);
+    });
+    grid.querySelectorAll('a.open').forEach(function (a) {
+      a.href = a.href.replace(/theme=(light|dark)/, 'theme=' + t);
+    });
+  }
+  document.getElementById('t-light').onclick = function () { setTheme('light'); };
+  document.getElementById('t-dark').onclick = function () { setTheme('dark'); };
+  if (theme === 'dark') setTheme('dark');
+})();
+</script>
+</body>
+</html>

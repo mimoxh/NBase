@@ -9,6 +9,13 @@ const paths = {
  download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5', upload: 'M12 16V4m-5 5 5-5 5 5M4 16v5h16v-5',
  arrow: 'M4 12h16m-6-6 6 6-6 6', restore: 'M3 10a9 9 0 1 1 1 8M3 3v7h7', folder: 'M3 5h7l2 3h9v12H3z',
  check: 'm5 12 4 4L19 6', sun: 'M12 2v2m0 16v2M2 12h2m16 0h2M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
+ 'star-filled': 'm12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z',
+ history: 'M3 12a9 9 0 1 0 3-6.7M3 4v5h5M12 7v5l3.5 2',
+ sidebar: 'M4 4h16v16H4zM9 4v16', image: 'M4 5h16v14H4zM4 15l5-5 4 4 3-3 4 4M9 9h.01',
+ smile: 'M12 21a9 9 0 1 1 0-18 9 9 0 0 1 0 18M8.5 14a5 5 0 0 0 7 0M9 10h.01M15 10h.01',
+ moon: 'M20 13A8 8 0 1 1 11 4a7 7 0 0 0 9 9', logout: 'M14 8V5H4v14h10v-3M9 12h12m-4-4 4 4-4 4',
+ 'chevron-down': 'm6 9 6 6 6-6', link: 'M9 15 15 9M10 13a4 4 0 0 1 0-6l2-2a4 4 0 0 1 6 6l-1 1M14 11a4 4 0 0 1 0 6l-2 2a4 4 0 0 1-6-6l1-1',
+ copy: 'M9 9h12v13H9zM4 15V3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3',
 } as const;
 export type IconName = keyof typeof paths;
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>; }

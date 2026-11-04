@@ -4,11 +4,18 @@ export interface StoredDocumentContent {
   editorState: { root: unknown };
 }
 
+export const pageCoverIds = ['sage', 'ochre', 'slate', 'rose', 'sand', 'sky'] as const;
+export type PageCoverId = typeof pageCoverIds[number];
+
 export interface PageSummary {
   id: string;
   workspaceId: string;
   parentId: string | null;
   title: string;
+  /** One grapheme emoji, or null when the page has no icon. */
+  icon: string | null;
+  /** CSS preset identifier rendered by the client, or null for no cover. */
+  cover: PageCoverId | null;
   revision: string;
   createdAt: string;
   updatedAt: string;
@@ -33,6 +40,8 @@ export interface CreatePageRequest {
   parentId: string | null;
   title: string;
   content: StoredDocumentContent;
+  icon?: string | null;
+  cover?: PageCoverId | null;
 }
 
 export interface UpdatePageRequest {
@@ -41,6 +50,9 @@ export interface UpdatePageRequest {
   title?: string;
   parentId?: string | null;
   content?: StoredDocumentContent;
+  /** null removes the icon; omitted leaves it unchanged. */
+  icon?: string | null;
+  cover?: PageCoverId | null;
 }
 
 export interface PageStateRequest {

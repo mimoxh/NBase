@@ -1,6 +1,7 @@
 export interface SearchResult {
   pageId: string;
   title: string;
+  icon: string | null;
   parentId: string | null;
   revision: string;
   updatedAt: string;

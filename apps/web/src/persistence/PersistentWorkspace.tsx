@@ -1,5 +1,5 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import type { AttachmentMetadata, AuthSessionResponse, PageDocument, PageSummary, PageVersion, SearchResult,
+﻿import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import type { AttachmentMetadata, AuthSessionResponse, PageCoverId, PageDocument, PageSummary, PageVersion, SearchResult,
   StoredDocumentContent, TrashedPageDocument, UpdatePageRequest } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
@@ -14,6 +14,17 @@ import { isDefiniteUpdateRejection, releaseRejectedMutation } from './savePolicy
 import { exportAttachments, packagePage } from './attachmentExport';
 import { PersistentSearchDialog } from './PersistentSearchDialog';
 import { PageHistoryDialog, TrashDialog } from './PageRecoveryDialogs';
+import { useTheme } from '../shell/theme';
+import { saveToneFor, type SaveStatus } from '../shell/saveTone';
+import { Sidebar } from '../shell/Sidebar';
+import { Topbar, relativeTime } from '../shell/Topbar';
+import { PageHeader } from '../shell/PageHeader';
+import { Toc } from '../shell/Toc';
+import { NoticeBar } from '../shell/NoticeBar';
+import { Toast } from '../shell/Toast';
+import { type MenuItem } from '../shell/Menu';
+import { PageIcon } from '../shell/PageTree';
+import '../shell/shell.css';
 import './persistent.css';
 
 function message(error: unknown): string {
@@ -36,6 +47,7 @@ function message(error: unknown): string {
     ATTACHMENT_INVALID: '文档中有无效附件引用，请保留本机草稿并检查附件。',
     ATTACHMENT_MISSING: '附件文件缺失，导出已停止。',
     ATTACHMENT_CORRUPT: '附件文件与数据库记录不一致，导出已停止。',
+    FAVORITE_LIMIT: '收藏已达 200 个上限。',
   };
   return messages[error.code] ?? '服务暂时无法完成操作，请重试。';
 }
@@ -58,49 +70,23 @@ function downloadBlob(name: string, blob: Blob, extension: string) {
   setTimeout(() => URL.revokeObjectURL(url), 30_000);
 }
 
-const Tree = memo(function Tree({ pages, activeId, onOpen }: { pages: PageSummary[]; activeId: string | null; onOpen: (id: string) => void }) {
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const childrenByParent = useMemo(() => {
-    const groups = new Map<string | null, PageSummary[]>();
-    for (const page of pages) {
-      const siblings = groups.get(page.parentId);
-      if (siblings) siblings.push(page);
-      else groups.set(page.parentId, [page]);
-    }
-    return groups;
-  }, [pages]);
-  const branch = (parentId: string | null, depth: number): ReactNode => (childrenByParent.get(parentId) ?? []).map(page => {
-    const hasChildren = childrenByParent.has(page.id);
-    return <div key={page.id}>
-      <div className={`tree-row ${activeId === page.id ? 'selected' : ''}`} style={{ paddingLeft: 8 + depth * 15 }}>
-        {hasChildren ? <button className={`tree-toggle ${collapsed.has(page.id) ? '' : 'expanded'}`}
-          aria-label={`${collapsed.has(page.id) ? '展开' : '收起'} ${page.title || '未命名页面'}`}
-          aria-expanded={!collapsed.has(page.id)} onClick={() => setCollapsed(previous => {
-            const next = new Set(previous); if (next.has(page.id)) next.delete(page.id); else next.add(page.id); return next;
-          })}><Icon name="chevron" size={13} /></button> : <span className="tree-spacer" />}
-        <button className="tree-page" aria-current={activeId === page.id ? 'page' : undefined} onClick={() => onOpen(page.id)}>
-          <Icon name="page" size={16} /><span>{page.title || '未命名页面'}</span>
-        </button>
-      </div>
-      {hasChildren && !collapsed.has(page.id) && branch(page.id, depth + 1)}
-    </div>;
-  });
-  return <div className="page-tree">{branch(null, 0)}</div>;
-});
-
 function Login({ onLogin, error, busy, title = '登录 NBase' }: {
   onLogin: (name: string, password: string) => Promise<void>; error: string; busy: boolean; title?: string;
 }) {
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const submit = (event: FormEvent) => { event.preventDefault(); void onLogin(name, password); };
-  return <form className="nbase-login" onSubmit={submit}>
-    <span className="brand-mark">N</span><h1>{title}</h1><p>使用本机初始化的账号进入个人空间。</p>
-    <label>账号<input autoComplete="username" value={name} onChange={event => setName(event.target.value)} required /></label>
-    <label>密码<input autoComplete="current-password" type="password" value={password}
-      onChange={event => setPassword(event.target.value)} required /></label>
-    {error && <div className="nbase-form-error" role="alert">{error}</div>}
-    <button className="primary-button" disabled={busy} type="submit">{busy ? '正在登录…' : '登录'}</button>
+  return <form className="nb-login" onSubmit={submit}>
+    <span className="nb-logo">N</span><h1>{title}</h1>
+    <label>账号名<input autoComplete="username" value={name} onChange={event => setName(event.target.value)} required /></label>
+    <label>密码<span className="nb-pass-wrap"><input autoComplete="current-password" type={showPassword ? 'text' : 'password'} value={password}
+      onChange={event => setPassword(event.target.value)} required />
+      <button type="button" className="icon-button nb-eye" aria-label={showPassword ? '隐藏密码' : '显示密码'}
+        onClick={() => setShowPassword(!showPassword)}><Icon name={showPassword ? 'close' : 'search'} size={15} /></button></span></label>
+    {error && <div className="nb-login-err" role="alert">{error}</div>}
+    <button className="nb-btn nb-btn-primary" disabled={busy} type="submit">{busy ? '正在登录…' : '登录'}</button>
+    <p className="nb-login-foot">自部署实例 · 仅限已初始化账号</p>
   </form>;
 }
 
@@ -140,7 +126,8 @@ export function PersistentWorkspace() {
   const [showReauthForm, setShowReauthForm] = useState(false);
   const [pages, setPages] = useState<PageSummary[]>([]);
   const [recentIds, setRecentIds] = useState<string[]>([]);
-  const [collection, setCollection] = useState<'home' | 'recent'>('home');
+  const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
+  const [sidebarHidden, setSidebarHidden] = useState(() => { try { return localStorage.getItem('nbase.sidebar') === 'collapsed'; } catch { return false; } });
   const [treeError, setTreeError] = useState('');
   const [treeLoading, setTreeLoading] = useState(false);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -149,7 +136,8 @@ export function PersistentWorkspace() {
   const [title, setTitle] = useState('');
   const [initialContent, setInitialContent] = useState<DocumentContent | null>(null);
   const [editorSnapshot, setEditorSnapshot] = useState<EditorSnapshot | null>(null);
-  const [saveStatus, setSaveStatus] = useState('');
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>({ tone: 'idle', text: '' });
+  const setStatus = (text: string) => setSaveStatus({ tone: saveToneFor(text), text });
   const [conflict, setConflict] = useState<{ server: PageDocument; draft: LocalPageDraft } | null>(null);
   const [otherDraft, setOtherDraft] = useState<LocalPageDraft | null>(null);
   const [editorEpoch, setEditorEpoch] = useState(0);
@@ -169,6 +157,7 @@ export function PersistentWorkspace() {
   const editorRef = useRef<DocumentEditorHandle>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const [theme, setTheme] = useTheme();
   const tabId = useRef(crypto.randomUUID()).current;
   const activeIdRef = useRef<string | null>(null);
   const titleRef = useRef('');
@@ -178,6 +167,7 @@ export function PersistentWorkspace() {
   const saveWaitersRef = useRef(new Map<string, (() => void)[]>());
   const pendingActionsRef = useRef(new Map<string, LocalPendingAction>());
   const pageActionBusyRef = useRef(false);
+  const favoriteBusyRef = useRef(new Set<string>());
   const uploadingRef = useRef(0);
   const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const writeQueues = useRef(new Map<string, Promise<void>>());
@@ -198,7 +188,11 @@ export function PersistentWorkspace() {
 
   const setActive = (id: string | null) => { activeIdRef.current = id; setActiveId(id); };
   const setCurrentTitle = (value: string) => { titleRef.current = value; setTitle(value); };
-  const upsertPage = (page: PageDocument) => {
+  /** Older receipts/responses may predate appearance fields; normalize them on entry. */
+  const normalizePage = <T extends { icon?: string | null; cover?: PageCoverId | null }>(page: T): T =>
+    ({ ...page, icon: page.icon ?? null, cover: page.cover ?? null });
+  const upsertPage = (input: PageDocument) => {
+    const page = normalizePage(input);
     docsRef.current.set(page.id, page);
     const { content: _content, ...summary } = page;
     void _content;
@@ -217,7 +211,7 @@ export function PersistentWorkspace() {
   const persistDraft = useCallback(async (draft: LocalPageDraft): Promise<boolean> => {
     try { await queueWrite(draft.key, () => localDrafts.put(draft)); return true; }
     catch {
-      if (activeIdRef.current === draft.pageId) setSaveStatus('本机草稿写入失败，请立即下载 Markdown');
+      if (activeIdRef.current === draft.pageId) setStatus('本机草稿写入失败，请立即下载 Markdown');
       return false;
     }
   }, [queueWrite]);
@@ -261,11 +255,11 @@ export function PersistentWorkspace() {
     };
     draftsRef.current.set(pageId, draft);
     if (activeIdRef.current === pageId) {
-      setOtherDraft(null); setEditorSnapshot(snapshot); setSaveStatus('正在写入本机草稿…');
+      setOtherDraft(null); setEditorSnapshot(snapshot); setStatus('正在写入本机草稿…');
     }
     void persistDraft(draft).then(stored => {
       if (stored && activeIdRef.current === pageId && draftsRef.current.get(pageId)?.sequence === draft.sequence) {
-        setSaveStatus('本机草稿已保留 · 等待服务端确认');
+        setStatus('本机草稿已保留 · 等待服务端确认');
       }
     });
     scheduleSave(pageId);
@@ -289,7 +283,7 @@ export function PersistentWorkspace() {
       }
       // A retry also needs its mutation ID durably stored before any network write.
       if (!await persistDraft(draft)) return;
-      if (activeIdRef.current === pageId) setSaveStatus('正在保存到服务端…');
+      if (activeIdRef.current === pageId) setStatus('正在保存到服务端…');
       let saved: PageDocument;
       try { saved = await pageClient.update(workspace.id, pageId, body, session.csrfToken); }
       catch (error) {
@@ -303,7 +297,7 @@ export function PersistentWorkspace() {
       if (!latest || latest.pending?.clientMutationId !== body.clientMutationId) return;
       if (latest.sequence === sentSequence) {
         await clearResolvedDraft(latest);
-        if (activeIdRef.current === pageId && !draftsRef.current.has(pageId)) setSaveStatus('已保存到服务端');
+        if (activeIdRef.current === pageId && !draftsRef.current.has(pageId)) setStatus('已保存到服务端');
       } else {
         const { pending: _pending, ...remaining } = latest;
         void _pending;
@@ -322,7 +316,7 @@ export function PersistentWorkspace() {
             await clearResolvedDraft(latest);
             upsertPage(server);
             if (activeIdRef.current === pageId && !draftsRef.current.has(pageId)) {
-              setConflict(null); setSaveStatus('已保存到服务端');
+              setConflict(null); setStatus('已保存到服务端');
             }
             return;
           }
@@ -337,7 +331,7 @@ export function PersistentWorkspace() {
           if (remaining.sequence !== sentSequence) scheduleSave(pageId, 100);
         }
       }
-      if (activeIdRef.current === pageId) setSaveStatus(message(error));
+      if (activeIdRef.current === pageId) setStatus(message(error));
     } finally {
       savingRef.current.delete(pageId);
       for (const resolve of saveWaitersRef.current.get(pageId) ?? []) resolve();
@@ -380,8 +374,12 @@ export function PersistentWorkspace() {
     const scope = currentSession.workspaces[0];
     if (!scope) { setTreeError('账号没有可访问的工作区。'); return; }
     setTreeLoading(true); setTreeError('');
-    try { setPages(await loadPageTree(scope.id)); }
-    catch (error) { setTreeError(message(error)); if (isAuthError(error)) setReauth(true); }
+    try {
+      const [tree, favorites] = await Promise.all([
+        loadPageTree(scope.id), pageClient.favorites(scope.id).catch(() => null)]);
+      setPages(tree.map(page => normalizePage(page)));
+      if (favorites) setFavoriteIds(favorites.pageIds);
+    } catch (error) { setTreeError(message(error)); if (isAuthError(error)) setReauth(true); }
     finally { setTreeLoading(false); }
   }, []);
 
@@ -423,14 +421,14 @@ export function PersistentWorkspace() {
     const sequence = ++openSequence.current;
     setActive(pageId); setMobileOpen(false); setLoadingPage(true); setConflict(null); setOtherDraft(null);
     setRecentIds(previous => [pageId, ...previous.filter(id => id !== pageId)].slice(0, 30));
-    setDocumentPage(null); setInitialContent(null); setEditorSnapshot(null); setSaveStatus('正在读取页面…');
+    setDocumentPage(null); setInitialContent(null); setEditorSnapshot(null); setStatus('正在读取页面…');
     try {
       const [server, allCandidates] = await Promise.all([
         pageClient.get(workspace.id, pageId), localDrafts.forPage(session.user.id, workspace.id, pageId)
           .catch(() => { setNotice('本机草稿库暂不可用；编辑前请确认能下载 Markdown。'); return []; }),
       ]);
       if (sequence !== openSequence.current) return false;
-      docsRef.current.set(pageId, server);
+      docsRef.current.set(pageId, normalizePage(server));
       for (const item of allCandidates.filter(candidate => matchesServer(candidate, server))) {
         const inMemory = draftsRef.current.get(pageId);
         if (inMemory?.key === item.key && inMemory.sequence === item.sequence
@@ -446,20 +444,20 @@ export function PersistentWorkspace() {
       if (draft) draftsRef.current.set(pageId, draft);
       setDocumentPage(server);
       if (draft && draft.baseRevision !== server.revision) {
-        setConflict({ server, draft }); setSaveStatus('发现待处理的本机草稿与服务端版本冲突');
+        setConflict({ server, draft }); setStatus('发现待处理的本机草稿与服务端版本冲突');
         setCurrentTitle(draft.title);
       } else {
         setCurrentTitle(draft?.title ?? server.title);
         const content = draft?.content ?? server.content;
         setInitialContent(content.schemaVersion === 1 ? content as DocumentContent : null);
         setEditorEpoch(value => value + 1);
-        setSaveStatus(draft ? '已恢复本机草稿 · 等待服务端确认' : '已从服务端读取');
+        setStatus(draft ? '已恢复本机草稿 · 等待服务端确认' : '已从服务端读取');
         if (draft) { void persistDraft(draft); scheduleSave(pageId, 200); }
       }
       return true;
     } catch (error) {
       if (sequence !== openSequence.current) return false;
-      setSaveStatus(message(error)); if (isAuthError(error)) setReauth(true);
+      setStatus(message(error)); if (isAuthError(error)) setReauth(true);
       return false;
     } finally { if (sequence === openSequence.current) setLoadingPage(false); }
   }, [session, workspace, tabId, markDraft, persistDraft, queueWrite, scheduleSave]);
@@ -580,7 +578,6 @@ export function PersistentWorkspace() {
     }
     ++openSequence.current;
     setActive(null); setDocumentPage(null); setEditorSnapshot(null); setConflict(null); setOtherDraft(null);
-    setCollection('home');
   };
 
   const subtreeIds = (rootId: string, source = pages): string[] => {
@@ -633,7 +630,7 @@ export function PersistentWorkspace() {
         }
         if (activeIdRef.current && pending.affectedIds.includes(activeIdRef.current)) {
           ++openSequence.current; setActive(null); setDocumentPage(null); setInitialContent(null);
-          setEditorSnapshot(null); setConflict(null); setOtherDraft(null); setSaveStatus('');
+          setEditorSnapshot(null); setConflict(null); setOtherDraft(null); setStatus('');
         }
         setNotice('页面已移入回收站，历史、附件和本机草稿保留。');
       } else {
@@ -735,8 +732,33 @@ export function PersistentWorkspace() {
     setInitialContent(adopted.content.schemaVersion === 1 ? adopted.content as DocumentContent : null);
     setEditorEpoch(value => value + 1);
     setOtherDraft(null);
-    setSaveStatus('已选用本机草稿 · 等待服务端确认');
+    setStatus('已选用本机草稿 · 等待服务端确认');
     void persistDraft(adopted); scheduleSave(documentPage.id, 200);
+  };
+
+  /** One revisioned PATCH for parent/icon/cover; keeps the save-guard sequence of the old move flow. */
+  const updatePageMeta = async (pageId: string, patch: Pick<UpdatePageRequest, 'parentId' | 'icon' | 'cover'>,
+    done: string, problem = '请先解决本页的保存问题，再修改页面。') => {
+    if (!session || !workspace || readOnly) return;
+    if (pageActionBusyRef.current
+      || [...pendingActionsRef.current.values()].some(action => action.affectedIds.includes(pageId))
+      || [...pendingCreatesRef.current.values()].some(create => create.resolvesDraftPageId === pageId)
+      || pendingUploads.some(upload => upload.pageId === pageId)) {
+      setNotice('该页面还有待确认的操作，请先完成或重试，再修改页面。'); return;
+    }
+    await waitForSave(pageId);
+    await savePage(pageId);
+    await waitForSave(pageId);
+    if (draftsRef.current.has(pageId)) { setNotice(problem); return; }
+    const current = docsRef.current.get(pageId);
+    if (!current) return;
+    try {
+      const body: UpdatePageRequest = {
+        clientMutationId: crypto.randomUUID(), expectedRevision: current.revision, ...patch,
+      };
+      const updated = await pageClient.update(workspace.id, pageId, body, session.csrfToken);
+      upsertPage(updated); setNotice(done);
+    } catch (error) { setNotice(message(error)); if (isAuthError(error)) setReauth(true); }
   };
 
   const movePage = async () => {
@@ -749,19 +771,25 @@ export function PersistentWorkspace() {
       }
       return false;
     })) { setNotice('不能把页面移动到自己的子页面中。'); return; }
-    await waitForSave(activeId);
-    await savePage(activeId);
-    await waitForSave(activeId);
-    if (draftsRef.current.has(activeId)) { setNotice('请先解决本页的保存问题，再移动页面。'); return; }
-    const current = docsRef.current.get(activeId);
-    if (!current) return;
+    await updatePageMeta(activeId, { parentId: moveTarget || null }, '页面已移动并保存。', '请先解决本页的保存问题，再移动页面。');
+    if (!draftsRef.current.has(activeId)) setDialog(null);
+  };
+
+  const setIcon = (pageId: string, icon: string | null) =>
+    void updatePageMeta(pageId, { icon }, icon ? '图标已更新。' : '图标已移除。');
+  const setCover = (pageId: string, cover: PageCoverId | null) =>
+    void updatePageMeta(pageId, { cover }, cover ? '封面已更新。' : '封面已移除。');
+
+  const toggleFavorite = async (pageId: string) => {
+    if (!session || !workspace || favoriteBusyRef.current.has(pageId)) return;
+    favoriteBusyRef.current.add(pageId);
+    const favorite = favoriteIds.includes(pageId);
     try {
-      const body: UpdatePageRequest = {
-        clientMutationId: crypto.randomUUID(), expectedRevision: current.revision, parentId: moveTarget || null,
-      };
-      const moved = await pageClient.update(workspace.id, activeId, body, session.csrfToken);
-      upsertPage(moved); setDialog(null); setNotice('页面已移动并保存。');
+      if (favorite) await pageClient.removeFavorite(workspace.id, pageId, session.csrfToken);
+      else await pageClient.addFavorite(workspace.id, pageId, session.csrfToken);
+      setFavoriteIds(previous => favorite ? previous.filter(id => id !== pageId) : [...previous, pageId]);
     } catch (error) { setNotice(message(error)); if (isAuthError(error)) setReauth(true); }
+    finally { favoriteBusyRef.current.delete(pageId); }
   };
 
   const logout = async () => {
@@ -795,8 +823,14 @@ export function PersistentWorkspace() {
   useEffect(() => {
     if (sessionPhase !== 'ready' || !workspace) return;
     const handler = (event: KeyboardEvent) => {
+      if (event.isComposing || event.keyCode === 229) return;
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key === '\\') {
+        event.preventDefault();
+        toggleSidebar();
+        return;
+      }
       if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== 'k'
-        || event.isComposing || event.keyCode === 229 || (dialog && dialog !== 'search')) return;
+        || (dialog && dialog !== 'search')) return;
       event.preventDefault();
       setDialog('search');
       if (dialog === 'search') document.querySelector<HTMLInputElement>('[aria-label="搜索标题或正文"]')?.focus();
@@ -805,11 +839,11 @@ export function PersistentWorkspace() {
     return () => window.removeEventListener('keydown', handler);
   }, [sessionPhase, workspace, dialog]);
 
-  if (sessionPhase === 'checking') return <div className="workspace"><main className="service-gate" role="status">正在检查登录状态…</main></div>;
-  if (sessionPhase === 'error') return <div className="workspace"><main className="service-gate" role="alert">
-    <h1>无法读取登录状态</h1><p>{authError}</p><button className="primary-button" onClick={() => location.reload()}>重试</button>
+  if (sessionPhase === 'checking') return <div className="nb-gate"><main role="status">正在检查登录状态…</main></div>;
+  if (sessionPhase === 'error') return <div className="nb-gate"><main role="alert">
+    <h1>无法读取登录状态</h1><p>{authError}</p><button className="nb-btn nb-btn-primary" onClick={() => location.reload()}>重试</button>
   </main></div>;
-  if (sessionPhase === 'login' || !session) return <div className="workspace nbase-auth-screen">
+  if (sessionPhase === 'login' || !session) return <div className="nb-auth">
     <Login onLogin={login} error={authError} busy={authBusy} />
   </div>;
 
@@ -896,47 +930,95 @@ export function PersistentWorkspace() {
     try { void createPage(null, pendingImport.title, createContentFromMarkdown(pendingImport.markdown)); }
     catch { setNotice('Markdown 转换失败，原始文件未修改；请先下载原文。'); }
   };
-  const collectionPages = collection === 'recent'
-    ? recentIds.flatMap(id => pages.filter(page => page.id === id)) : pages;
+  const toggleSidebar = () => {
+    if (window.innerWidth <= 720) { setMobileOpen(!mobileOpen); return; }
+    setSidebarHidden(value => {
+      const next = !value;
+      try { localStorage.setItem('nbase.sidebar', next ? 'collapsed' : 'open'); } catch { /* best effort */ }
+      return next;
+    });
+  };
+  const ancestorsOf = (pageId: string): string => {
+    const names: string[] = [];
+    let cursor = pages.find(page => page.id === pageId)?.parentId ?? null;
+    const seen = new Set<string>();
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      const parent = pages.find(page => page.id === cursor);
+      if (!parent) break;
+      names.unshift(parent.title || '未命名页面');
+      cursor = parent.parentId;
+    }
+    return names.join(' / ') || '个人空间';
+  };
+  const ancestors = (() => {
+    const chain: PageSummary[] = [];
+    let cursor = current?.parentId ?? null;
+    const seen = new Set<string>();
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor);
+      const parent = pages.find(page => page.id === cursor);
+      if (!parent) break;
+      chain.unshift(parent);
+      cursor = parent.parentId;
+    }
+    return chain;
+  })();
+  const favoriteSet = new Set(favoriteIds);
+  const favoritePages = favoriteIds.flatMap(id => pages.filter(page => page.id === id));
+  const recentPages = recentIds.flatMap(id => pages.filter(page => page.id === id)).slice(0, 5);
+  const homePages = [...pages].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 10);
+  const treeActions = {
+    onOpen: openTreePage,
+    onAddChild: (id: string) => { void createPage(id); },
+    onFavorite: (id: string) => { void toggleFavorite(id); },
+    onMove: (id: string) => {
+      void openPage(id).then(opened => {
+        if (!opened) return;
+        setMoveTarget(docsRef.current.get(id)?.parentId ?? ''); setDialog('move');
+      });
+    },
+    onTrash: (id: string) => { void openPage(id).then(opened => { if (opened) setDialog('delete'); }); },
+  };
+  const pageMenuItems: (MenuItem | 'divider')[] = current ? [
+    { key: 'mode', label: readOnly ? '切换为编辑' : '切换为阅读', icon: 'focus', onSelect: () => setReadOnly(!readOnly) },
+    { key: 'attach', label: '添加图片或附件', icon: 'image', disabled: readOnly || currentLocked, onSelect: () => attachmentInputRef.current?.click() },
+    { key: 'source', label: '查看 Markdown 源码', icon: 'code', onSelect: () => setDialog('source') },
+    { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
+    'divider',
+    { key: 'child', label: '添加子页面', icon: 'plus', disabled: createBusy || currentLocked, onSelect: () => void createPage(current.id) },
+    { key: 'move', label: '移动到…', icon: 'folder', disabled: currentLocked, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialog('move'); } },
+    'divider',
+    { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, disabled: currentLocked, onSelect: () => setDialog('delete') },
+  ] : [];
 
-  return <div className="workspace theme-light persistent-workspace">
-    {mobileOpen && <button className="mobile-backdrop" aria-label="收起导航" onClick={() => setMobileOpen(false)} />}
-    <aside className={`sidebar ${mobileOpen ? 'mobile-open' : ''}`} aria-label="工作台导航">
-      <div className="brand-row"><span className="brand-mark">N</span><span><strong>NBase</strong><small>{workspace?.name ?? '个人空间'}</small></span>
-        <button className="icon-button" aria-label="关闭导航" onClick={() => setMobileOpen(false)}><Icon name="close" /></button></div>
-      <div className="sidebar-search"><button onClick={() => setDialog('search')}><Icon name="search" /><span>搜索</span><kbd>Ctrl K</kbd></button>
-        <button className="icon-button" aria-label="新建页面" disabled={createBusy} onClick={() => void createPage(null)}><Icon name="plus" /></button></div>
-      <nav className="main-nav"><button className={!activeId && collection === 'home' ? 'selected' : ''}
-        onClick={leaveCurrent}><Icon name="home" /><span>工作台</span></button><button className={!activeId && collection === 'recent' ? 'selected' : ''}
-        onClick={() => { leaveCurrent(); setCollection('recent'); }}><Icon name="clock" /><span>最近访问</span></button></nav>
-      <div className="tree-heading"><span>个人页面</span><button className="icon-button" aria-label="添加根页面" disabled={createBusy}
-        onClick={() => void createPage(null)}><Icon name="plus" /></button></div>
-      <div className="tree-scroll">{treeLoading && <p className="tree-message">正在加载目录…</p>}
-        {treeError && <p className="tree-message" role="alert">{treeError}<button onClick={() => void reloadTree(session)}>重试</button></p>}
-        <Tree pages={pages} activeId={activeId} onOpen={openTreePage} /></div>
-      <div className="sidebar-footer"><button onClick={() => { fileRef.current?.click(); }}><Icon name="upload" /><span>导入 Markdown</span></button>
-        <button onClick={() => setDialog('trash')}><Icon name="trash" /><span>回收站</span></button>
-        <button onClick={() => void logout()}><Icon name="close" /><span>退出登录</span></button>
-        <div className="session-label"><span />已登录 · {session.user.loginName}</div></div>
-    </aside>
-    <section className="main-panel">
-      <header className="topbar"><div className="breadcrumb"><span className="mobile-menu"><button className="icon-button" aria-label="打开导航" onClick={() => setMobileOpen(true)}><Icon name="menu" /></button></span>
-        <button onClick={leaveCurrent}>个人空间</button><span>/</span><strong>{activeId ? (title || '未命名页面') : collection === 'recent' ? '最近访问' : '工作台'}</strong></div>
-        {current && <div className="page-actions"><span className="draft-status" role="status">{saveStatus}</span>
-          <div className="mode-toggle"><button className={!readOnly ? 'active' : ''} onClick={() => setReadOnly(false)}>编辑</button><button className={readOnly ? 'active' : ''} onClick={() => setReadOnly(true)}>阅读</button></div>
-          {!readOnly && <button className="icon-button" disabled={currentLocked} aria-label="添加图片或附件" title="添加图片或附件" onClick={() => attachmentInputRef.current?.click()}><Icon name="upload" /></button>}
-          <button className="icon-button" aria-label="历史版本" title="历史版本" onClick={() => setDialog('history')}><Icon name="clock" /></button>
-          <button className="icon-button" aria-label="查看 Markdown" onClick={() => setDialog('source')}><Icon name="code" /></button>
-          <button className="icon-button" aria-label="下载页面" onClick={exportCurrent}><Icon name="download" /></button></div>}
-      </header>
-      <div className="session-banner"><span className="status-dot" />{saveStatus || '页面内容以服务端确认为准'}
-        {current && draftsRef.current.has(current.id) && <button onClick={() => void savePage(current.id)}>立即重试保存</button>}</div>
-      {actionStorageError && <div className="nbase-reauth-banner" role="alert">{actionStorageError}<button onClick={() => location.reload()}>重新读取</button></div>}
-      {pendingActions.map(pending => <div className="nbase-reauth-banner" role="status" key={pending.key}>
+  return <div className={`nb-app persistent-workspace ${sidebarHidden ? 'nb-sidebar-collapsed' : ''}`}>
+    <Sidebar workspaceName={workspace?.name ?? '个人空间'} loginName={session.user.loginName}
+      theme={theme} onTheme={setTheme} onLogout={() => void logout()}
+      onSearch={() => setDialog('search')} onTrash={() => setDialog('trash')}
+      onNewPage={() => void createPage(null)} onImport={() => fileRef.current?.click()}
+      createBusy={createBusy} pages={pages} activeId={activeId}
+      favorites={favoriteSet} favoritePages={favoritePages} recentPages={recentPages}
+      treeLoading={treeLoading} treeError={treeError} onTreeRetry={() => void reloadTree(session)}
+      treeActions={treeActions} open={mobileOpen} onClose={() => setMobileOpen(false)} />
+    <section className="nb-main">
+      {activeId && <Topbar status={saveStatus} hasDraft={Boolean(current && draftsRef.current.has(current.id))}
+        onRetrySave={() => { if (current) void savePage(current.id); }} onDownload={exportCurrent}
+        breadcrumbs={ancestors} currentTitle={title} updatedAt={current?.updatedAt ?? null}
+        favorite={Boolean(activeId && favoriteSet.has(activeId))} onFavorite={() => { if (activeId) void toggleFavorite(activeId); }}
+        onSidebarToggle={toggleSidebar}
+        onOpenBreadcrumb={id => { if (id) void openPage(id); else leaveCurrent(); }}
+        readOnly={readOnly} onToggleReadOnly={() => setReadOnly(!readOnly)}
+        onHistory={() => setDialog('history')} disabled={currentLocked} pageMenuItems={pageMenuItems} />}
+      {!activeId && <header className="nb-topbar">
+        <button className="icon-button nb-sidebar-toggle" aria-label="切换导航" onClick={toggleSidebar}><Icon name="sidebar" size={17} /></button>
+        <nav className="nb-crumbs" aria-label="页面位置"><strong>工作台</strong></nav></header>}
+      {actionStorageError && <NoticeBar tone="danger" alert>{actionStorageError}<button onClick={() => location.reload()}>重新读取</button></NoticeBar>}
+      {pendingActions.map(pending => <NoticeBar tone="warn" key={pending.key}>
         {pending.title || '未命名页面'}：{pending.operation === 'trash' ? '删除' : '恢复'}结果待确认，相关页面暂停自动保存。
         <button disabled={pageActionBusy} onClick={() => void performPageAction(pending)}>重试同一操作</button>
-      </div>)}
-      {pendingCreates.map(pending => <div className="nbase-reauth-banner" role="status" key={pending.key}>有一笔尚未确认的页面创建：{pending.body.title || '未命名页面'}。
+      </NoticeBar>)}
+      {pendingCreates.map(pending => <NoticeBar tone="warn" key={pending.key}>有一笔尚未确认的页面创建：{pending.body.title || '未命名页面'}。
         <button disabled={createBusy} onClick={() => void performCreate(pending)}>重试同一笔创建</button>
         <button onClick={() => download('待创建页面-原始数据', JSON.stringify(pending.body.content, null, 2), 'application/json', '.json')}>下载原始数据</button>
         <button disabled={createBusy} onClick={() => { if (!confirm('确定放弃这笔待确认创建吗？如果服务端已经提交，页面仍会保留在目录中。')) return;
@@ -944,62 +1026,72 @@ export function PersistentWorkspace() {
             untrackPendingCreate(pending.key); void reloadTree(session);
           }).catch(() => setNotice('无法清除本机待创建记录。'));
         }}>放弃记录</button>
-      </div>)}
-      {pendingUploads.filter(item => item.pageId === activeId).map(pending => <div className="nbase-reauth-banner" role="status" key={pending.id}>
+      </NoticeBar>)}
+      {pendingUploads.filter(item => item.pageId === activeId).map(pending => <NoticeBar tone="warn" key={pending.id}>
         {pending.file.name || '附件'} 上传结果尚未确认，原文件仍在本机。
         <button onClick={() => void retryUpload(pending)}>用同一 ID 重试上传</button>
         <button onClick={() => setPendingUploads(previous => previous.filter(item => item.id !== pending.id))}>放弃重试</button>
-      </div>)}
-      {reauth && <div className="nbase-reauth-banner" role="alert">登录已失效，继续输入会保留本机草稿。
+      </NoticeBar>)}
+      {reauth && <NoticeBar tone="danger" alert>登录已失效，继续输入会保留本机草稿。
         <button onClick={() => setShowReauthForm(true)}>重新登录</button>
-        {current && <button onClick={exportCurrent}>下载当前内容</button>}</div>}
-      {current && otherDraft && !draftsRef.current.has(current.id) && <div className="nbase-reauth-banner" role="status">
+        {current && <button onClick={exportCurrent}>下载当前内容</button>}</NoticeBar>}
+      {current && otherDraft && !draftsRef.current.has(current.id) && <NoticeBar tone="info">
         发现此前会话或其他标签留下的本机草稿，当前页面未自动覆盖。
         <button onClick={recoverOtherDraft}>检查并恢复草稿</button>
-      </div>}
-      <main className="main-scroll">
-        {activeId ? loadingPage ? <div className="collection" role="status">正在读取页面…</div>
-          : conflict ? <section className="collection nbase-conflict" role="alert"><div className="collection-eyebrow">修订冲突</div>
-            <h1>本机草稿与服务端版本不同</h1><p>本机内容没有被覆盖。你可以下载草稿，或另存为一个新页面。</p>
-            <div className="nbase-conflict-actions"><button className="quiet-button" onClick={() => void downloadPage(
-              `${conflict.draft.title || '页面'}-本机草稿`, conflict.draft.markdown, conflict.draft.content)}>下载本机草稿</button>
-              <button className="primary-button" disabled={createBusy} onClick={() => void createPage(conflict.server.parentId,
-                `${conflict.draft.title || '未命名页面'}（冲突副本）`, conflict.draft.content, conflict.draft)}>另存为新页面</button></div>
+      </NoticeBar>}
+      <main className="nb-scroll">
+        {activeId ? loadingPage ? <div className="nb-home" role="status">正在读取页面…</div>
+          : conflict ? <section className="nb-conflict-card" role="alert">
+            <h1>此页面已在其他地方更新</h1>
+            <p>另一个标签页或设备保存了新版本。你的修改尚未覆盖它。</p>
+            <div className="nb-conflict-actions">
+              <button className="nb-btn nb-btn-primary" disabled={createBusy} onClick={() => void createPage(conflict.server.parentId,
+                `${conflict.draft.title || '未命名页面'}（冲突副本）`, conflict.draft.content, conflict.draft)}>另存为副本</button>
+              <button className="nb-btn" onClick={() => void downloadPage(
+                `${conflict.draft.title || '页面'}-本机草稿`, conflict.draft.markdown, conflict.draft.content)}>下载我的内容</button>
+            </div>
             <details><summary>查看本机 Markdown</summary><pre>{conflict.draft.markdown}</pre></details>
-          </section> : current ? <div className="document-layout"><article className="document-paper"><div className="document-heading">
-            <span className="document-eyebrow"><Icon name="page" size={15} />服务端文档 · 修订 {current.revision}</span>
-            {readOnly ? <h1>{title || '未命名页面'}</h1> : <input className="page-title" aria-label="页面标题" value={title} disabled={currentLocked}
-              onChange={event => changeTitle(event.target.value)} placeholder="未命名页面" />}
-            <div className="document-meta"><span className="avatar">我</span><span>{workspace?.name}</span><span>·</span>
-              <span>{editorSnapshot?.plainText.length ?? 0} 字符</span><span>·</span><span>{saveStatus}</span></div></div>
-            {supported && initialContent ? <DocumentEditor key={`${current.id}:${editorEpoch}`} ref={editorRef} documentId={current.id}
-              initialContent={initialContent} readOnly={readOnly || currentLocked}
-              onChange={(id, snapshot) => { if (id === activeIdRef.current) markDraft(id, titleRef.current, snapshot); }}
-              onReady={(id, snapshot) => { setEditorSnapshot(snapshot);
-                if (pendingSearchRef.current?.pageId === id) requestAnimationFrame(() => locatePendingSearch(id));
-              }} onNotice={setNotice}
-              workspaceId={workspace?.id} onUploadFiles={uploadFiles} />
-              : <div role="alert" className="nbase-unsupported"><h2>暂不能打开此格式版本</h2>
-                <p>原始数据仍保留在服务端。请先下载副本，等待兼容升级。</p>
-                <button className="quiet-button" onClick={exportCurrent}>下载原始 JSON</button></div>}
-            <div className="document-end"><span />写下值得留下的想法<span /></div></article></div>
-          : <section className="collection" role="alert">页面暂时无法打开。{saveStatus}</section>
-          : <section className="collection"><div className="collection-eyebrow">{workspace?.name}</div>
-            <div className="collection-heading"><div><h1>{collection === 'recent' ? '最近访问' : '工作台'}</h1>
-              <p>{collection === 'recent' ? '按本次会话打开顺序排列。' : '页面保存在本机隔离的 PostgreSQL 中。'}</p></div>
-              <button className="primary-button" disabled={createBusy} onClick={() => void createPage(null)}><Icon name="plus" size={16} />新建页面</button></div>
-            <div className="list-heading"><span>页面</span><span>{collectionPages.length} 篇</span></div>
-            {collectionPages.length ? <div className="document-list">{collectionPages.map(page => <div className="document-row" key={page.id}>
-              <Icon name="page" size={20} /><button className="document-row-main" onClick={() => void openPage(page.id)}>
-                <strong>{page.title || '未命名页面'}</strong><small>修订 {page.revision} · {new Date(page.updatedAt).toLocaleString()}</small>
-              </button></div>)}</div> : !treeLoading && <div className="empty-state"><h3>还没有页面</h3><p>创建第一篇，开始写作。</p></div>}
-          </section>}
+          </section> : current ? <>
+            <PageHeader icon={current.icon} cover={current.cover} editable={!readOnly && !currentLocked}
+              onIcon={icon => setIcon(current.id, icon)} onCover={cover => setCover(current.id, cover)}
+              title={readOnly ? <h1 className="nb-doc-title-static">{title || '未命名页面'}</h1>
+                : <input className="nb-doc-title page-title" aria-label="页面标题" value={title} disabled={currentLocked}
+                  onChange={event => changeTitle(event.target.value)} placeholder="未命名页面" />} />
+            <div className="nb-doc-body">
+              {supported && initialContent ? <DocumentEditor key={`${current.id}:${editorEpoch}`} ref={editorRef} documentId={current.id}
+                initialContent={initialContent} readOnly={readOnly || currentLocked}
+                onChange={(id, snapshot) => { if (id === activeIdRef.current) markDraft(id, titleRef.current, snapshot); }}
+                onReady={(id, snapshot) => { setEditorSnapshot(snapshot);
+                  if (pendingSearchRef.current?.pageId === id) requestAnimationFrame(() => locatePendingSearch(id));
+                }} onNotice={setNotice}
+                workspaceId={workspace?.id} onUploadFiles={uploadFiles} />
+                : <div role="alert" className="nbase-unsupported"><h2>暂不能打开此格式版本</h2>
+                  <p>原始数据仍保留在服务端。请先下载副本，等待兼容升级。</p>
+                  <button className="nb-btn" onClick={exportCurrent}>下载原始 JSON</button></div>}
+            </div>
+            <Toc outline={editorSnapshot?.outline ?? []} />
+          </> : <section className="nb-home" role="alert">页面暂时无法打开。{saveStatus.text}</section>
+          : pages.length ? <section className="nb-home">
+            <div className="nb-home-eyebrow">{workspace?.name}</div>
+            <h1>最近编辑</h1>
+            <div className="nb-home-list">{homePages.map(page => <button className="nb-home-row" key={page.id} onClick={() => void openPage(page.id)}>
+              <PageIcon page={page} size={20} /><span>
+                <strong>{page.title || '未命名页面'}</strong>
+                <small>{ancestorsOf(page.id)} · {relativeTime(page.updatedAt)}</small>
+              </span></button>)}</div>
+            <div style={{ marginTop: 22 }}><button className="nb-btn nb-btn-primary" disabled={createBusy} onClick={() => void createPage(null)}><Icon name="plus" size={15} /> 新建页面</button></div>
+          </section>
+          : treeLoading ? <section className="nb-home" role="status">正在加载目录…</section>
+          : <section className="nb-empty"><div>
+            <div className="nb-empty-emoji">📝</div>
+            <h1>开始写第一篇页面</h1>
+            <p>页面可以层层嵌套，组织你的笔记、计划和资料。</p>
+            <div className="nb-empty-actions">
+              <button className="nb-btn nb-btn-primary" disabled={createBusy} onClick={() => void createPage(null)}>新建页面</button>
+              <button className="nb-btn" onClick={() => fileRef.current?.click()}>导入 Markdown</button>
+            </div>
+          </div></section>}
       </main>
-      {current && !conflict && <div className="nbase-page-footer">
-        <button className="quiet-button" disabled={createBusy || currentLocked} onClick={() => void createPage(current.id)}>添加子页面</button>
-        <button className="quiet-button" disabled={currentLocked} onClick={() => { setMoveTarget(current.parentId ?? ''); setDialog('move'); }}>移动页面</button>
-        <button className="quiet-button" disabled={currentLocked} onClick={() => setDialog('delete')}><Icon name="trash" size={14} />移入回收站</button>
-      </div>}
     </section>
     <input ref={fileRef} type="file" accept=".md,text/markdown" className="visually-hidden" aria-label="选择 Markdown 文件"
       onChange={event => { void importFile(event.target.files?.[0]); event.target.value = ''; }} />
@@ -1007,46 +1099,55 @@ export function PersistentWorkspace() {
       className="visually-hidden" aria-label="选择图片或附件"
       onChange={event => { const files = Array.from(event.target.files ?? []); event.target.value = '';
         void uploadFiles(files).then(uploaded => editorRef.current?.insertAttachments(uploaded)); }} />
-    {notice && <div className="toast" role="status"><Icon name="check" size={16} /><span>{notice}</span>
-      <button className="icon-button" aria-label="关闭提示" onClick={() => setNotice('')}><Icon name="close" /></button></div>}
-    {reauth && showReauthForm && <div className="nbase-reauth-backdrop"><Login title="重新登录以继续保存" onLogin={login} error={authError} busy={authBusy} />
-      <p>本机草稿仍保留。可以关闭窗口继续输入，稍后再登录。</p>
-      <button className="quiet-button" onClick={() => setShowReauthForm(false)}>继续写作</button></div>}
+    {notice && <Toast text={notice} onClose={() => setNotice('')} />}
+    {reauth && showReauthForm && <div className="nb-auth" style={{ position: 'fixed', inset: 0, zIndex: 90 }}><div>
+      <Login title="重新登录以继续保存" onLogin={login} error={authError} busy={authBusy} />
+      <p style={{ textAlign: 'center' }}><button className="nb-btn nb-btn-quiet" onClick={() => setShowReauthForm(false)}>继续写作</button></p>
+      <p className="nb-login-foot">本机草稿仍保留。可以关闭窗口继续输入，稍后再登录。</p>
+    </div></div>}
     {dialog === 'source' && <Modal title="Markdown 源码" wide onClose={() => setDialog(null)}>
       <p className="dialog-description">只读视图，包含当前编辑器尚未保存的内容。</p>
       <textarea className="source-view" readOnly aria-label="Markdown 源码，只读"
         value={editorRef.current?.getSnapshot().markdown ?? editorSnapshot?.markdown ?? ''} />
-      <div className="dialog-actions"><button className="primary-button" onClick={exportCurrent}>下载页面（含附件）</button></div></Modal>}
+      <div className="dialog-actions"><button className="nb-btn nb-btn-primary" onClick={exportCurrent}>下载页面（含附件）</button></div></Modal>}
     {dialog === 'search' && workspace && <PersistentSearchDialog workspaceId={workspace.id}
+      pages={pages} recentPages={recentPages}
       onClose={() => setDialog(null)} onOpen={openSearchResult}
+      onCommand={command => {
+        setDialog(null);
+        if (command === 'new') void createPage(null);
+        if (command === 'import') fileRef.current?.click();
+        if (command === 'trash') setDialog('trash');
+        if (command === 'theme') setTheme(theme === 'dark' ? 'light' : 'dark');
+      }}
       onAuthError={() => { setReauth(true); setShowReauthForm(true); setDialog(null); }} />}
     {dialog === 'history' && workspace && current && <PageHistoryDialog key={current.id} workspaceId={workspace.id}
       pageId={current.id} currentRevision={current.revision} busy={pageActionBusy}
       onRestore={(version: PageVersion) => void beginPageAction('restore-version', current.id, current.revision, title, version.revision)}
       onClose={() => setDialog(null)} />}
-    {dialog === 'trash' && workspace && <TrashDialog workspaceId={workspace.id} busy={pageActionBusy}
+    {dialog === 'trash' && workspace && <TrashDialog workspaceId={workspace.id} busy={pageActionBusy} pages={pages}
       onRestore={(page: TrashedPageDocument) => void beginPageAction('restore', page.id, page.revision, page.title)}
       onClose={() => setDialog(null)} />}
     {dialog === 'delete' && current && <Modal title="移入回收站" onClose={() => setDialog(null)}>
       <p className="dialog-description">将“{title || '未命名页面'}”及 {subtreeIds(current.id).length - 1} 篇子页面移入回收站。操作前会先保存当前更改；尚未处理的本机草稿会阻止删除。</p>
       <p className="dialog-description">历史、附件与页面 ID 保留，暂不自动清理。</p>
-      <div className="dialog-actions"><button className="quiet-button" onClick={() => setDialog(null)}>取消</button>
-        <button className="primary-button" disabled={pageActionBusy} onClick={() => void beginPageAction('trash', current.id, current.revision, title)}>
+      <div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button>
+        <button className="nb-btn nb-btn-primary" disabled={pageActionBusy} onClick={() => void beginPageAction('trash', current.id, current.revision, title)}>
           {pageActionBusy ? '正在处理…' : '确认移入回收站'}</button></div></Modal>}
     {dialog === 'move' && current && <Modal title="移动页面" onClose={() => setDialog(null)}>
       <label className="field-label" htmlFor="persistent-move-target">移动到</label>
       <select id="persistent-move-target" className="select-field" value={moveTarget} onChange={event => setMoveTarget(event.target.value)}>
         <option value="">个人空间（根目录）</option>{pages.filter(page => page.id !== current.id).map(page =>
           <option key={page.id} value={page.id}>{page.title || '未命名页面'}</option>)}</select>
-      <div className="dialog-actions"><button className="quiet-button" onClick={() => setDialog(null)}>取消</button>
-        <button className="primary-button" onClick={() => void movePage()}>移动并保存</button></div></Modal>}
+      <div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button>
+        <button className="nb-btn nb-btn-primary" onClick={() => void movePage()}>移动并保存</button></div></Modal>}
     {dialog === 'import' && pendingImport && <Modal title="导入 Markdown" onClose={() => setDialog(null)}>
       <p className="dialog-description">转换为新的服务端页面。复杂格式可能变化，请保留原始文件。</p>
       <div className="import-warning"><strong>转换提示</strong><ul>{assessMarkdown(pendingImport.markdown).warnings.map((warning, index) =>
         <li key={index}>{warning}</li>)}</ul></div>
       <details className="import-preview"><summary>查看原始文本</summary><pre>{pendingImport.markdown}</pre></details>
-      <div className="dialog-actions"><button className="quiet-button" onClick={() => setDialog(null)}>取消</button>
-        <button className="quiet-button" onClick={() => download(`${pendingImport.title}-原始文件`, pendingImport.markdown)}>下载原文</button>
-        <button className="primary-button" disabled={createBusy} onClick={completeImport}>转换并创建</button></div></Modal>}
+      <div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button>
+        <button className="nb-btn" onClick={() => download(`${pendingImport.title}-原始文件`, pendingImport.markdown)}>下载原文</button>
+        <button className="nb-btn nb-btn-primary" disabled={createBusy} onClick={completeImport}>转换并创建</button></div></Modal>}
   </div>;
 }

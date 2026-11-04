@@ -1,6 +1,6 @@
 # 好看、好用的设计原则
 
-“好看、好用”为用户确认的要求。2026-10-25 用户选择 Docmost / Notion 作为参考，先制作 HTML 原型，再开始 P1 实现。参考原型位于 `designs/nbase-workspace/index.html`，正式前端代码位于 `apps/web`；原型与 P1 均使用会话内示例内容，最终组织方式仍待体验确认。
+“好看、好用”为用户确认的要求。2026-10-25 用户选择 Docmost / Notion 作为参考，先制作 HTML 原型，再开始 P1 实现。当前参考原型为 `designs/nbase-v2`（Notion 家族三方向比较，用户选定方向 B「Notion × Outline」）；视觉令牌（颜色/圆角/阴影/双主题）集中在 `apps/web/src/shell/shell.css` 的 `--nb-*` 变量，持久化工作台与会话演示共用同一套 `nb-` 组件；正式前端代码位于 `apps/web`；原型与 P1 均使用会话内示例内容，最终组织方式仍待体验确认。
 
 ## 视觉方向提案
 

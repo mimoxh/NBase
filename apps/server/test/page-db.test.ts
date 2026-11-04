@@ -47,7 +47,7 @@ test('isolated PostgreSQL page path protects identity, revisions and retries', {
     url.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: url.toString(), max: 4, connectionTimeoutMillis: 5000 });
     attachmentRoot = await mkdtemp(join(tmpdir(), 'nbase-attachment-test-'));
-    assert.equal(await runMigrations(pool), 5);
+    assert.equal(await runMigrations(pool), 6);
     const owner = await initializeOwner(pool, 'owner', await hashPassword(ownerPassword), '测试空间');
     app = await buildApp({
       auth: { repository: new PgAuthRepository(pool), publicOrigin: origin },
@@ -468,7 +468,7 @@ test('page-tree returns the reachable subtree in created order with bounded resu
     url.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: url.toString(), max: 4, connectionTimeoutMillis: 5000 });
     attachmentRoot = await mkdtemp(join(tmpdir(), 'nbase-attachment-test-'));
-    assert.equal(await runMigrations(pool), 5);
+    assert.equal(await runMigrations(pool), 6);
     const owner = await initializeOwner(pool, 'owner', await hashPassword(ownerPassword), '测试空间');
     const pages = new PgPageRepository(pool);
     app = await buildApp({
@@ -519,6 +519,166 @@ test('page-tree returns the reachable subtree in created order with bounded resu
     const limited = await pages.tree(owner.workspaceId, owner.userId, 2);
     assert.equal(limited.truncated, true);
     assert.deepEqual(limited.pages.map(page => page.id), [rootId, childId]);
+  } finally {
+    if (app) await app.close();
+    if (pool) await pool.end();
+    if (created) await admin.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
+    await admin.end();
+    if (attachmentRoot && dirname(attachmentRoot) === tmpdir() && basename(attachmentRoot).startsWith('nbase-attachment-test-')) {
+      await rm(attachmentRoot, { recursive: true, force: true });
+    }
+  }
+});
+
+test('page appearance and favorites survive revisions, search, trash and restore', {
+  skip: !sourceUrl && 'Set NBASE_TEST_DATABASE_URL to a disposable local PostgreSQL instance',
+}, async () => {
+  assert.ok(sourceUrl);
+  const source = new URL(sourceUrl);
+  assert.equal(source.hostname, '127.0.0.1');
+  assert.equal(source.port, '54329');
+  assert.equal(source.pathname, '/nbase_p2');
+  const admin = new pg.Pool({ connectionString: sourceUrl, max: 2, connectionTimeoutMillis: 5000 });
+  const databaseName = `nbase_p2_test_${randomUUID().replaceAll('-', '')}`;
+  let created = false;
+  let pool: pg.Pool | undefined;
+  let app: Awaited<ReturnType<typeof buildApp>> | undefined;
+  let attachmentRoot: string | undefined;
+  try {
+    await admin.query(`CREATE DATABASE "${databaseName}"`);
+    created = true;
+    const url = new URL(sourceUrl);
+    url.pathname = `/${databaseName}`;
+    pool = new pg.Pool({ connectionString: url.toString(), max: 4, connectionTimeoutMillis: 5000 });
+    attachmentRoot = await mkdtemp(join(tmpdir(), 'nbase-attachment-test-'));
+    assert.equal(await runMigrations(pool), 6);
+    const owner = await initializeOwner(pool, 'owner', await hashPassword(ownerPassword), '测试空间');
+    app = await buildApp({
+      auth: { repository: new PgAuthRepository(pool), publicOrigin: origin },
+      pages: new PgPageRepository(pool),
+      attachments: new PgAttachmentRepository(pool, attachmentRoot),
+    });
+    const base = `/api/workspaces/${owner.workspaceId}`;
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login',
+      headers: { origin }, payload: { loginName: 'owner', password: ownerPassword } });
+    const cookie = String(login.headers['set-cookie']).split(';', 1)[0]!;
+    const csrfToken = login.json().csrfToken as string;
+    const readHeaders = { cookie };
+    const writeHeaders = { cookie, origin, 'x-csrf-token': csrfToken };
+
+    // create with icon/cover; invalid values → 400 INVALID_REQUEST
+    const createdPage = await app.inject({ method: 'POST', url: `${base}/pages`, headers: writeHeaders,
+      payload: { clientMutationId: randomUUID(), parentId: null, title: '手册', icon: '🐘', cover: 'slate', content: content('备份') } });
+    assert.equal(createdPage.statusCode, 201, createdPage.body);
+    const pageId = createdPage.json().id as string;
+    assert.equal(createdPage.json().icon, '🐘');
+    assert.equal(createdPage.json().cover, 'slate');
+    for (const bad of [{ icon: 'AB' }, { icon: 'A' }, { icon: '📄📄' }, { cover: 'beige' }, { cover: 'https://x' }]) {
+      const rejected: { statusCode: number; json(): { error?: string } } = await app.inject(
+        { method: 'POST', url: `${base}/pages`, headers: writeHeaders,
+          payload: { clientMutationId: randomUUID(), parentId: null, title: 'x', ...bad, content: content('x') } });
+      assert.equal(rejected.statusCode, 400, JSON.stringify(bad));
+      assert.equal(rejected.json().error, 'INVALID_REQUEST');
+    }
+
+    // icon-only update is a normal revisioned update with a snapshot
+    const iconOnly = await app.inject({ method: 'PATCH', url: `${base}/pages/${pageId}`, headers: writeHeaders,
+      payload: { clientMutationId: randomUUID(), expectedRevision: '1', icon: '📘' } });
+    assert.equal(iconOnly.statusCode, 200, iconOnly.body);
+    assert.equal(iconOnly.json().revision, '2');
+    assert.equal(iconOnly.json().icon, '📘');
+    assert.equal(iconOnly.json().cover, 'slate');
+    const v2 = await app.inject({ method: 'GET', url: `${base}/pages/${pageId}/history/2`, headers: readHeaders });
+    assert.equal(v2.statusCode, 200);
+    assert.equal(v2.json().icon, '📘');
+    assert.equal(v2.json().cover, 'slate');
+    const removed = await app.inject({ method: 'PATCH', url: `${base}/pages/${pageId}`, headers: writeHeaders,
+      payload: { clientMutationId: randomUUID(), expectedRevision: '2', icon: null, cover: null } });
+    assert.equal(removed.json().icon, null);
+    assert.equal(removed.json().cover, null);
+
+    // restore-version keeps the CURRENT appearance (restores title/body only)
+    const restyled = await app.inject({ method: 'PATCH', url: `${base}/pages/${pageId}`, headers: writeHeaders,
+      payload: { clientMutationId: randomUUID(), expectedRevision: '3', icon: '🧪', cover: 'rose', title: '手册 v4' } });
+    assert.equal(restyled.json().revision, '4');
+    const rv = await app.inject({ method: 'POST', url: `${base}/pages/${pageId}/restore-version`, headers: writeHeaders,
+      payload: { clientMutationId: randomUUID(), expectedRevision: '4', sourceRevision: '1' } });
+    assert.equal(rv.statusCode, 200, rv.body);
+    assert.equal(rv.json().icon, '🧪');
+    assert.equal(rv.json().cover, 'rose');
+    assert.equal(rv.json().title, '手册');
+
+    // appearance flows through tree, trash summaries and search
+    const tree = await app.inject({ method: 'GET', url: `${base}/page-tree`, headers: readHeaders });
+    assert.equal(tree.json().pages.find((p: { id: string }) => p.id === pageId).icon, '🧪');
+    const search = await app.inject({ method: 'GET', url: `${base}/search?q=${encodeURIComponent('手册')}`, headers: readHeaders });
+    assert.equal(search.json().results[0].icon, '🧪');
+    const cur = await app.inject({ method: 'GET', url: `${base}/pages/${pageId}`, headers: readHeaders });
+    const trashed = await app.inject({ method: 'POST', url: `${base}/pages/${pageId}/trash`, headers: writeHeaders,
+      payload: { clientMutationId: randomUUID(), expectedRevision: cur.json().revision } });
+    assert.equal(trashed.statusCode, 200);
+    const trashList = await app.inject({ method: 'GET', url: `${base}/trash`, headers: readHeaders });
+    const trashRow = trashList.json().pages.find((p: { id: string }) => p.id === pageId);
+    assert.equal(trashRow.icon, '🧪');
+    assert.equal(trashRow.cover, 'rose');
+
+    // favorites: PUT idempotent, GET lists active pages, trashed page 404 + hidden until restore
+    const fav404 = await app.inject({ method: 'PUT', url: `${base}/favorites/${pageId}`, headers: writeHeaders, payload: {} });
+    assert.equal(fav404.statusCode, 404, 'trashed page is not favorite-able');
+    const badId = await app.inject({ method: 'PUT', url: `${base}/favorites/not-a-uuid`, headers: writeHeaders, payload: {} });
+    assert.equal(badId.statusCode, 404);
+    const ghost = await app.inject({ method: 'PUT', url: `${base}/favorites/${randomUUID()}`, headers: writeHeaders, payload: {} });
+    assert.equal(ghost.statusCode, 404);
+    const restored = await app.inject({ method: 'POST', url: `${base}/pages/${pageId}/restore`, headers: writeHeaders,
+      payload: { clientMutationId: randomUUID(), expectedRevision: trashed.json().revision } });
+    assert.equal(restored.statusCode, 200, restored.body);
+    const fav1 = await app.inject({ method: 'PUT', url: `${base}/favorites/${pageId}`, headers: writeHeaders, payload: {} });
+    assert.equal(fav1.statusCode, 204, fav1.body);
+    const fav2 = await app.inject({ method: 'PUT', url: `${base}/favorites/${pageId}`, headers: writeHeaders, payload: {} });
+    assert.equal(fav2.statusCode, 204);
+    let list = await app.inject({ method: 'GET', url: `${base}/favorites`, headers: readHeaders });
+    assert.deepEqual(list.json().pageIds, [pageId]);
+    // write path requires Origin + CSRF
+    const noOrigin = await app.inject({ method: 'PUT', url: `${base}/favorites/${pageId}`, headers: { cookie }, payload: {} });
+    assert.equal(noOrigin.statusCode, 403);
+    const noCsrf = await app.inject({ method: 'DELETE', url: `${base}/favorites/${pageId}`, headers: { cookie, origin }, payload: {} });
+    assert.equal(noCsrf.statusCode, 403);
+    // trashed favorite is hidden by GET but survives; visible again after restore
+    const afterRestore = await app.inject({ method: 'GET', url: `${base}/pages/${pageId}`, headers: readHeaders });
+    const trashed2 = await app.inject({ method: 'POST', url: `${base}/pages/${pageId}/trash`, headers: writeHeaders,
+      payload: { clientMutationId: randomUUID(), expectedRevision: afterRestore.json().revision } });
+    assert.equal(trashed2.statusCode, 200);
+    list = await app.inject({ method: 'GET', url: `${base}/favorites`, headers: readHeaders });
+    assert.deepEqual(list.json().pageIds, []);
+    const restored2 = await app.inject({ method: 'POST', url: `${base}/pages/${pageId}/restore`, headers: writeHeaders,
+      payload: { clientMutationId: randomUUID(), expectedRevision: trashed2.json().revision } });
+    assert.equal(restored2.statusCode, 200);
+    list = await app.inject({ method: 'GET', url: `${base}/favorites`, headers: readHeaders });
+    assert.deepEqual(list.json().pageIds, [pageId]);
+    // DELETE is idempotent
+    const del = await app.inject({ method: 'DELETE', url: `${base}/favorites/${pageId}`, headers: writeHeaders, payload: {} });
+    assert.equal(del.statusCode, 204);
+    const delAgain = await app.inject({ method: 'DELETE', url: `${base}/favorites/${pageId}`, headers: writeHeaders, payload: {} });
+    assert.equal(delAgain.statusCode, 204);
+    list = await app.inject({ method: 'GET', url: `${base}/favorites`, headers: readHeaders });
+    assert.deepEqual(list.json().pageIds, []);
+    // limit: 201st favorite → 409 FAVORITE_LIMIT (seed rows directly, one tx per PUT)
+    const extraIds: string[] = [];
+    for (let i = 0; i < 200; i += 1) {
+      const c = await app.inject({ method: 'POST', url: `${base}/pages`, headers: writeHeaders,
+        payload: { clientMutationId: randomUUID(), parentId: null, title: `f${i}`, content: content('x') } });
+      extraIds.push(c.json().id);
+    }
+    await pool.query(`INSERT INTO page_favorites (workspace_id, user_id, page_id)
+      SELECT $1, $2, unnest($3::uuid[])`, [owner.workspaceId, owner.userId, extraIds]);
+    const over = await app.inject({ method: 'PUT', url: `${base}/favorites/${pageId}`, headers: writeHeaders, payload: {} });
+    assert.equal(over.statusCode, 409);
+    assert.equal(over.json().error, 'FAVORITE_LIMIT');
+    // cross-workspace isolation: a second user's session never sees these favorites
+    const other = await app.inject({ method: 'GET', url: `/api/workspaces/${randomUUID()}/favorites`, headers: readHeaders });
+    assert.equal(other.statusCode, 404);
+    const unauth = await app.inject({ method: 'GET', url: `${base}/favorites` });
+    assert.equal(unauth.statusCode, 401);
   } finally {
     if (app) await app.close();
     if (pool) await pool.end();

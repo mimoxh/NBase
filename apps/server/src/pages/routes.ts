@@ -5,7 +5,7 @@ import {
   clearSessionCookie, publicOriginConfig,
 } from '../auth/session.js';
 import { authorizeWorkspace, WorkspaceRouteError } from '../auth/workspace.js';
-import { ContentValidationError, validateDocumentContent } from './validate.js';
+import { ContentValidationError, PageFieldError, validateDocumentContent, validatePageCover, validatePageIcon } from './validate.js';
 import { decodePageCursor, isRevision, isUuid, PageError, PgPageRepository } from './repository.js';
 
 interface WorkspaceParams { workspaceId: string }
@@ -31,17 +31,20 @@ function createBody(value: unknown): CreatePageRequest {
   if (!object(value) || !isUuid(value.clientMutationId) || !parentId(value.parentId) || !title(value.title)) {
     throw new RouteError(400, 'INVALID_REQUEST');
   }
-  return {
+  const body: CreatePageRequest = {
     clientMutationId: value.clientMutationId,
     parentId: value.parentId,
     title: value.title,
     content: validateDocumentContent(value.content),
   };
+  if (Object.hasOwn(value, 'icon')) body.icon = validatePageIcon(value.icon);
+  if (Object.hasOwn(value, 'cover')) body.cover = validatePageCover(value.cover);
+  return body;
 }
 
 function updateBody(value: unknown): UpdatePageRequest {
   if (!object(value) || !isUuid(value.clientMutationId) || !isRevision(value.expectedRevision)
-    || !(['title', 'parentId', 'content'].some((key) => Object.hasOwn(value, key)))) {
+    || !(['title', 'parentId', 'content', 'icon', 'cover'].some((key) => Object.hasOwn(value, key)))) {
     throw new RouteError(400, 'INVALID_REQUEST');
   }
   if (Object.hasOwn(value, 'title') && !title(value.title)) throw new RouteError(400, 'INVALID_REQUEST');
@@ -50,6 +53,8 @@ function updateBody(value: unknown): UpdatePageRequest {
   if (Object.hasOwn(value, 'title')) body.title = value.title as string;
   if (Object.hasOwn(value, 'parentId')) body.parentId = value.parentId as string | null;
   if (Object.hasOwn(value, 'content')) body.content = validateDocumentContent(value.content);
+  if (Object.hasOwn(value, 'icon')) body.icon = validatePageIcon(value.icon);
+  if (Object.hasOwn(value, 'cover')) body.cover = validatePageCover(value.cover);
   return body;
 }
 
@@ -64,6 +69,7 @@ function sendError(request: FastifyRequest, reply: FastifyReply, error: unknown,
   reply.header('Cache-Control', 'no-store');
   if (error instanceof PageError) return reply.code(error.statusCode).send(error.response());
   if (error instanceof ContentValidationError) return reply.code(422).send({ error: error.code });
+  if (error instanceof PageFieldError) return reply.code(400).send({ error: 'INVALID_REQUEST' });
   if (error instanceof WorkspaceRouteError) {
     if (error.clearCookie) reply.header('Set-Cookie', clearSessionCookie(secure));
     return reply.code(error.statusCode).send({ error: error.code });
@@ -178,6 +184,34 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
       if (!isUuid(request.params.pageId)) throw new RouteError(404, 'NOT_FOUND');
       const page = await pages.trashed(request.params.workspaceId, actorId, request.params.pageId);
       return page ? reply.send(page) : reply.code(404).send({ error: 'NOT_FOUND' });
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.get<{ Params: WorkspaceParams }>('/api/workspaces/:workspaceId/favorites', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const actorId = await authorize(request, request.params.workspaceId, false);
+      return reply.send(await pages.favorites(request.params.workspaceId, actorId));
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.put<{ Params: PageParams }>('/api/workspaces/:workspaceId/favorites/:pageId', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const actorId = await authorize(request, request.params.workspaceId, true);
+      if (!isUuid(request.params.pageId)) throw new RouteError(404, 'NOT_FOUND');
+      await pages.favoriteAdd(request.params.workspaceId, actorId, request.params.pageId);
+      return reply.code(204).send();
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.delete<{ Params: PageParams }>('/api/workspaces/:workspaceId/favorites/:pageId', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const actorId = await authorize(request, request.params.workspaceId, true);
+      if (!isUuid(request.params.pageId)) throw new RouteError(404, 'NOT_FOUND');
+      await pages.favoriteRemove(request.params.workspaceId, actorId, request.params.pageId);
+      return reply.code(204).send();
     } catch (error) { return sendError(request, reply, error, secure); }
   });
 

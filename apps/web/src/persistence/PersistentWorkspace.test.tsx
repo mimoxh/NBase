@@ -1,4 +1,4 @@
-// @vitest-environment jsdom
+﻿// @vitest-environment jsdom
 import { act, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import type { AuthSessionResponse, PageDocument } from '@nbase/contracts';
@@ -16,7 +16,7 @@ it('keeps writing and export available when pending-action storage cannot be rea
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   const session: AuthSessionResponse = { user: { id: 'user', loginName: 'owner' },
     workspaces: [{ id: 'workspace', name: '我的空间', role: 'owner' }], csrfToken: 'csrf', expiresAt: '2099-01-01T00:00:00Z' };
-  const page: PageDocument = { id: 'page', workspaceId: 'workspace', parentId: null, title: '故障样例', revision: '1',
+  const page: PageDocument = { id: 'page', workspaceId: 'workspace', parentId: null, icon: null, cover: null, title: '故障样例', revision: '1',
     content: createContentFromMarkdown('已有正文'), createdAt: '2026-10-27T00:00:00Z', updatedAt: '2026-10-27T00:00:00Z' };
   vi.spyOn(pageClient, 'session').mockResolvedValue(session);
   vi.spyOn(pageClient, 'tree').mockResolvedValue({ pages: [page], truncated: false });
@@ -28,12 +28,15 @@ it('keeps writing and export available when pending-action storage cannot be rea
   const root = createRoot(host);
   try {
     await act(async () => root.render(<PersistentWorkspace />));
-    const open = [...host.querySelectorAll('button')].find(button => button.textContent === page.title)!;
+    const open = [...host.querySelectorAll('button')].find(button => button.textContent?.endsWith(page.title))!;
     await act(async () => open.click());
     expect(host.textContent).toContain('网络保存已暂停');
     expect(host.querySelector('[aria-label="文档正文"]')?.getAttribute('contenteditable')).toBe('true');
     expect((host.querySelector('[aria-label="页面标题"]') as HTMLInputElement).disabled).toBe(false);
-    expect((host.querySelector('[aria-label="下载页面"]') as HTMLButtonElement).disabled).toBe(false);
+    const menuTrigger = host.querySelector('[aria-label="页面操作"]') as HTMLButtonElement;
+    await act(async () => menuTrigger.click());
+    const download = [...host.querySelectorAll('[role="menuitem"]')].find(item => item.textContent === '下载页面') as HTMLButtonElement;
+    expect(download).toBeDefined(); expect(download.disabled).toBe(false);
   } finally { await act(() => root.unmount()); host.remove(); }
 });
 
@@ -41,7 +44,7 @@ it('refreshes the deletion subtree and refuses to delete a newly moved child wit
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   const session: AuthSessionResponse = { user: { id: 'user', loginName: 'owner' },
     workspaces: [{ id: 'workspace', name: '我的空间', role: 'owner' }], csrfToken: 'csrf', expiresAt: '2099-01-01T00:00:00Z' };
-  const parent: PageDocument = { id: 'parent', workspaceId: 'workspace', parentId: null, title: '父页', revision: '1',
+  const parent: PageDocument = { id: 'parent', workspaceId: 'workspace', parentId: null, icon: null, cover: null, title: '父页', revision: '1',
     content: createContentFromMarkdown('父页正文'), createdAt: '2026-10-27T00:00:00Z', updatedAt: '2026-10-27T00:00:00Z' };
   const child: PageDocument = { ...parent, id: 'child', title: '移动来的子页', content: createContentFromMarkdown('已保存的子页') };
   let moved = false;
@@ -60,16 +63,17 @@ it('refreshes the deletion subtree and refuses to delete a newly moved child wit
   const trash = vi.spyOn(pageClient, 'trash');
   const host = document.createElement('div'); document.body.append(host); const root = createRoot(host);
   const clickText = async (text: string) => {
-    const button = [...host.querySelectorAll('button')].find(item => item.textContent === text)!;
+    const button = [...host.querySelectorAll('button')].find(item => item.textContent === text
+      || item.textContent?.endsWith(text) || item.getAttribute('aria-label') === text)!;
     expect(button).toBeDefined(); await act(async () => button.click());
   };
   try {
     await act(async () => root.render(<PersistentWorkspace />));
     await clickText(parent.title);
     moved = true;
-    await clickText('移入回收站'); await clickText('确认移入回收站');
+    await clickText('页面操作'); await clickText('移入回收站'); await clickText('确认移入回收站');
     expect(host.textContent).toContain('目录已变化');
-    await clickText('移入回收站');
+    await clickText('页面操作'); await clickText('移入回收站');
     expect(host.querySelector('[role="dialog"]')?.textContent).toContain('及 1 篇子页面');
     await clickText('确认移入回收站');
     expect(host.textContent).toContain('还有其他标签或会话的草稿');

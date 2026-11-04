@@ -15,6 +15,7 @@ const tables = {
   workspace_memberships: 'workspace_id, user_id', instance_state: 'singleton', pages: 'id',
   page_versions: 'workspace_id, page_id, revision',
   page_mutation_receipts: 'workspace_id, actor_user_id, client_mutation_id', attachments: 'id',
+  page_favorites: 'workspace_id, user_id, page_id',
 };
 const backupLock = '2026110301';
 const maxManifestBytes = 64 * 1024 * 1024;

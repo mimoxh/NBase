@@ -1,3 +1,4 @@
+import type { PageCoverId } from '@nbase/contracts';
 import type { EditorSnapshot } from '../editor/types';
 
 export interface Page {
@@ -7,6 +8,8 @@ export interface Page {
   markdown: string;
   snapshot?: EditorSnapshot;
   originalMarkdown?: string;
+  icon: string | null;
+  cover: PageCoverId | null;
   starred: boolean;
   deleted: boolean;
   deletionRoot?: string;
@@ -20,6 +23,8 @@ export type Action =
   | { type: 'create'; page: Page }
   | { type: 'rename'; id: string; title: string }
   | { type: 'star'; id: string }
+  | { type: 'icon'; id: string; icon: string | null }
+  | { type: 'cover'; id: string; cover: PageCoverId | null }
   | { type: 'move'; id: string; parentId: string | null }
   | { type: 'delete' | 'restore'; id: string }
   | { type: 'snapshot'; id: string; snapshot: EditorSnapshot; dirty: boolean };
@@ -46,6 +51,8 @@ export function workspaceReducer(state: Workspace, action: Action): Workspace {
     case 'create': return { ...state, pages: [...state.pages, action.page], currentId: action.page.id, view: 'document', recent: [action.page.id, ...state.recent] };
     case 'rename': return { ...state, pages: state.pages.map(p => p.id === action.id && p.title !== action.title ? { ...p, title: action.title, dirty: true } : p) };
     case 'star': return { ...state, pages: state.pages.map(p => p.id === action.id ? { ...p, starred: !p.starred, dirty: true } : p) };
+    case 'icon': return { ...state, pages: state.pages.map(p => p.id === action.id ? { ...p, icon: action.icon, dirty: true } : p) };
+    case 'cover': return { ...state, pages: state.pages.map(p => p.id === action.id ? { ...p, cover: action.cover, dirty: true } : p) };
     case 'snapshot': return { ...state, pages: state.pages.map(p => p.id === action.id ? { ...p, snapshot: action.snapshot, dirty: p.dirty || action.dirty } : p) };
     case 'move': return canMove(state.pages, action.id, action.parentId) ? { ...state, pages: state.pages.map(p => p.id === action.id ? { ...p, parentId: action.parentId, dirty: true } : p) } : state;
     case 'delete': {

@@ -4,6 +4,7 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { $getNodeByKey } from 'lexical';
 import type { NodeKey } from 'lexical';
 import { $isCodeNode, CodeNode } from '@lexical/code';
+import { Icon } from '../../components/Icon';
 
 type Props = { onNotice?: ((message: string) => void) | undefined };
 type Block = { key: string; top: number; left: number };
@@ -46,7 +47,7 @@ export function CodeCopyPlugin({ onNotice }: Props) {
         const element = editor.getElementByKey(key);
         if (!element) { keys.delete(key); continue; }
         const rect = element.getBoundingClientRect();
-        items.push({ key, top: rect.top - surfaceRect.top + 6, left: rect.right - surfaceRect.left - 40 });
+        items.push({ key, top: rect.top - surfaceRect.top + 6, left: rect.right - surfaceRect.left - 34 });
       }
       items.sort((a, b) => a.top - b.top);
       setBlocks(previous => sameBlocks(previous, items) ? previous : items);
@@ -104,8 +105,11 @@ export function CodeCopyPlugin({ onNotice }: Props) {
 
   if (!surface || !blocks.length) return null;
   return <>{blocks.map(block => createPortal(
-    <button key={block.key} type="button" className="nbase-code-copy"
-      style={{ top: block.top, left: block.left }} onClick={() => void copy(block.key)}>
-      {copied === block.key ? '已复制' : '复制'}
+    <button key={block.key} type="button"
+      className={`nbase-code-copy${copied === block.key ? ' is-copied' : ''}`}
+      style={{ top: block.top, left: block.left }} onClick={() => void copy(block.key)}
+      title={copied === block.key ? '已复制' : '复制代码'}
+      aria-label={copied === block.key ? '已复制' : '复制代码'}>
+      <Icon name={copied === block.key ? 'check' : 'copy'} size={14} />
     </button>, surface))}</>;
 }

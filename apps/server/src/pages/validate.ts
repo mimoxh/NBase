@@ -1,4 +1,4 @@
-import type { StoredDocumentContent } from '@nbase/contracts';
+import { pageCoverIds, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
 
 export const maxContentBytes = 1024 * 1024;
 const maxNodes = 20_000;
@@ -74,6 +74,32 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
   if (value.editorState.root.type !== 'root') invalid();
   visit(value.editorState.root, 0, false);
   return value as unknown as StoredDocumentContent;
+}
+
+export class PageFieldError extends Error {
+  constructor() { super('INVALID_REQUEST'); }
+}
+
+function invalidField(): never { throw new PageFieldError(); }
+
+const graphemeSegmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+const iconStart = /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}|[#*0-9]️?\u20E3)/u;
+const iconForbidden = /[\u0000-\u001f\u007f-\u009f\s\u202a-\u202e\u2066-\u2069]/u;
+
+/** Page icons are exactly one emoji grapheme (ZWJ, modifier and keycap sequences allowed). */
+export function validatePageIcon(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string' || value.length < 1 || value.length > 32) invalidField();
+  if ([...graphemeSegmenter.segment(value)].length !== 1) invalidField();
+  if (!iconStart.test(value) || iconForbidden.test(value)) invalidField();
+  return value;
+}
+
+/** Covers are client-rendered CSS presets from the shared allow-list. */
+export function validatePageCover(value: unknown): PageCoverId | null {
+  if (value === null) return null;
+  if (typeof value === 'string' && (pageCoverIds as readonly string[]).includes(value)) return value as PageCoverId;
+  return invalidField();
 }
 
 export interface AttachmentReference { id: string; fileName: string; mediaType: string }

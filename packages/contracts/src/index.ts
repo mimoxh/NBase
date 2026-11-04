@@ -7,8 +7,10 @@ export type {
   AuthWorkspace,
   LoginRequest,
 } from './auth.js';
+export { pageCoverIds } from './pages.js';
 export type {
   CreatePageRequest,
+  PageCoverId,
   PageDocument,
   PageListResponse,
   PageStateRequest,
@@ -18,6 +20,7 @@ export type {
   TrashPageRequest,
   UpdatePageRequest,
 } from './pages.js';
+export type { FavoriteListResponse } from './favorites.js';
 export type { AttachmentMetadata } from './attachments.js';
 export type { SearchResponse, SearchResult } from './search.js';
 export type { PageHistoryResponse, PageVersion, PageVersionOperation, PageVersionSummary,

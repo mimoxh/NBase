@@ -19,11 +19,18 @@
 | `GET /pages?parentId=&cursor=&limit=` | 按父页面分页读取同工作区未删除子页面；单页上限 100，稳定排序 |
 | `GET /page-tree` | P3-06 新增：一次返回从未删除根页经未删除父页可达的全部页面摘要，按 created_at、id 排序，上限 2000，超出时 `truncated: true`；网页目录只用此接口 |
 | `GET /pages/:pageId` | 读取页面元数据、当前修订与版本化正文 |
-| `POST /pages` | 创建页面，正文采用已支持的 `schemaVersion`，初始 revision 为字符串 `"1"` |
-| `PATCH /pages/:pageId` | 修改标题、正文或父页面；携带 `expectedRevision` 与 `clientMutationId` |
+| `POST /pages` | 创建页面，正文采用已支持的 `schemaVersion`，初始 revision 为字符串 `"1"`；可携带 `icon` / `cover` |
+| `PATCH /pages/:pageId` | 修改标题、正文、父页面或 `icon` / `cover`（显式 `null` 移除）；携带 `expectedRevision` 与 `clientMutationId` |
 | `DELETE /pages/:pageId` | 软删除选中页面及当时有效后代；携带修订与写入标识 |
 | `POST /pages/:pageId/restore` | 恢复选中页面和同删除组内后代；父页面仍删除时恢复到根 |
+| `GET /favorites` | 返回当前用户在该工作区的收藏页面 ID 列表（仅未删除页面，按收藏时间排序） |
+| `PUT /favorites/:pageId` | 幂等收藏一个未删除页面；页面不存在或已删除返回 404，超过 200 个收藏返回 409 `FAVORITE_LIMIT` |
+| `DELETE /favorites/:pageId` | 幂等取消收藏，始终返回 204 |
 | `GET /mutations/:clientMutationId` | 仅供原请求用户在同一工作区查询已提交的写入收据 |
+
+页面 `icon` 是恰好一个字形簇（grapheme）的 emoji（允许 ZWJ、修饰符与 keycap 序列，1–32 UTF-16 单元），`cover` 是契约枚举 `pageCoverIds`（`sage | ochre | slate | rose | sand | sky`）之一；非法值返回 400 `INVALID_REQUEST`，与非法标题同级。页面摘要、文档、目录树、回收站摘要与搜索结果均携带 `icon`/`cover`；历史版本快照保存写入时的 icon/cover，而 `restore-version` 只恢复标题与正文，保留当前外观与目录位置。只改 icon/cover 也是一次正常的修订更新（新修订 + `page_versions` 快照 + 收据，同一事务）。
+
+收藏属于个人偏好而非页面内容：写入天然幂等（`ON CONFLICT DO NOTHING` / 无条件 DELETE），不写操作收据、不增修订、不产生 `page_versions` 行。加入收藏在工作区行锁内先核对页面存在且未删除、再核对数量上限，避免并发突破限制；已删除页面的收藏行保留但 `GET /favorites` 隐藏，页面恢复后重新出现。
 
 每次写入都使用 UUID `clientMutationId`；服务端在业务变更的同一事务中保存请求摘要、结果和状态码。同一用户、工作区、标识、相同请求返回原结果；标识配不同请求返回冲突。收据先不自动清理，以免响应丢失后的重试重新生效；保留策略在有数据规模证据后再定。请求超时不能据此宣称未保存。
 

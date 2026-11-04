@@ -176,4 +176,24 @@ CREATE INDEX pages_trash_list_idx ON pages (workspace_id, deleted_at DESC, id DE
 ALTER TABLE users ADD COLUMN auth_epoch bigint NOT NULL DEFAULT 1 CHECK (auth_epoch > 0);
 `,
   },
+  {
+    version: 6,
+    name: 'page_appearance_and_favorites',
+    sql: `
+ALTER TABLE pages ADD COLUMN icon text, ADD COLUMN cover text;
+ALTER TABLE pages ADD CONSTRAINT pages_icon_length CHECK (icon IS NULL OR char_length(icon) BETWEEN 1 AND 32);
+ALTER TABLE pages ADD CONSTRAINT pages_cover_format CHECK (cover IS NULL OR cover ~ '^[a-z]{1,32}$');
+ALTER TABLE page_versions ADD COLUMN icon text, ADD COLUMN cover text;
+CREATE TABLE page_favorites (
+  workspace_id uuid NOT NULL,
+  user_id uuid NOT NULL,
+  page_id uuid NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, user_id, page_id),
+  FOREIGN KEY (workspace_id, user_id) REFERENCES workspace_memberships (workspace_id, user_id) ON DELETE RESTRICT,
+  FOREIGN KEY (workspace_id, page_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT
+);
+CREATE INDEX page_favorites_user_idx ON page_favorites (workspace_id, user_id, created_at, page_id);
+`,
+  },
 ];

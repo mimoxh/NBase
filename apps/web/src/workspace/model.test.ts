@@ -33,6 +33,17 @@ describe('confirmed subpage tree', () => {
     expect(restored.pages.find(page => page.id === 'writing')?.deleted).toBe(true);
   });
 
+  it('stores page icon and cover through appearance actions', () => {
+    const start = initialWorkspace();
+    const withIcon = workspaceReducer(start, { type: 'icon', id: 'welcome', icon: '📌' });
+    expect(withIcon.pages.find(page => page.id === 'welcome')).toMatchObject({ icon: '📌', dirty: true });
+    const withCover = workspaceReducer(withIcon, { type: 'cover', id: 'welcome', cover: 'rose' });
+    expect(withCover.pages.find(page => page.id === 'welcome')?.cover).toBe('rose');
+    const cleared = workspaceReducer(withCover, { type: 'icon', id: 'welcome', icon: null });
+    expect(cleared.pages.find(page => page.id === 'welcome')?.icon).toBeNull();
+    expect(cleared.pages.find(page => page.id === 'welcome')?.cover).toBe('rose');
+  });
+
   it('returns a child to the root if its parent remains in the trash', () => {
     const deleted = workspaceReducer(initialWorkspace(), { type: 'delete', id: 'welcome' });
     const restored = workspaceReducer(deleted, { type: 'restore', id: 'writing' });

@@ -16,7 +16,7 @@ async function fixture(t) {
   await writeFile(join(root, 'database.dump'), dump);
   await writeFile(join(root, 'attachments', name), bytes);
   const tableNames = ['schema_migrations', 'users', 'workspaces', 'workspace_memberships', 'instance_state',
-    'pages', 'page_versions', 'page_mutation_receipts', 'attachments'];
+    'pages', 'page_versions', 'page_mutation_receipts', 'attachments', 'page_favorites'];
   const file = { name, size: bytes.length, sha256: hash(bytes) };
   const manifest = { format: 'nbase-backup', formatVersion: 1, createdAt: new Date().toISOString(), appVersion: '0.1.0',
     appImageId: 'sha256:' + 'a'.repeat(64), postgresImageId: 'sha256:' + 'b'.repeat(64), postgresMajor: 18,

@@ -1,4 +1,4 @@
-import type { PageDocument, PageStateRequest, PageSummary, StoredDocumentContent } from './pages.js';
+import type { PageCoverId, PageDocument, PageStateRequest, PageSummary, StoredDocumentContent } from './pages.js';
 
 export type PageVersionOperation = 'baseline' | 'create' | 'update' | 'trash' | 'restore' | 'restore-version';
 
@@ -13,6 +13,8 @@ export interface PageVersionSummary {
 export interface PageVersion extends PageVersionSummary {
   pageId: string;
   parentId: string | null;
+  icon: string | null;
+  cover: PageCoverId | null;
   content: StoredDocumentContent;
 }
 

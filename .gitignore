@@ -23,3 +23,4 @@ Thumbs.db
 *.dmg
 *.msi
 *.app
+designs/**/_dev/.edge-*/

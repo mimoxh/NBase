@@ -7,18 +7,19 @@ NBase 采用 Web-first，React 网页通过同源 API 访问 Fastify 服务。�
 ## 模块职责
 
 - `apps/web/src/App.tsx`：按健康契约选择持久化工作台或明确标识的会话演示；服务状态未知时显示连接失败，不偷偷降级到演示数据。
-- `apps/web/src/workspace/`：不接数据库的会话演示、文档组织、导航、搜索和导入导出。
-- `apps/web/src/persistence/`：同源账号、页面、附件、搜索、历史与回收站客户端，真实页面工作台、单页 Markdown/附件 ZIP 导出、按账号/工作区/页面/页面实例隔离的 IndexedDB 草稿、操作收据查询和冲突另存流程。每次页面加载生成新的实例 ID；不要用可复制到新标签的 `sessionStorage` 标识作为草稿键。待确认创建与恢复/删除按操作 ID 存储，并按账号/工作区找回。比较草稿与服务端 JSON 时忽略对象的未定义字段和属性顺序；恢复或另存成功后只清理版本完全未变化的来源草稿。历史和回收站预览使用独立只读编辑器，不接主页面保存回调。持久化搜索只查询服务端已保存页面，输入时取消过期请求；结果打开仍经现有页面切换流程。目录通过单次 `/page-tree` 请求加载，不逐个父页面请求；`Tree` 保持 memo 和稳定回调。不要在渲染路径或每次按键中额外调用完整 `getSnapshot()` / Markdown 导出，源码和导出只在需要时计算。
+- `apps/web/src/shell/`：两套工作台共用的方案 B（Notion 家族）外壳展示组件：侧栏、页面树、顶栏、保存状态胶囊、页头（emoji 图标、CSS 预设封面）、右侧目录、菜单、提示条、Toast 与主题（浅/深/跟随系统，存 localStorage）。只收 props、回调，不引用持久化模块。设计 token 和布局在 `shell.css`（`nb-` 前缀，≤720px 抽屉布局）。保存胶囊的色调由 `saveTone.ts` 按状态原文映射，只有服务端确认的状态才显示「已保存」；演示模式固定显示「演示 · 未保存」。
+- `apps/web/src/workspace/`：不接数据库的会话演示，复用 shell 外壳，常驻演示模式提示条；含页面组织、收藏（starred）、图标/封面、本地回收站、搜索和导入导出。
+- `apps/web/src/persistence/`：同源账号、页面、附件、搜索、历史与回收站客户端，真实页面工作台、单页 Markdown/附件 ZIP 导出、按账号/工作区/页面/页面实例隔离的 IndexedDB 草稿、操作收据查询和冲突另存流程。每次页面加载生成新的实例 ID；不要用可复制到新标签的 `sessionStorage` 标识作为草稿键。待确认创建与恢复/删除按操作 ID 存储，并按账号/工作区找回。比较草稿与服务端 JSON 时忽略对象的未定义字段和属性顺序；恢复或另存成功后只清理版本完全未变化的来源草稿。历史和回收站预览使用独立只读编辑器，不接主页面保存回调。持久化搜索只查询服务端已保存页面，输入时取消过期请求；结果打开仍经现有页面切换流程。目录通过单次 `/page-tree` 请求加载，不逐个父页面请求；`Tree` 保持 memo 和稳定回调。图标、封面和移动统一走 `updatePageMeta`：先等待并完成在途保存，有未解决草稿或待确认操作时拒绝，再以 expectedRevision 提交。收藏按账号存服务端，非乐观更新。历史「显示变更」由 `versionDiff.ts` 在前端比较相邻版本的可见文字（按块 LCS 加按字配对），只读展示，超限时不计算。不要在渲染路径或每次按键中额外调用完整 `getSnapshot()` / Markdown 导出，源码和导出只在需要时计算。
 - `apps/web/src/editor/`：Lexical 节点、版本化快照、Markdown 受限转换、编辑器、安全粘贴及稳定 ID 的同源附件节点；`DocumentEditor` 按文档 ID 隔离实例，并通过 `onReady`、`onChange`、`getSnapshot` 向工作台提供最新状态。搜索定位只选择 DOM 文字或滚动附件，不改写 Lexical 内容。外部图片引用保留为不加载的占位，上传附件另用 `attachment` 节点。斜杠命令在 `plugins/SlashCommandPlugin.tsx`，与工具栏共用 `blockStyles.ts` 的块样式切换。代码高亮用 `@lexical/code-prism`（`plugins/CodeHighlightPlugin.tsx`），语言清单与别名在 `codeLanguages.ts`/`prism-languages.ts`；持久化与比较正文一律先过 `normalizeDocumentContent`（`normalize.ts`），高亮节点不进入快照或修订比较。公式 `nodes/EquationNode.tsx` + `plugins/EquationPlugin.tsx` 用本地 KaTeX 渲染与弹层编辑。正文中文字体优先使用 `Noto Sans SC`，后备为系统中文字体；未打包 Web 字体，跨设备渲染需实测。
 - `apps/web/src/components/`：工作台通用图标和对话框。
 - `apps/web/src/api.ts`：网页健康请求、8 秒超时和响应契约校验；健康状态只说明进程连通。
-- `apps/web/src/styles.css`：工作台样式入口；编辑器局部样式在 `editor/editor.css`。
+- `apps/web/src/styles.css`：全局入口，主题来自 `shell/shell.css`；编辑器局部样式在 `editor/editor.css`，颜色使用 `--nb-*` 变量，以适配深色模式。
 - `apps/web/vite.config.ts`：构建时分出 react、lexical 与 katex 三个 vendor chunk；不靠调高 `chunkSizeWarningLimit` 消除体积提示。
 - `apps/server/src/app.ts`：可注入测试的 Fastify 应用工厂、健康检查、可选账号/文档/附件路由、静态文件入口。
 - `apps/server/src/config.ts` / `index.ts`：共用数据库 URL 或独立字段/密码文件配置；先校验 origin 和附件目录、运行迁移，再监听。Docker 强制数据库配置，缺失时不能降级演示；`/api/ready` 检查数据库与附件读写，`/api/health` 保持存活契约。连接池处理空闲断连，关闭时释放资源。
 - `apps/server/src/db/`：PostgreSQL 连接迁移和 schema 版本校验；搜索旧数据回填与历史基线在迁移事务内完成，失败时启动失败。
 - `apps/server/src/auth/`：一次性所有者初始化、仅本地的密码重置/会话撤销 CLI、密码散列、数据库会话、Cookie / CSRF / Origin 校验、共享工作区授权与账号仓储。维护仅定位 instance owner 并核对账号名；登录创建会话与维护锁同一用户行，通过 auth_epoch 拒绝维护前读出的旧凭据快照。工作区成员关系由服务端查询，不以客户端 ID 授权。
-- `apps/server/src/pages/`：版本化 Lexical JSON 输入校验（含 `equation` 节点源码与 inline 标记）、工作区授权的页面查询（含递归 CTE 的有界目录树，上限 2000）与有界搜索、可见文字与公式源码提取、附件引用校验、分页、修订/历史快照事务、子页面循环保护、子树范围核对、软删除/选择恢复与操作收据。
+- `apps/server/src/pages/`：版本化 Lexical JSON 输入校验（含 `equation` 节点源码与 inline 标记）、工作区授权的页面查询（含递归 CTE 的有界目录树，上限 2000）与有界搜索、可见文字与公式源码提取、附件引用校验、分页、修订/历史快照事务、子页面循环保护、子树范围核对、软删除/选择恢复与操作收据。页面 `icon`（单个 emoji 字素）和 `cover`（契约 `pageCoverIds` 白名单）按普通修订写入，并进入 `page_versions`；历史恢复保留当前图标和封面。按账号的 `page_favorites` 是个人偏好：PUT/DELETE 幂等、不产生修订或收据，在工作区锁内限 200 个；页面在回收站时隐藏收藏，恢复后重新显示。
 - `apps/server/src/attachments/`：受同一工作区授权保护的上传与读取、文件类型/大小限制、UUID 派生磁盘路径、SHA-256 校验和可重试的附件元数据事务。目录不能位于 Web 静态目录内。
 - `packages/contracts/src/`：共享健康、账号、文档、附件、搜索、历史与回收站 API 契约；不承载服务端实现或界面状态。
 - `Dockerfile` / `compose.yaml`：固定基础镜像、构建上下文白名单、非 root 应用与独立 PostgreSQL/附件命名卷；数据库不发布端口，应用只发布回环端口。maintenance profile 提供一次性 admin CLI，常驻应用不挂载 owner 密码。`scripts/setup-docker.mjs` 创建随机凭据与本机配置且拒绝覆盖。`compose.p2-local.yaml`、`scripts/reset-p2-workbench-owner.mjs`、`scripts/p2-fault-proxy.mjs`、`scripts/check-p3-deployment.mjs`、`scripts/p3-perf-baseline.mjs` 和 `scripts/p3-perf-browser.mjs`（只接受 `nbase-p3-perf-YYYYMMDD` / 4328 的性能基线，后者通过 CDP 驱动本机 Edge）仅用于限定的本机测试环境，不作为业务数据维护入口。

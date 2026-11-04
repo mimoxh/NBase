@@ -1,9 +1,9 @@
-import type { PageSummary } from '@nbase/contracts';
+﻿import type { PageSummary } from '@nbase/contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadPageTree, pageClient } from './client';
 
 const page = (id: string): PageSummary => ({
-  id, workspaceId: 'workspace', parentId: null, title: `页面 ${id}`, revision: '1',
+  id, workspaceId: 'workspace', parentId: null, icon: null, cover: null, title: `页面 ${id}`, revision: '1',
   createdAt: '2026-11-03T00:00:00Z', updatedAt: '2026-11-03T00:00:00Z',
 });
 
