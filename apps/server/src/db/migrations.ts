@@ -270,4 +270,17 @@ CREATE TABLE page_links (
 CREATE INDEX page_links_target_idx ON page_links (workspace_id, target_page_id, source_page_id, occurrence);
 `,
   },
+  {
+    version: 11,
+    name: 'compact_page_receipts',
+    sql: `
+UPDATE page_mutation_receipts r SET response_json = r.response_json - 'content'
+FROM page_versions v
+WHERE r.operation IN ('create', 'update', 'trash', 'restore', 'restore-version', 'copy', 'open-daily-note', 'quick-capture')
+  AND r.response_json ? 'content'
+  AND v.workspace_id = r.workspace_id AND v.page_id = r.page_id
+  AND v.revision = CASE WHEN r.response_json->>'revision' ~ '^[0-9]+$' THEN (r.response_json->>'revision')::bigint END
+  AND v.content_json = r.response_json->'content';
+`,
+  },
 ];

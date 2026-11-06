@@ -30,10 +30,10 @@ docs                 需求、决定、计划与验证
 **P1 已接入并通过桌面核心写作验证**：Lexical 0.52。MIT 开源，应用实现文档 UI、工具栏、快捷命令与普通表格，不依赖购买 Pro 插件。依赖及许可核对见 [dependencies.md](dependencies.md)；实机手机键盘等补测边界见 [验证记录](../validation.md)。
 
 - 编辑器状态用带 schemaVersion 的结构化 JSON 持久化。
-- Markdown 用于快捷输入、导入导出、只读源码查看，不作唯一内部模型。
+- Markdown 用于快捷输入、导入导出、源码查看和受保护的源码编辑，不作唯一内部模型。
 - Lexical 各包用相同版本；先验证中文输入、撤销、列表、粘贴、普通表格和 Markdown 转换，再固定集成方案。
 - 页面用稳定 UUID。未来需引用的块显式保存 stableId；运行时 node key 不作业务 ID。
-- 若以后支持源码编辑，必须保留历史、特殊块引用和稳定身份；不能整篇重解析并静默覆盖。
+- 源码编辑（N15）必须保留历史、特殊块引用和稳定身份；不能整篇重解析并静默覆盖，语义往返失败时阻止应用。
 - 提供转换能力说明；完整备份包含 JSON、附件和元数据，不能只导出 Markdown。
 
 官方资料：[React 集成](https://lexical.dev/docs/getting-started/react)、[MIT 源码](https://github.com/facebook/lexical)、[Markdown](https://lexical.dev/docs/packages/lexical-markdown)、[Key Management](https://lexical.dev/docs/concepts/key-management)。

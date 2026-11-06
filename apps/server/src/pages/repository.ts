@@ -52,6 +52,7 @@ interface PageRow {
 interface ReceiptRow<T = PageDocument> {
   operation: string;
   request_hash: Buffer;
+  page_id: string | null;
   response_status: number;
   response_json: T;
 }
@@ -126,6 +127,10 @@ function canonicalJson(value: unknown): string {
 function requestHash(operation: string, pageId: string | null, body: unknown): Buffer {
   return createHash('sha256').update(canonicalJson({ operation, pageId, body })).digest();
 }
+
+/** Their receipts answer with a page, and every such revision has a page_versions snapshot. */
+const pageReceiptOperations = new Set(['create', 'update', 'trash', 'restore', 'restore-version', 'copy',
+  'open-daily-note', 'quick-capture']);
 
 const pageColumns = `id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, revision::text AS revision,
   created_at, updated_at`;
@@ -268,14 +273,35 @@ export class PgPageRepository {
 
   async receipt(workspaceId: string, actorId: string, mutationId: string): Promise<MutationResult<PageDocument> | null> {
     const result = await this.pool.query<ReceiptRow>(`
-      SELECT r.operation, r.request_hash, r.response_status, r.response_json
+      SELECT r.operation, r.request_hash, r.page_id, r.response_status, r.response_json
       FROM page_mutation_receipts r
       JOIN workspace_memberships m ON m.workspace_id = r.workspace_id AND m.user_id = $2
       WHERE r.workspace_id = $1 AND r.actor_user_id = $2 AND r.client_mutation_id = $3
         AND r.page_id IS NOT NULL
     `, [workspaceId, actorId, mutationId]);
     const row = result.rows[0];
-    return row ? { statusCode: row.response_status, body: row.response_json } : null;
+    return row ? { statusCode: row.response_status, body: await this.expandReceipt(this.pool, workspaceId, row) } : null;
+  }
+
+  /** Keep one copy of the body: drop it only when the revision snapshot holds exactly the same JSON. */
+  private async compactReceipt(client: PoolClient, workspaceId: string, operation: string,
+    pageId: string | null, body: object): Promise<object> {
+    if (pageId === null || !pageReceiptOperations.has(operation) || !('content' in body) || !('revision' in body)) return body;
+    const { content, ...compact } = body;
+    const same = await client.query(`SELECT 1 FROM page_versions
+      WHERE workspace_id = $1 AND page_id = $2 AND revision = $3::bigint AND content_json = $4::jsonb`,
+    [workspaceId, pageId, body.revision, JSON.stringify(content)]);
+    return same.rows[0] ? compact : body;
+  }
+
+  /** A replay must return the body of that revision, not the page's current one. */
+  private async expandReceipt<T>(db: Pick<Pool, 'query'>, workspaceId: string, row: ReceiptRow<T>): Promise<T> {
+    const body = row.response_json as T & { revision?: string };
+    if (row.page_id === null || !pageReceiptOperations.has(row.operation) || 'content' in (body as object)) return body;
+    const version = await db.query<{ content_json: PageDocument['content'] }>(`SELECT content_json FROM page_versions
+      WHERE workspace_id = $1 AND page_id = $2 AND revision = $3::bigint`, [workspaceId, row.page_id, body.revision]);
+    if (!version.rows[0]) throw new Error('Receipt snapshot is missing');
+    return { ...body, content: version.rows[0].content_json };
   }
 
   async search(workspaceId: string, actorId: string, phrase: string, limit: number, tagIds: string[] = []): Promise<SearchResponse> {
@@ -326,7 +352,7 @@ export class PgPageRepository {
 
       const hash = requestHash(operation, pageId, body);
       const prior = await client.query<ReceiptRow<T>>(`
-        SELECT operation, request_hash, response_status, response_json FROM page_mutation_receipts
+        SELECT operation, request_hash, page_id, response_status, response_json FROM page_mutation_receipts
         WHERE workspace_id = $1 AND actor_user_id = $2 AND client_mutation_id = $3
       `, [workspaceId, actorId, mutationId]);
       const receipt = prior.rows[0];
@@ -334,17 +360,20 @@ export class PgPageRepository {
         if (receipt.operation !== operation || !receipt.request_hash.equals(hash)) {
           throw new PageError(409, 'MUTATION_CONFLICT');
         }
+        const replayed = await this.expandReceipt(client, workspaceId, receipt);
         await client.query('COMMIT');
         transactionOpen = false;
-        return { statusCode: receipt.response_status, body: receipt.response_json };
+        return { statusCode: receipt.response_status, body: replayed };
       }
 
       const result = await action(client, membership.rows[0].role);
+      const receiptPage = receiptPageId(result.body);
+      const stored = await this.compactReceipt(client, workspaceId, operation, receiptPage, result.body);
       await client.query(`
         INSERT INTO page_mutation_receipts
           (workspace_id, actor_user_id, client_mutation_id, operation, request_hash, page_id, response_status, response_json)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-      `, [workspaceId, actorId, mutationId, operation, hash, receiptPageId(result.body), result.statusCode, JSON.stringify(result.body)]);
+      `, [workspaceId, actorId, mutationId, operation, hash, receiptPage, result.statusCode, JSON.stringify(stored)]);
       await client.query('COMMIT');
       transactionOpen = false;
       return result;

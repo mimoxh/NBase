@@ -10,6 +10,7 @@ NBase 采用 Web-first，React 网页通过同源 API 访问 Fastify 服务。�
 - `apps/web/src/shell/`：两套工作台共用的方案 B（Notion 家族）外壳展示组件：侧栏、页面树、顶栏、保存状态胶囊、页头（emoji 图标、CSS 预设封面）、右侧目录、菜单、提示条、Toast 与主题（浅/深/跟随系统，存 localStorage）。只收 props、回调，不引用持久化模块。设计 token 和布局在 `shell.css`（`nb-` 前缀，≤720px 抽屉布局）。保存胶囊的色调由 `saveTone.ts` 按状态原文映射，只有服务端确认的状态才显示「已保存」；演示模式固定显示「演示 · 未保存」。
 - `apps/web/src/workspace/`：不接数据库的会话演示，复用 shell 外壳，常驻演示模式提示条；含页面组织、收藏（starred）、图标/封面、本地回收站、搜索和导入导出。
 - `apps/web/src/persistence/`：同源账号、页面、附件、搜索、历史与回收站客户端，真实页面工作台、单页 Markdown/附件 ZIP 导出、按账号/工作区/页面/页面实例隔离的 IndexedDB 草稿、操作收据查询和冲突另存流程。每次页面加载生成新的实例 ID；不要用可复制到新标签的 `sessionStorage` 标识作为草稿键。待确认创建与恢复/删除按操作 ID 存储，并按账号/工作区找回。比较草稿与服务端 JSON 时忽略对象的未定义字段和属性顺序；恢复或另存成功后只清理版本完全未变化的来源草稿。历史和回收站预览使用独立只读编辑器，不接主页面保存回调。持久化搜索只查询服务端已保存页面，输入时取消过期请求；结果打开仍经现有页面切换流程。目录通过单次 `/page-tree` 请求加载，不逐个父页面请求；`Tree` 保持 memo 和稳定回调。图标、封面和移动统一走 `updatePageMeta`：先等待并完成在途保存，有未解决草稿或待确认操作时拒绝，再以 expectedRevision 提交。收藏按账号存服务端，非乐观更新。历史「显示变更」由 `versionDiff.ts` 在前端比较相邻版本的可见文字（按块 LCS 加按字配对），只读展示，超限时不计算。不要在渲染路径或每次按键中额外调用完整 `getSnapshot()` / Markdown 导出，源码和导出只在需要时计算。
+- `persistence/` 内的工作台拆分：`PersistentWorkspace.tsx` 保留会话、页面打开与组合。`usePageSaver.ts` 是页面写入唯一路径，负责本机草稿、串行保存、收据确认、冲突和拒绝处理，行为由 `usePageSaver.test.tsx` 固定。`pageActions.ts`（删除/恢复）和 `pageTransfers.ts`（导出/上传/导入）是每次渲染重建的闭包工厂，不是 Hook，依赖一律从上下文传入。`draftCompare.ts`、`pageTreePaths.ts` 和 `workspaceErrors.ts` 只放纯逻辑，`WorkspaceNotices`、`WorkspacePanels`、`PageActionDialogs`、`LoginForm` 只负责展示。
 - `apps/web/src/editor/`：Lexical 节点、版本化快照、Markdown 受限转换、编辑器、安全粘贴及稳定 ID 的同源附件节点；`DocumentEditor` 按文档 ID 隔离实例，并通过 `onReady`、`onChange`、`getSnapshot` 向工作台提供最新状态。搜索定位只选择 DOM 文字或滚动附件，不改写 Lexical 内容。外部图片引用保留为不加载的占位，上传附件另用 `attachment` 节点。斜杠命令在 `plugins/SlashCommandPlugin.tsx`，与工具栏共用 `blockStyles.ts` 的块样式切换。代码高亮用 `@lexical/code-prism`（`plugins/CodeHighlightPlugin.tsx`），语言清单与别名在 `codeLanguages.ts`/`prism-languages.ts`；持久化与比较正文一律先过 `normalizeDocumentContent`（`normalize.ts`），高亮节点不进入快照或修订比较。公式 `nodes/EquationNode.tsx` + `plugins/EquationPlugin.tsx` 用本地 KaTeX 渲染与弹层编辑。正文中文字体优先使用 `Noto Sans SC`，后备为系统中文字体；未打包 Web 字体，跨设备渲染需实测。
 - `apps/web/src/components/`：工作台通用图标和对话框。
 - `apps/web/src/api.ts`：网页健康请求、8 秒超时和响应契约校验；健康状态只说明进程连通。
@@ -45,7 +46,7 @@ NBase 采用 Web-first，React 网页通过同源 API 访问 Fastify 服务。�
 - 每个实际新修订须与页面和收据同事务写入 `page_versions`；子树状态变更保存全部实际变化页面。历史恢复的来源修订纳入操作摘要，只恢复标题/正文并生成新修订，保留当前目录位置。收据重试不能再次插入快照。
 - 删除前网页读取新目录并检查目标子树草稿，提交 `expectedSubtreeIds` 让服务端在工作区锁内核对范围。回收站恢复仅恢复选中同组子树；原父不可用时选中页面落根，不复活独立删除的后代。页面、历史和附件不自动清理。
 - 页面 `search_text` 是从已校验的 Lexical 正文提取的派生数据，创建/修订更新须与正文同事务维护。查询必须限定工作区成员和未删除页面，采用字面子串与结果上限；不要直接在 JSON 中匹配节点键、URL 或内部 ID，也不要将未提交的浏览器草稿冒充服务端结果。
-- 数据库中页面 `revision` 用 bigint，API 中使用十进制字符串；每次写入须有持久化的客户端操作标识与收据，以处理提交成功但响应丢失的重试。
+- 数据库中页面 `revision` 用 bigint，API 中使用十进制字符串；每次写入须有持久化的客户端操作标识与收据，以处理提交成功但响应丢失的重试。页面类收据只在正文与同修订 `page_versions` 快照完全相同时省略 `content`，回放从该修订取回正文，不取当前正文。将来任何清理版本的策略都必须先保证未过期收据引用的修订仍在，或先把正文写回收据。
 - 账号会话令牌只将摘要存入数据库；Cookie 为 HttpOnly、SameSite=Strict，变更请求校验配置 Origin 与 CSRF。网页持久化模式通过会话 API 获取账号和工作区，服务端对每次页面读写重新校验成员关系。
 - 账号维护的密码更新、auth_epoch 递增和所有会话撤销须在同一事务内完成；不能自动解禁账号。密码从文件读取，不放在 argv 或日志。维护前停止应用并等待在途请求完成，撤销不追溯取消已完成授权的请求。
 - 完整数据备份须同一维护窗口取得数据库与附件，表锁/导出快照覆盖复制和 dump；先校验完整包、精确应用镜像和迁移 checksum，再恢复到空数据库/空附件目录。恢复后全表内容摘要与附件元数据须一致，然后清除会话并递增 auth_epoch。失败不启动或自动清空目标，换另一组新卷；升级回退不执行降级 SQL。COMPLETE 仅在全部文件复读及快照提交后生成。
