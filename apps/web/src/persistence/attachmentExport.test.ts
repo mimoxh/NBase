@@ -9,6 +9,14 @@ const content = { schemaVersion: 1, editorState: { root: {
 } } };
 
 describe('portable attachment export', () => {
+  it('keeps attachment-like examples in metadata, code and math literal while rewriting body references', () => {
+    const reference = `![截图](nbase-attachment:${id})`;
+    const header = `---\ntitle: 导出\nexample: '${reference}'\n---\n`;
+    const examples = `\n\`${reference}\`\n\n\`\`\`md\n${reference}\n\`\`\`\n\n$$\n${reference}\n$$\n\n`;
+    const exported = portableMarkdown(header + examples + reference, [{ id, fileName: '截图.png', mediaType: 'image/png' }]);
+    expect(exported).toBe(header + examples + `![截图](attachments/${id}.png)`);
+  });
+
   it('rewrites stable references and bundles exactly the fetched image', async () => {
     const png = new Uint8Array([137, 80, 78, 71, 1, 2, 3]);
     const markdown = `![截图](nbase-attachment:${id})`;

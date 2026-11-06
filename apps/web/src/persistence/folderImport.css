@@ -1,0 +1,12 @@
+.nbase-folder-import { display:grid; gap:10px; }
+.nbase-folder-import h3 { margin:12px 0 8px; font-size:15px; }
+.nbase-folder-import .field-label { margin:0; }
+.nbase-folder-import p { margin:4px 0; }
+.nbase-folder-import input[type=file] { max-width:100%; color:var(--nb-text); }
+.nbase-folder-table { max-height:260px; overflow:auto; border:1px solid var(--nb-line); border-radius:6px; }
+.nbase-folder-table table { width:100%; border-collapse:collapse; font-size:12px; }
+.nbase-folder-table th,.nbase-folder-table td { padding:7px 9px; text-align:left; vertical-align:top; border-bottom:1px solid var(--nb-line); overflow-wrap:anywhere; }
+.nbase-folder-table th { position:sticky; top:0; background:var(--nb-bg); }
+.nbase-folder-table .nb-btn { padding:3px 6px; font-size:12px; }
+.nbase-folder-issues { max-height:170px; overflow:auto; padding-left:22px; color:var(--nb-muted); font-size:12px; overflow-wrap:anywhere; }
+.nbase-folder-import summary { cursor:pointer; font-size:12px; }

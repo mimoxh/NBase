@@ -2,7 +2,7 @@
 // Requires a seeded perf instance: node -- scripts/p3-perf-baseline.mjs seed
 // Usage: node -- scripts/p3-perf-browser.mjs [path-to-msedge-or-chrome]
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,7 +85,7 @@ try {
     body: JSON.stringify({ loginName: 'owner', password: ${JSON.stringify(password)} }) }).then(r => r.status)`);
   assert.equal(loginStatus, 200);
 
-  const treeReady = waitFor(`() => !document.querySelector('.tree-message') && document.querySelectorAll('.tree-page').length >= ${expectedPages}
+  const treeReady = waitFor(`() => !document.querySelector('.nb-tree-message') && document.querySelectorAll('.nb-tree-page').length >= ${expectedPages}
     && performance.now()`, 120000);
   const workbench = { cold: [], warm: [] };
   let assets;
@@ -112,7 +112,7 @@ try {
       return images.length === ${state.fixture.images} && images.every(image => image.complete && image.naturalWidth > 0); }`,
   };
   const open = async name => evaluate(`(async () => {
-    const button = [...document.querySelectorAll('.tree-page')].find(item => item.textContent.trim() === ${JSON.stringify(titles[name])});
+    const button = [...document.querySelectorAll('.nb-tree-page')].find(item => item.querySelector('.nb-tree-title')?.textContent === ${JSON.stringify(titles[name])});
     if (!button) throw new Error('tree item missing: ' + ${JSON.stringify(titles[name])});
     const started = performance.now(); button.click();
     await ${waitFor(`() => document.querySelector('.page-title')?.value === ${JSON.stringify(titles[name])} && (${readyCondition[name]})()`)};
@@ -128,7 +128,7 @@ try {
   openResults.small = { ...stats(smallSamples), afterOpen: await metrics() };
 
   const typing = {};
-  for (const name of ['small', 'long1500']) {
+  for (const name of ['small', 'long300', 'long1500']) {
     await open(name);
     await evaluate(`(() => { const editor = document.querySelector('.nbase-editor-content'); editor.focus();
       const node = editor.children[1].lastChild.lastChild ?? editor.children[1].lastChild;
@@ -146,8 +146,8 @@ try {
     const lastKey = performance.now();
     const inserted = await evaluate(`document.querySelector('.nbase-editor-content').children[1].textContent.includes(${JSON.stringify(typed)})`);
     assert.ok(inserted, `${name}: typed text did not land in the second block`);
-    await evaluate(waitFor(`() => document.querySelector('.draft-status')?.textContent !== '已保存到服务端'`, 2000)).catch(() => {});
-    await evaluate(waitFor(`() => document.querySelector('.draft-status')?.textContent === '已保存到服务端'`, 120000), 120000);
+    await evaluate(waitFor(`() => !document.querySelector('.nb-savepill.nb-save-saved')`, 2000)).catch(() => {});
+    await evaluate(waitFor(`() => !!document.querySelector('.nb-savepill.nb-save-saved')`, 120000), 120000);
     typing[name] = { keystrokeToFrame: stats(samples), lastKeyToServerSavedMs: Math.round(performance.now() - lastKey), afterTyping: await metrics() };
   }
 
@@ -161,5 +161,7 @@ try {
   console.log(`Report: ${outPath}`);
   socket.close();
 } finally {
-  browser.kill();
+  if (process.platform === 'win32' && browser.pid && browser.exitCode === null) {
+    spawnSync('taskkill.exe', ['/PID', String(browser.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+  } else browser.kill();
 }

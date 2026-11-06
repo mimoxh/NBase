@@ -16,6 +16,8 @@ export interface PageSummary {
   icon: string | null;
   /** CSS preset identifier rendered by the client, or null for no cover. */
   cover: PageCoverId | null;
+  /** Omitted by older servers and stored receipts. */
+  tagIds?: string[];
   revision: string;
   createdAt: string;
   updatedAt: string;
@@ -42,6 +44,7 @@ export interface CreatePageRequest {
   content: StoredDocumentContent;
   icon?: string | null;
   cover?: PageCoverId | null;
+  tagIds?: string[];
 }
 
 export interface UpdatePageRequest {
@@ -53,6 +56,7 @@ export interface UpdatePageRequest {
   /** null removes the icon; omitted leaves it unchanged. */
   icon?: string | null;
   cover?: PageCoverId | null;
+  tagIds?: string[];
 }
 
 export interface PageStateRequest {

@@ -1,0 +1,8 @@
+.nbase-page-find-panel { display:grid; gap:5px; padding:6px 0; color:var(--nb-text); }
+.nbase-page-find-row { display:flex; align-items:center; flex-wrap:wrap; gap:5px; font-size:13px; }
+.nbase-page-find-row input:not([type='checkbox']) { min-width:120px; max-width:100%; padding:4px 6px; border:1px solid var(--nb-line); border-radius:5px; background:var(--nb-bg); color:var(--nb-text); font:inherit; }
+.nbase-page-find-row label { display:inline-flex; align-items:center; gap:3px; }
+.nbase-page-find-row output { color:var(--nb-muted); min-width:45px; text-align:center; }
+.nbase-page-find-panel small { color:var(--nb-muted); }
+::highlight(nbase-find-current) { background:#f9d670; color:#241a00; }
+[data-nbase-find-active] { outline:2px solid var(--nb-accent,#687d50); outline-offset:2px; }

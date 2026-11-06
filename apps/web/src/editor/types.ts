@@ -1,5 +1,5 @@
 import type { SerializedEditorState } from 'lexical';
-import type { AttachmentMetadata } from '@nbase/contracts';
+import type { AttachmentMetadata, PageSummary } from '@nbase/contracts';
 
 /** Versioned document payload; runtime node keys are never document identities. */
 export interface DocumentContent {
@@ -21,8 +21,16 @@ export interface EditorSnapshot {
   outline: OutlineItem[];
 }
 
+export interface EditorPageReferences {
+  pages: readonly PageSummary[];
+  open: (pageId: string) => void;
+}
+
 export interface DocumentEditorProps {
   documentId: string;
+  title?: string | undefined;
+  onReplaceTitle?: ((title: string, bodyChanged: boolean) => void) | undefined;
+  pageReferences?: EditorPageReferences | undefined;
   initialContent?: DocumentContent | undefined;
   initialMarkdown?: string | undefined;
   readOnly?: boolean | undefined;
@@ -37,7 +45,11 @@ export interface DocumentEditorHandle {
   getSnapshot: () => EditorSnapshot;
   focus: () => void;
   insertAttachments: (attachments: AttachmentMetadata[]) => void;
+  /** A source application is a single undoable replacement in this editor instance. */
+  replaceContent: (content: DocumentContent) => boolean;
   findText: (phrase: string) => boolean;
+  jumpToHeading: (id: string) => void;
+  locatePageReference: (targetPageId: string, occurrence?: number) => boolean;
 }
 
 export interface MarkdownAssessment {

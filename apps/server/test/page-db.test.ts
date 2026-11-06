@@ -11,6 +11,7 @@ import { initializeOwner } from '../src/auth/initialize-owner.js';
 import { hashPassword } from '../src/auth/password.js';
 import { PgAuthRepository } from '../src/auth/repository.js';
 import { runMigrations } from '../src/db/migrate.js';
+import { migrations } from '../src/db/migrations.js';
 import { PgPageRepository } from '../src/pages/repository.js';
 import { PgAttachmentRepository } from '../src/attachments/repository.js';
 
@@ -47,7 +48,7 @@ test('isolated PostgreSQL page path protects identity, revisions and retries', {
     url.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: url.toString(), max: 4, connectionTimeoutMillis: 5000 });
     attachmentRoot = await mkdtemp(join(tmpdir(), 'nbase-attachment-test-'));
-    assert.equal(await runMigrations(pool), 6);
+    assert.equal(await runMigrations(pool), migrations.length);
     const owner = await initializeOwner(pool, 'owner', await hashPassword(ownerPassword), '测试空间');
     app = await buildApp({
       auth: { repository: new PgAuthRepository(pool), publicOrigin: origin },
@@ -439,7 +440,7 @@ test('isolated PostgreSQL page path protects identity, revisions and retries', {
   } finally {
     if (app) await app.close();
     if (pool) await pool.end();
-    if (created) await admin.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
+    if (created) await admin.query(`DROP DATABASE "${databaseName}"`);
     await admin.end();
     if (attachmentRoot && dirname(attachmentRoot) === tmpdir() && basename(attachmentRoot).startsWith('nbase-attachment-test-')) {
       await rm(attachmentRoot, { recursive: true, force: true });
@@ -468,7 +469,7 @@ test('page-tree returns the reachable subtree in created order with bounded resu
     url.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: url.toString(), max: 4, connectionTimeoutMillis: 5000 });
     attachmentRoot = await mkdtemp(join(tmpdir(), 'nbase-attachment-test-'));
-    assert.equal(await runMigrations(pool), 6);
+    assert.equal(await runMigrations(pool), migrations.length);
     const owner = await initializeOwner(pool, 'owner', await hashPassword(ownerPassword), '测试空间');
     const pages = new PgPageRepository(pool);
     app = await buildApp({
@@ -522,7 +523,7 @@ test('page-tree returns the reachable subtree in created order with bounded resu
   } finally {
     if (app) await app.close();
     if (pool) await pool.end();
-    if (created) await admin.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
+    if (created) await admin.query(`DROP DATABASE "${databaseName}"`);
     await admin.end();
     if (attachmentRoot && dirname(attachmentRoot) === tmpdir() && basename(attachmentRoot).startsWith('nbase-attachment-test-')) {
       await rm(attachmentRoot, { recursive: true, force: true });
@@ -551,7 +552,7 @@ test('page appearance and favorites survive revisions, search, trash and restore
     url.pathname = `/${databaseName}`;
     pool = new pg.Pool({ connectionString: url.toString(), max: 4, connectionTimeoutMillis: 5000 });
     attachmentRoot = await mkdtemp(join(tmpdir(), 'nbase-attachment-test-'));
-    assert.equal(await runMigrations(pool), 6);
+    assert.equal(await runMigrations(pool), migrations.length);
     const owner = await initializeOwner(pool, 'owner', await hashPassword(ownerPassword), '测试空间');
     app = await buildApp({
       auth: { repository: new PgAuthRepository(pool), publicOrigin: origin },
@@ -682,7 +683,7 @@ test('page appearance and favorites survive revisions, search, trash and restore
   } finally {
     if (app) await app.close();
     if (pool) await pool.end();
-    if (created) await admin.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
+    if (created) await admin.query(`DROP DATABASE "${databaseName}"`);
     await admin.end();
     if (attachmentRoot && dirname(attachmentRoot) === tmpdir() && basename(attachmentRoot).startsWith('nbase-attachment-test-')) {
       await rm(attachmentRoot, { recursive: true, force: true });

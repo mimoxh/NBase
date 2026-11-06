@@ -11,3 +11,8 @@
 .nbase-history-preview .nbase-editor-tools { display: none; }
 .nbase-history-preview .nbase-editor-content { min-height: 160px; padding: 0; }
 .persistent-workspace .page-title:disabled { opacity: 1; color: inherit; }
+.nbase-backlinks { margin:16px 0; padding-top:10px; border-top:1px solid var(--nb-line); }
+.nbase-backlinks summary { cursor:pointer; font-weight:600; }
+.nbase-backlinks p,.nbase-backlinks small { color:var(--nb-muted); }
+.nbase-backlinks ul { list-style:none; margin:6px 0; padding:0; }
+.nbase-backlinks li button { display:grid; text-align:left; width:100%; padding:6px 8px; }

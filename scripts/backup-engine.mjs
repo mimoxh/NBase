@@ -10,13 +10,22 @@ const hashPattern = /^[0-9a-f]{64}$/;
 const imagePattern = /^sha256:[0-9a-f]{64}$/;
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const attachmentPattern = new RegExp(`^${uuid}-${uuid}$`);
-const tables = {
+const baseTables = {
   schema_migrations: 'version', users: 'id', workspaces: 'id',
   workspace_memberships: 'workspace_id, user_id', instance_state: 'singleton', pages: 'id',
   page_versions: 'workspace_id, page_id, revision',
   page_mutation_receipts: 'workspace_id, actor_user_id, client_mutation_id', attachments: 'id',
   page_favorites: 'workspace_id, user_id, page_id',
 };
+
+function tablesForSchema(version) {
+  return {
+    ...baseTables,
+    ...(version >= 7 ? { workspace_tags: 'workspace_id, id', page_tags: 'workspace_id, page_id, tag_id' } : {}),
+    ...(version >= 8 ? { note_templates: 'workspace_id, owner_user_id, id' } : {}),
+    ...(version >= 10 ? { page_links: 'workspace_id, source_page_id, occurrence' } : {}),
+  };
+}
 const backupLock = '2026110301';
 const maxManifestBytes = 64 * 1024 * 1024;
 const maxAttachmentBytes = 10 * 1024 * 1024;
@@ -99,6 +108,7 @@ function validateManifest(manifest) {
       && typeof migration.name === 'string' && hashPattern.test(migration.checksum), 'Invalid migration entry');
     previous = migration.version;
   }
+  const tables = tablesForSchema(manifest.migrations.at(-1).version);
   for (const field of ['tableCounts', 'tableDigests']) {
     requireValue(validRecord(manifest[field]), `Missing ${field}`);
     sameKeys(Object.keys(manifest[field]), Object.keys(tables), 'Backup table set differs from the supported NBase schema');
@@ -182,13 +192,14 @@ async function connectDatabase() {
   } catch (error) { client.release(); await pool.end(); throw error; }
 }
 async function schema(client) {
+  const migrations = await client.query('SELECT version, name, checksum FROM schema_migrations ORDER BY version');
+  const tables = tablesForSchema(migrations.rows.at(-1)?.version ?? 0);
   const objects = await client.query(`SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='public' AND c.relkind IN ('r','p','m','v','f') ORDER BY relname`);
   sameKeys(objects.rows.map(row => row.relname), [...Object.keys(tables), 'sessions'], 'Database schema contains missing or unsupported tables/views');
-  const migrations = await client.query('SELECT version, name, checksum FROM schema_migrations ORDER BY version');
-  return migrations.rows;
+  return { migrations: migrations.rows, tables };
 }
-async function tableInventory(client) {
+async function tableInventory(client, tables) {
   const tableCounts = {}, tableDigests = {};
   for (const [table, order] of Object.entries(tables)) {
     const hash = createHash('sha256');
@@ -230,11 +241,11 @@ async function backup(root, attachments) {
   try {
     await pgTransaction(db.client, async () => {
       await db.client.query("SET LOCAL lock_timeout = '5s'");
-      const migrations = await schema(db.client);
+      const { migrations, tables } = await schema(db.client);
       matchingMigrations(migrations, db.expectedMigrations);
       await db.client.query(`LOCK TABLE ${[...Object.keys(tables), 'sessions'].map(name => `public.${name}`).join(', ')} IN SHARE MODE`);
       const snapshot = await db.client.query('SELECT pg_export_snapshot() AS id');
-      const inventory = await tableInventory(db.client);
+      const inventory = await tableInventory(db.client, tables);
       const metadata = await attachmentMetadata(db.client);
       await mkdir(join(root, 'attachments'), { mode: 0o700 });
       const files = [];
@@ -300,8 +311,9 @@ async function restore(root, attachments) {
     await runProgram('pg_restore', ['--single-transaction', '--exit-on-error', '--no-owner', '--no-acl',
       '--dbname=' + String(db.childEnv.PGDATABASE), join(root, 'database.dump')], db.childEnv);
     await pgTransaction(db.client, async () => {
-      matchingMigrations(await schema(db.client), manifest.migrations);
-      const actual = await tableInventory(db.client);
+      const { migrations, tables } = await schema(db.client);
+      matchingMigrations(migrations, manifest.migrations);
+      const actual = await tableInventory(db.client, tables);
       requireValue(JSON.stringify(actual.tableCounts) === JSON.stringify(manifest.tableCounts)
         && JSON.stringify(actual.tableDigests) === JSON.stringify(manifest.tableDigests), 'Restored database contents differ from the backup');
       requireValue(JSON.stringify(await attachmentMetadata(db.client)) === JSON.stringify(manifest.attachmentMetadata), 'Restored attachment metadata differs');

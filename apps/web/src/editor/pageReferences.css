@@ -1,0 +1,35 @@
+.nbase-page-reference { position: relative; }
+.nbase-page-reference-edit {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  border-radius: 3px;
+  padding: 0 3px;
+  background: transparent;
+  color: var(--nb-muted);
+  font: inherit;
+  font-size: .75em;
+  cursor: pointer;
+}
+.nbase-page-reference-edit::before { content: "✎"; }
+.nbase-page-reference-edit:hover, .nbase-page-reference-edit:focus-visible { background: var(--nb-hover); }
+.nbase-page-reference-broken {
+  color: var(--nb-muted);
+  text-decoration: underline dashed;
+  text-underline-offset: 3px;
+  cursor: not-allowed;
+}
+.nbase-reference-menu { width: min(340px, 85vw); }
+.nbase-reference-menu li { display: block; overflow-wrap: anywhere; }
+.nbase-reference-menu li small { display: block; margin-left: 0; }
+.nbase-legacy-references {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--nb-line);
+  border-radius: 6px;
+  background: var(--nb-hover);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.nbase-legacy-references p { margin: 0 0 6px; }
+.nbase-legacy-references details { margin-top: 6px; }

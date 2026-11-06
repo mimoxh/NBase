@@ -1,0 +1,14 @@
+.nbase-page-tags { display:flex; align-items:baseline; flex-wrap:wrap; gap:6px; margin:0 0 14px; }
+.nbase-tag-chip { border-radius:999px; padding:2px 8px; color:var(--nb-accent-text); background:var(--nb-accent-soft); font-size:12px; }
+.nbase-tag-filter { padding:4px 8px; }
+.nbase-tag-filter summary,.nbase-page-tags summary { color:var(--nb-muted); cursor:pointer; font-size:13px; }
+.nbase-tag-hint { margin:4px 0; font-size:12px; color:var(--nb-muted); }
+.nbase-tag-choices { display:grid; gap:4px; max-height:180px; margin:6px 0; overflow:auto; }
+.nbase-tag-choices label { display:flex; align-items:center; gap:5px; color:var(--nb-text); font-size:13px; }
+.nbase-tag-choices small,.nbase-tag-manager-list small { color:var(--nb-muted); }
+.nbase-tag-manager-form { display:flex; align-items:flex-end; flex-wrap:wrap; gap:6px; }
+.nbase-tag-manager-form label { display:grid; gap:4px; }
+.nbase-tag-manager-form input { padding:5px 8px; border:1px solid var(--nb-line); border-radius:6px; background:var(--nb-bg); color:var(--nb-text); font:inherit; }
+.nbase-tag-manager-list { display:grid; gap:8px; padding:0; list-style:none; }
+.nbase-tag-manager-list li { display:flex; align-items:center; gap:6px; }
+.nbase-tag-manager-list li>span { flex:1; overflow-wrap:anywhere; }

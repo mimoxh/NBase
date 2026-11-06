@@ -46,6 +46,7 @@ export function CodeCopyPlugin({ onNotice }: Props) {
       for (const key of keys) {
         const element = editor.getElementByKey(key);
         if (!element) { keys.delete(key); continue; }
+        if (element.closest('[data-nbase-folded]')) continue;
         const rect = element.getBoundingClientRect();
         items.push({ key, top: rect.top - surfaceRect.top + 6, left: rect.right - surfaceRect.left - 34 });
       }
@@ -78,10 +79,17 @@ export function CodeCopyPlugin({ onNotice }: Props) {
       schedule();
     }, { skipInitialization: false });
     const onResize = () => schedule();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(onResize);
+    const unregisterRoot = editor.registerRootListener((root, previous) => {
+      if (previous) observer?.unobserve(previous);
+      if (root) observer?.observe(root);
+    });
     window.addEventListener('resize', onResize);
     schedule();
     return () => {
       unregister();
+      unregisterRoot();
+      observer?.disconnect();
       window.removeEventListener('resize', onResize);
       pending = false;
       window.clearTimeout(fallbackId);

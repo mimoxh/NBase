@@ -1,11 +1,23 @@
 import type { CreatePageRequest, PageStateRequest, StoredDocumentContent, UpdatePageRequest } from '@nbase/contracts';
 import { normalizeDocumentContent } from '../editor/normalize';
 import type { DocumentContent } from '../editor/types';
+import type { NoteWrite } from './noteWrites';
 
 const databaseName = 'nbase-local-drafts';
 const storeName = 'page-drafts';
 const createStoreName = 'pending-creates';
 const actionStoreName = 'pending-actions';
+const noteStoreName = 'pending-note-writes';
+
+export interface LocalPendingNoteWrite {
+  key: string;
+  userId: string;
+  workspaceId: string;
+  write: NoteWrite;
+  createdAt: string;
+  conflict?: boolean;
+  preparing?: boolean;
+}
 
 export interface LocalPendingAction {
   key: string;
@@ -46,7 +58,8 @@ export interface LocalPageDraft {
   userId: string;
   title: string;
   content: StoredDocumentContent;
-  markdown: string;
+  /** Older drafts include a rendered Markdown copy. New drafts keep the structured source. */
+  markdown?: string;
   baseRevision: string;
   sequence: number;
   updatedAt: string;
@@ -75,11 +88,12 @@ export function draftKey(userId: string, workspaceId: string, pageId: string, ta
 
 function database(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(databaseName, 3);
+    const request = indexedDB.open(databaseName, 4);
     request.onupgradeneeded = () => {
       if (!request.result.objectStoreNames.contains(storeName)) request.result.createObjectStore(storeName, { keyPath: 'key' });
       if (!request.result.objectStoreNames.contains(createStoreName)) request.result.createObjectStore(createStoreName, { keyPath: 'key' });
       if (!request.result.objectStoreNames.contains(actionStoreName)) request.result.createObjectStore(actionStoreName, { keyPath: 'key' });
+      if (!request.result.objectStoreNames.contains(noteStoreName)) request.result.createObjectStore(noteStoreName, { keyPath: 'key' });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error('本地草稿库无法打开'));
@@ -158,4 +172,33 @@ export const localDrafts = {
   },
   putAction: (pending: LocalPendingAction) => operation<IDBValidKey>('readwrite', actionStoreName, store => store.put(pending)),
   removeAction: (key: string) => operation<undefined>('readwrite', actionStoreName, store => store.delete(key)),
+  forScopeNoteWrites: async (userId: string, workspaceId: string): Promise<LocalPendingNoteWrite[]> => {
+    const all = await operation<LocalPendingNoteWrite[]>('readonly', noteStoreName, store => store.getAll());
+    return all.filter(item => item.userId === userId && item.workspaceId === workspaceId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  },
+  putNoteWrite: (item: LocalPendingNoteWrite) => operation<IDBValidKey>('readwrite', noteStoreName, store => store.put(item)),
+  getNoteWrite: (key: string) => operation<LocalPendingNoteWrite | undefined>('readonly', noteStoreName, store => store.get(key)),
+  changeNoteWrite: async (item: LocalPendingNoteWrite, replacement?: LocalPendingNoteWrite): Promise<boolean> => {
+    const db = await database();
+    try {
+      return await new Promise<boolean>((resolve, reject) => {
+        const transaction = db.transaction(noteStoreName, 'readwrite');
+        const store = transaction.objectStore(noteStoreName);
+        const request = store.get(item.key);
+        let changed = false;
+        request.onsuccess = () => {
+          const stored = request.result as LocalPendingNoteWrite | undefined;
+          if (!stored || stored.write.body.clientMutationId !== item.write.body.clientMutationId
+            || Boolean(stored.preparing) !== Boolean(item.preparing)) return;
+          if (replacement) store.put(replacement);
+          else store.delete(item.key);
+          changed = true;
+        };
+        transaction.oncomplete = () => resolve(changed);
+        transaction.onerror = () => reject(transaction.error ?? new Error('无法更新本机待提交记录。'));
+        transaction.onabort = () => reject(transaction.error ?? new Error('本机待提交记录更新中止。'));
+      });
+    } finally { db.close(); }
+  },
 };

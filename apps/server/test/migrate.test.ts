@@ -23,7 +23,7 @@ function fakePool(appliedRows: Array<{ version: number; checksum: string }> = []
 
 test('initial migration commits once, and a matching migration is safe to rerun', async () => {
   const first = fakePool();
-  assert.equal(await runMigrations(first.pool), 6);
+  assert.equal(await runMigrations(first.pool), migrations.length);
   assert.ok(first.statements.some((statement) => statement.includes('CREATE TABLE pages')));
   assert.ok(first.statements.some((statement) => statement.includes('CREATE TABLE attachments')));
   assert.ok(first.statements.some((statement) => statement.includes('ADD COLUMN search_text')));
@@ -42,7 +42,7 @@ test('initial migration commits once, and a matching migration is safe to rerun'
 test('schema drift or a newer database version aborts before business tables change', async () => {
   for (const appliedRows of [
     [{ version: 1, checksum: 'modified' }],
-    [{ version: 7, checksum: 'future' }],
+    [{ version: migrations.at(-1)!.version + 1, checksum: 'future' }],
   ]) {
     const state = fakePool(appliedRows);
     await assert.rejects(runMigrations(state.pool), /checksum differs|newer than this server/);

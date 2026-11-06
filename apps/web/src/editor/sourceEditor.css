@@ -1,0 +1,13 @@
+.nbase-source-editor { display:grid; gap:10px; }
+.nbase-source-editor p { margin:0; }
+.nbase-source-editor textarea { width:100%; min-height:240px; resize:vertical; padding:12px; border:1px solid var(--nb-line); border-radius:8px; background:var(--nb-bg); color:var(--nb-text); font:13px/1.6 ui-monospace,SFMono-Regular,Consolas,monospace; tab-size:2; }
+.nbase-source-editor textarea:focus { outline:2px solid var(--nb-accent); outline-offset:1px; }
+.nbase-source-recovery { padding:10px; border:1px solid var(--nb-line); border-radius:8px; }
+.nbase-source-recovery summary { cursor:pointer; font-size:13px; }
+.nbase-source-recovery ul { display:grid; gap:10px; max-height:180px; overflow:auto; padding-left:18px; }
+.nbase-source-recovery li { font-size:12px; overflow-wrap:anywhere; }
+.nbase-source-recovery li>div { display:flex; gap:6px; margin-top:5px; }
+.nbase-source-diagnostics { margin:0; padding-left:20px; color:var(--nb-muted); font-size:13px; overflow-wrap:anywhere; }
+.nbase-source-original { max-height:180px; overflow:auto; white-space:pre-wrap; font-size:11px; }
+.nbase-source-preview { max-height:440px; overflow:auto; border-top:1px solid var(--nb-line); padding-top:10px; }
+.nbase-source-preview h3 { margin:0 0 10px; font-size:14px; }

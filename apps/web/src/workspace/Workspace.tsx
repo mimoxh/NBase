@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ChangeEvent } from 'react';
 import type { PageCoverId, PageSummary } from '@nbase/contracts';
 import { DocumentEditor } from '../editor/DocumentEditor';
-import { assessMarkdown, createContentFromMarkdown } from '../editor/markdown';
-import type { DocumentEditorHandle, EditorSnapshot } from '../editor/types';
+import { SourceEditorDialog } from '../editor/SourceEditorDialog';
+import { createContentFromMarkdown, parseMarkdownImport } from '../editor/markdown';
+import type { DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
 import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { initialWorkspace } from './fixtures';
@@ -141,10 +142,11 @@ function DemoTrash({ pages, onRestore, onClose }: { pages: Page[]; onRestore: (i
       </div>
       <div className="nb-trash-body">
         {page ? <>
-          <div className="nb-trash-body-head"><h3 style={{ margin: 0 }}>{page.title || '未命名页面'}</h3>
+          <div className="nb-trash-body-head"><h3 data-nbase-find-title style={{ margin: 0 }}>{page.title || '未命名页面'}</h3>
             <button className="nb-btn nb-btn-primary" onClick={() => onRestore(page.id)}>恢复</button></div>
           <p className="dialog-description">{pathOf(page)} · 会话内删除</p>
-          <pre className="nb-demo-preview">{(page.snapshot?.plainText ?? page.markdown).slice(0, 800) || '（空页面）'}</pre>
+          <DocumentEditor documentId={`demo-trash:${page.id}`} title={page.title} initialContent={page.snapshot?.content}
+            initialMarkdown={page.markdown} readOnly onChange={() => {}} />
         </> : <p className="nb-pal-msg">选择左侧页面查看内容</p>}
       </div>
     </div>
@@ -159,7 +161,8 @@ export function WorkspaceApp() {
   const [dialog, setDialog] = useState<Dialog>(null);
   const [readOnly, setReadOnly] = useState(false); const [mobileOpen, setMobileOpen] = useState(false);
   const [sidebarHidden, setSidebarHidden] = useState(() => { try { return localStorage.getItem('nbase.sidebar') === 'collapsed'; } catch { return false; } });
-  const [toast, setToast] = useState(''); const [source, setSource] = useState('');
+  const [toast, setToast] = useState('');
+  const [sourceSession, setSourceSession] = useState<{ pageId: string; instanceId: string; content: DocumentContent } | null>(null);
   const [moveTarget, setMoveTarget] = useState(''); const [dialogFor, setDialogFor] = useState<string | null>(null);
   const [pendingImport, setPendingImport] = useState<{ title: string; text: string; warnings: string[] } | null>(null);
   const [importAccepted, setImportAccepted] = useState(false);
@@ -191,12 +194,12 @@ export function WorkspaceApp() {
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229) return;
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); flush(); setDialog('search'); }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && (!dialog || dialog === 'search')) { event.preventDefault(); flush(); setDialog('search'); }
       if ((event.ctrlKey || event.metaKey) && event.key === '\\') { event.preventDefault(); toggleSidebar(); }
       if (event.key === 'Escape') setMobileOpen(false);
     };
     window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler);
-  }, [flush]);
+  }, [flush, dialog]);
   useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => { if (stateRef.current.pages.some(page => page.dirty)) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', handler); return () => window.removeEventListener('beforeunload', handler);
@@ -207,7 +210,10 @@ export function WorkspaceApp() {
     const file = event.target.files?.[0]; event.target.value = ''; if (!file) return;
     if (!/\.md$/i.test(file.name)) { notice('请选择 .md 格式的文件。'); return; }
     if (file.size > 2 * 1024 * 1024) { notice('演示版单次支持不超过 2 MB 的 Markdown 文件。'); return; }
-    try { const text = await file.text(); setPendingImport({ title: file.name.replace(/\.md$/i, ''), text, warnings: assessMarkdown(text).warnings }); setImportAccepted(false); setDialog('import'); } catch { notice('无法读取这个文件，请重新选择。'); }
+    try { const text = await file.text(); const parsed = parseMarkdownImport(text);
+      setPendingImport({ title: parsed.title ?? file.name.replace(/\.md$/i, ''), text,
+        warnings: [...parsed.warnings, ...(parsed.tagNames.length ? ['演示空间没有持久化标签；标签仅在正式工作台导入时关联。'] : [])] });
+      setImportAccepted(false); setDialog('import'); } catch { notice('无法读取这个文件，请重新选择。'); }
   };
   const completeImport = () => {
     if (!pendingImport || !importAccepted) return;
@@ -239,7 +245,10 @@ export function WorkspaceApp() {
   const target = dialogFor ? state.pages.find(p => p.id === dialogFor) : undefined;
   const pageMenuItems: (MenuItem | 'divider')[] = current ? [
     { key: 'mode', label: readOnly ? '切换到编辑' : '切换到阅读', icon: 'page', onSelect: () => { flush(); setReadOnly(!readOnly); } },
-    { key: 'source', label: '查看 Markdown 源码', icon: 'code', onSelect: () => { setSource(currentMarkdown()); setDialog('source'); } },
+    { key: 'source', label: 'Markdown 源码', icon: 'code', onSelect: () => {
+      const snapshot = flush();
+      if (snapshot) { setSourceSession({ pageId: current.id, instanceId: crypto.randomUUID(), content: snapshot.content }); setDialog('source'); }
+    } },
     { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
     ...(current.originalMarkdown !== undefined ? [{ key: 'raw', label: '下载导入原文', icon: 'download' as const, onSelect: () => download(`${current.title}-原始文件`, current.originalMarkdown ?? '') }] : []),
     'divider',
@@ -278,15 +287,16 @@ export function WorkspaceApp() {
           <PageHeader icon={current.icon} cover={current.cover} editable={!readOnly}
             onIcon={icon => dispatch({ type: 'icon', id: current.id, icon })}
             onCover={(cover: PageCoverId | null) => dispatch({ type: 'cover', id: current.id, cover })}
-            title={readOnly ? <div className="nb-doc-title-static">{current.title || '未命名页面'}</div>
-              : <input className="nb-doc-title page-title" aria-label="页面标题" value={current.title} placeholder="未命名页面"
+            title={readOnly ? <div className="nb-doc-title-static" data-nbase-find-title>{current.title || '未命名页面'}</div>
+              : <input className="nb-doc-title page-title" data-nbase-find-title aria-label="页面标题" value={current.title} placeholder="未命名页面"
                 onChange={event => dispatch({ type: 'rename', id: current.id, title: event.target.value })} />} />
           <div className="nb-doc-body">
             <DocumentEditor key={current.id} ref={editorRef} documentId={current.id}
+              title={current.title} onReplaceTitle={value => dispatch({ type: 'rename', id: current.id, title: value })}
               initialContent={current.snapshot?.content} initialMarkdown={current.markdown}
               readOnly={readOnly} onChange={onChange} onReady={onReady} onNotice={notice} />
           </div>
-          <Toc outline={current.snapshot?.outline ?? []} />
+          <Toc outline={current.snapshot?.outline ?? []} onJump={id => editorRef.current?.jumpToHeading(id)} />
         </> : <section className="nb-home">
           {summaries.length ? <>
             <div className="nb-home-eyebrow">演示空间</div><h1>最近编辑</h1>
@@ -310,7 +320,17 @@ export function WorkspaceApp() {
     {toast && <Toast text={toast} onClose={() => setToast('')} />}
     {dialog === 'search' && <DemoSearch pages={state.pages} recentIds={state.recent} onOpen={openPage} onCommand={onCommand} onClose={() => setDialog(null)} />}
     {dialog === 'trash' && <DemoTrash pages={state.pages} onRestore={id => { dispatch({ type: 'restore', id }); notice('已在当前会话恢复页面及本次删除的子页面。'); }} onClose={() => setDialog(null)} />}
-    {dialog === 'source' && <Modal title="Markdown 源码" wide onClose={() => setDialog(null)}><p className="dialog-description">只读视图，来自当前编辑器内容。转换可能不保留所有扩展语法。</p><textarea className="source-view" aria-label="Markdown 源码，只读" readOnly value={source} spellCheck={false} /><div className="dialog-actions"><button className="nb-btn" onClick={() => { void navigator.clipboard.writeText(source).then(() => notice('已复制 Markdown。')).catch(() => notice('剪贴板不可用，请在源码框中手动选择并复制。')); }}>复制源码</button><button className="nb-btn nb-btn-primary" onClick={() => current && download(current.title, source)}><Icon name="download" size={16} />下载 Markdown</button></div></Modal>}
+    {dialog === 'source' && sourceSession && <SourceEditorDialog key={sourceSession.instanceId}
+      scope={{ userId: 'demo', workspaceId: 'demo', pageId: sourceSession.pageId, instanceId: sourceSession.instanceId, baseRevision: 'session' }}
+      initialContent={sourceSession.content} readOnly={readOnly} onClose={() => setDialog(null)}
+      onApply={async (content, baseContent) => {
+        if (stateRef.current.currentId !== sourceSession.pageId || !editorRef.current || readOnly
+          || JSON.stringify(editorRef.current.getSnapshot().content) !== JSON.stringify(baseContent)) {
+          throw new Error('当前正文已与源码基准不同，请复制输入后重新打开。');
+        }
+        editorRef.current.replaceContent(content);
+        notice('源码已应用到当前演示会话，可撤销。请下载以保留正文。');
+      }} />}
     {dialog === 'move' && target && <Modal title="移动页面" onClose={() => setDialog(null)}><p className="dialog-description">选择「{target.title || '未命名页面'}」的新位置。子页面会一起移动。</p><label className="field-label" htmlFor="move-parent">移动到</label><select id="move-parent" className="select-field" value={moveTarget} onChange={event => setMoveTarget(event.target.value)}><option value="">个人空间（根目录）</option>{state.pages.filter(page => canMove(state.pages, target.id, page.id)).map(page => <option key={page.id} value={page.id}>{[...ancestors(state.pages, page.id), page].map(p => p.title || '未命名页面').join(' / ')}</option>)}</select><div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button><button className="nb-btn nb-btn-primary" onClick={() => { dispatch({ type: 'move', id: target.id, parentId: moveTarget || null }); setDialog(null); setDialogFor(null); notice('已在当前会话移动页面。'); }}>移动</button></div></Modal>}
     {dialog === 'delete' && target && <Modal title="移入回收站" onClose={() => setDialog(null)}><p className="dialog-description">「{target.title || '未命名页面'}」{subtreeCount ? `及 ${subtreeCount} 篇子页面` : ''}将移到回收站，你可以在当前会话内恢复。</p><div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button><button className="nb-btn nb-btn-primary" onClick={() => { flush(); dispatch({ type: 'delete', id: target.id }); setDialog(null); setDialogFor(null); }}>确认移入回收站</button></div></Modal>}
     {dialog === 'import' && pendingImport && <Modal title="导入 Markdown" onClose={() => setDialog(null)}><p className="dialog-description">将「{pendingImport.title}.md」转换为新的会话内页面。原始文本会保留，可从页面菜单下载。</p><div className="import-warning"><strong>导入是格式转换，不保证无损</strong>{pendingImport.warnings.length ? <ul>{pendingImport.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul> : <p>未发现明显的扩展语法，但复杂排版或自定义样式仍可能变化。</p>}</div><details className="import-preview"><summary>查看原始文本</summary><pre>{pendingImport.text}</pre></details><label className="confirmation-check"><input type="checkbox" checked={importAccepted} onChange={event => setImportAccepted(event.target.checked)} />我理解转换可能改变格式，继续创建页面</label><div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button><button className="nb-btn nb-btn-primary" disabled={!importAccepted} onClick={completeImport}>转换并创建</button></div></Modal>}

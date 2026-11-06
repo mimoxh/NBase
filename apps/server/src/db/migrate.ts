@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { Pool } from 'pg';
 import { migrations } from './migrations.js';
 import { extractSearchText } from '../pages/search-text.js';
+import { backfillPageLinks } from '../pages/page-links.js';
 import type { StoredDocumentContent } from '@nbase/contracts';
 
 const advisoryLockKey = '2026102501';
@@ -60,6 +61,7 @@ export async function runMigrations(pool: Pick<Pool, 'connect'>): Promise<number
           after = batch.rows.at(-1)!.id;
         }
       }
+      if (migration.version === 10) await backfillPageLinks(client);
       await client.query(
         'INSERT INTO schema_migrations (version, name, checksum) VALUES ($1, $2, $3)',
         [migration.version, migration.name, checksum],

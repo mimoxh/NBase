@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { PageSummary, SearchResult } from '@nbase/contracts';
+import type { PageSummary, SearchResult, WorkspaceTag } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { ApiError, pageClient } from './client';
 import { PageIcon } from '../shell/PageTree';
+import { TagFilter } from './PageTags';
 
 export type PaletteCommand = 'new' | 'import' | 'trash' | 'theme';
 
@@ -20,16 +21,18 @@ function marked(text: string, phrase: string): ReactNode {
   return <>{text.slice(0, at)}<mark>{text.slice(at, at + phrase.length)}</mark>{text.slice(at + phrase.length)}</>;
 }
 
-export function PersistentSearchDialog({ workspaceId, pages, recentPages, onOpen, onCommand, onClose, onAuthError }: {
+export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags = [], onOpen, onCommand, onClose, onAuthError }: {
   workspaceId: string;
   pages: PageSummary[];
   recentPages: PageSummary[];
+  tags?: WorkspaceTag[] | undefined;
   onOpen: (result: SearchResult, phrase: string) => void;
   onCommand: (command: PaletteCommand) => void;
   onClose: () => void;
   onAuthError: () => void;
 }) {
   const [query, setQuery] = useState('');
+  const [tagIds, setTagIds] = useState<string[]>([]);
   const [phase, setPhase] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [truncated, setTruncated] = useState(false);
@@ -43,6 +46,7 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, onOpen
   const authErrorRef = useRef(onAuthError);
   authErrorRef.current = onAuthError;
   const phrase = query.trim();
+  const searching = Boolean(phrase || tagIds.length);
 
   const pathOf = (pageId: string): string => {
     const names: string[] = [];
@@ -61,7 +65,7 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, onOpen
   const titleResults = results.filter(item => item.matchField === 'title');
   const bodyResults = results.filter(item => item.matchField !== 'title');
   const flat: ({ type: 'result'; result: SearchResult } | { type: 'recent'; page: PageSummary } | { type: 'command'; key: PaletteCommand })[] =
-    phrase
+    searching
       ? results.map(result => ({ type: 'result' as const, result }))
       : [...recentPages.map(page => ({ type: 'recent' as const, page })), ...commands.map(item => ({ type: 'command' as const, key: item.key }))];
   const active = Math.min(selected, Math.max(0, flat.length - 1));
@@ -81,7 +85,7 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, onOpen
 
   useEffect(() => {
     const sequence = ++generation.current;
-    if (!phrase || composing) {
+    if (!searching || composing) {
       setPhase('idle'); setResults([]); setTruncated(false);
       return;
     }
@@ -93,7 +97,7 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, onOpen
     setPhase('loading'); setError(''); setResults([]); setTruncated(false);
     const controller = new AbortController();
     const timer = setTimeout(() => {
-      void pageClient.search(workspaceId, phrase, controller.signal).then(response => {
+      void pageClient.search(workspaceId, phrase, controller.signal, tagIds).then(response => {
         if (generation.current !== sequence || controller.signal.aborted) return;
         setResults(response.results); setTruncated(response.truncated); setSelected(0); setPhase('ready');
       }).catch(cause => {
@@ -105,7 +109,7 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, onOpen
       });
     }, 250);
     return () => { clearTimeout(timer); controller.abort(); };
-  }, [workspaceId, phrase, composing, retry]);
+  }, [workspaceId, phrase, searching, tagIds, composing, retry]);
 
   useEffect(() => {
     document.getElementById(`persistent-search-result-${active}`)?.scrollIntoView({ block: 'nearest' });
@@ -131,8 +135,9 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, onOpen
           }
         }} />
     </div>
+    <TagFilter tags={tags} value={tagIds} onChange={setTagIds} />
     <div id="persistent-search-results" className="nb-pal-list" role="listbox" aria-label="搜索结果">
-      {!phrase && <>
+      {!searching && <>
         {recentPages.length > 0 && <div className="nb-pal-group">最近访问</div>}
         {recentPages.map((page, index) => {
           const position = index;
@@ -154,12 +159,12 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, onOpen
           </button>;
         })}
       </>}
-      {phrase && phase === 'loading' && <p className="nb-pal-msg" role="status">正在搜索…</p>}
-      {phrase && phase === 'error' && <div className="nb-pal-msg" role="alert">{error}
+      {searching && phase === 'loading' && <p className="nb-pal-msg" role="status">正在搜索…</p>}
+      {searching && phase === 'error' && <div className="nb-pal-msg" role="alert">{error}
         <button onClick={() => setRetry(value => value + 1)}>重试</button></div>}
-      {phrase && phase === 'ready' && !results.length && <p className="nb-pal-msg" role="status">没有找到“{phrase}”，试试其他关键词</p>}
-      {phrase && phase === 'ready' && <>
-        {titleResults.length > 0 && <div className="nb-pal-group">标题</div>}
+      {searching && phase === 'ready' && !results.length && <p className="nb-pal-msg" role="status">没有符合当前筛选的页面。</p>}
+      {searching && phase === 'ready' && <>
+        {titleResults.length > 0 && <div className="nb-pal-group">{phrase ? '标题' : '符合标签'}</div>}
         {titleResults.map(result => {
           const position = flat.findIndex(item => 'result' in item && item.result === result);
           return <button role="option" aria-selected={position === active} id={`persistent-search-result-${position}`}
@@ -185,7 +190,7 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, onOpen
             </span>
           </button>;
         })}
-        {truncated && <p className="nb-pal-msg">仅显示前 30 条，请增加关键词缩小范围</p>}
+        {truncated && <p className="nb-pal-msg">仅显示前 30 条，请缩小搜索范围。</p>}
       </>}
     </div>
     <div className="modal-footnote">↑↓ 选择 · ↵ 打开 · Esc 关闭 · 只搜索已保存的页面</div>

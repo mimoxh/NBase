@@ -1,7 +1,7 @@
 import type {
-  AttachmentMetadata, AuthSessionResponse, CreatePageRequest, FavoriteListResponse, PageDocument, PageTreeResponse, SearchResponse,
+  AttachmentMetadata, AuthSessionResponse, CreatePageRequest, FavoriteListResponse, PageBacklinksResponse, PageDocument, PageTreeResponse, SearchResponse,
   PageSummary, PageHistoryResponse, PageVersion, PageStateRequest, RestorePageVersionRequest,
-  TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest,
+  TagWriteRequest, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest, WorkspaceTag,
 } from '@nbase/contracts';
 
 const timeoutMs = 8_000;
@@ -13,7 +13,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, method = 'GET', body?: unknown, csrfToken?: string,
+export async function request<T>(path: string, method = 'GET', body?: unknown, csrfToken?: string,
   signal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
   const cancel = () => controller.abort(signal?.reason);
@@ -50,7 +50,7 @@ async function request<T>(path: string, method = 'GET', body?: unknown, csrfToke
   }
 }
 
-const workspacePath = (workspaceId: string) => `/api/workspaces/${encodeURIComponent(workspaceId)}`;
+export const workspacePath = (workspaceId: string) => `/api/workspaces/${encodeURIComponent(workspaceId)}`;
 
 export const pageClient = {
   session: (signal?: AbortSignal) => request<AuthSessionResponse>('/api/auth/session', 'GET', undefined, undefined, signal),
@@ -61,6 +61,9 @@ export const pageClient = {
     request<PageTreeResponse>(`${workspacePath(workspaceId)}/page-tree`, 'GET', undefined, undefined, signal),
   get: (workspaceId: string, pageId: string, signal?: AbortSignal) =>
     request<PageDocument>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}`, 'GET', undefined, undefined, signal),
+  backlinks: (workspaceId: string, pageId: string, signal?: AbortSignal) =>
+    request<PageBacklinksResponse>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}/backlinks`,
+      'GET', undefined, undefined, signal),
   receipt: (workspaceId: string, mutationId: string) =>
     request<{ statusCode: number; response: PageDocument }>(
       `${workspacePath(workspaceId)}/mutations/${encodeURIComponent(mutationId)}`),
@@ -68,8 +71,8 @@ export const pageClient = {
     request<PageDocument>(`${workspacePath(workspaceId)}/pages`, 'POST', body, csrfToken),
   update: (workspaceId: string, pageId: string, body: UpdatePageRequest, csrfToken: string) =>
     request<PageDocument>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}`, 'PATCH', body, csrfToken),
-  search: (workspaceId: string, phrase: string, signal?: AbortSignal) =>
-    request<SearchResponse>(`${workspacePath(workspaceId)}/search?q=${encodeURIComponent(phrase)}&limit=30`,
+  search: (workspaceId: string, phrase: string, signal?: AbortSignal, tagIds: string[] = []) =>
+    request<SearchResponse>(`${workspacePath(workspaceId)}/search?q=${encodeURIComponent(phrase)}&limit=30${tagIds.length ? `&tagIds=${encodeURIComponent(tagIds.join(','))}` : ''}`,
       'GET', undefined, undefined, signal),
   favorites: (workspaceId: string, signal?: AbortSignal) =>
     request<FavoriteListResponse>(`${workspacePath(workspaceId)}/favorites`, 'GET', undefined, undefined, signal),
@@ -96,7 +99,32 @@ export const pageClient = {
     request<PageDocument>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}/restore-version`, 'POST', body, csrfToken),
 };
 
+export const tagClient = {
+  list: (workspaceId: string, signal?: AbortSignal) =>
+    request<{ tags: WorkspaceTag[] }>(`${workspacePath(workspaceId)}/tags`, 'GET', undefined, undefined, signal),
+  create: (workspaceId: string, body: TagWriteRequest, csrfToken: string) =>
+    request<WorkspaceTag>(`${workspacePath(workspaceId)}/tags`, 'POST', body, csrfToken),
+  rename: (workspaceId: string, tagId: string, body: TagWriteRequest, csrfToken: string) =>
+    request<WorkspaceTag>(`${workspacePath(workspaceId)}/tags/${encodeURIComponent(tagId)}`, 'PATCH', body, csrfToken),
+  remove: (workspaceId: string, tagId: string, clientMutationId: string, csrfToken: string) =>
+    request<void>(`${workspacePath(workspaceId)}/tags/${encodeURIComponent(tagId)}`, 'DELETE', { clientMutationId }, csrfToken),
+};
+
 export const attachmentClient = {
+  verify: async (workspaceId: string, id: string): Promise<void> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${workspacePath(workspaceId)}/attachments/${encodeURIComponent(id)}/content`, {
+        method: 'HEAD', credentials: 'same-origin', cache: 'no-store', signal: controller.signal,
+      });
+      if (!response.ok) throw new ApiError(response.status, response.status === 401 ? 'AUTH_REQUIRED' : 'ATTACHMENT_INVALID');
+    } catch (error) {
+      if (controller.signal.aborted) throw new ApiError(0, 'TIMEOUT');
+      if (error instanceof TypeError) throw new ApiError(0, 'NETWORK_UNAVAILABLE');
+      throw error;
+    } finally { clearTimeout(timer); }
+  },
   upload: async (workspaceId: string, id: string, file: File, csrfToken: string): Promise<AttachmentMetadata> => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30_000);

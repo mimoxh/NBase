@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { pageBacklinkLimit, type PageBacklinksResponse } from '@nbase/contracts';
 import type { CreatePageRequest, FavoriteListResponse, PageCoverId, PageDocument, PageHistoryResponse, PageListResponse, PageStateRequest,
   PageSummary, PageTreeResponse, PageVersion, PageVersionOperation, PageVersionSummary, RestorePageVersionRequest,
   SearchResponse, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest } from '@nbase/contracts';
 import type { Pool, PoolClient, QueryResult } from 'pg';
 import { attachmentReferences, validateDocumentContent } from './validate.js';
-import { extractSearchText } from './search-text.js';
+import { replacePageLinks } from './page-links.js';
+import { extractDocumentIndex, type IndexedPageReference } from './search-text.js';
 
 const maxRevision = 9223372036854775807n;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -22,7 +24,7 @@ export class PageError extends Error {
     public readonly statusCode: number,
     public readonly code: 'NOT_FOUND' | 'FORBIDDEN' | 'REVISION_CONFLICT' | 'MUTATION_CONFLICT'
       | 'PAGE_TREE_INVALID' | 'PAGE_TREE_CHANGED' | 'CONTENT_VERSION_UNSUPPORTED' | 'ATTACHMENT_INVALID'
-      | 'FAVORITE_LIMIT',
+      | 'FAVORITE_LIMIT' | 'TAG_INVALID' | 'TAG_NAME_CONFLICT' | 'PAGE_REFERENCE_INVALID',
     public readonly currentRevision?: string,
   ) { super(code); }
 
@@ -38,6 +40,7 @@ interface PageRow {
   title: string;
   icon: string | null;
   cover: PageCoverId | null;
+  tag_ids?: string[];
   content_json: PageDocument['content'];
   content_schema_version: number;
   revision: string;
@@ -46,11 +49,11 @@ interface PageRow {
   cursor_created_at?: string;
 }
 
-interface ReceiptRow {
+interface ReceiptRow<T = PageDocument> {
   operation: string;
   request_hash: Buffer;
   response_status: number;
-  response_json: PageDocument;
+  response_json: T;
 }
 
 interface VersionRow {
@@ -63,6 +66,12 @@ interface VersionRow {
 interface TrashRow extends PageRow {
   deleted_at: Date; deletion_group_id: string; cursor_deleted_at?: string;
 }
+
+type BacklinkRow = {
+  source_page_id: string; source_title: string; source_revision: string; occurrence: number; snippet: string;
+} | {
+  source_page_id: null; source_title: null; source_revision: null; occurrence: null; snippet: null;
+};
 
 function versionSummary(row: VersionRow): PageVersionSummary {
   return { revision: row.revision, title: row.title, savedAt: row.saved_at.toISOString(),
@@ -82,6 +91,7 @@ function pageFromRow(row: PageRow): PageDocument {
     title: row.title,
     icon: row.icon ?? null,
     cover: row.cover ?? null,
+    tagIds: row.tag_ids ?? [],
     content: row.content_json,
     revision: row.revision,
     createdAt: row.created_at.toISOString(),
@@ -120,7 +130,8 @@ function requestHash(operation: string, pageId: string | null, body: unknown): B
 const pageColumns = `id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, revision::text AS revision,
   created_at, updated_at`;
 const joinedPageColumns = `p.id, p.workspace_id, p.parent_id, p.title, p.icon, p.cover, p.content_json, p.content_schema_version,
-  p.revision::text AS revision, p.created_at, p.updated_at`;
+  p.revision::text AS revision, p.created_at, p.updated_at,
+  ARRAY(SELECT pt.tag_id FROM page_tags pt WHERE pt.workspace_id = p.workspace_id AND pt.page_id = p.id ORDER BY pt.tag_id) AS tag_ids`;
 
 export class PgPageRepository {
   constructor(private readonly pool: Pool) {}
@@ -192,6 +203,32 @@ export class PgPageRepository {
     return result.rows[0] ? pageFromRow(result.rows[0]) : null;
   }
 
+  async backlinks(workspaceId: string, actorId: string, pageId: string): Promise<PageBacklinksResponse | null> {
+    const result = await this.pool.query<BacklinkRow>(`
+      SELECT link.source_page_id, link.source_title, link.source_revision, link.occurrence, link.snippet
+      FROM pages target
+      JOIN workspace_memberships member ON member.workspace_id = target.workspace_id AND member.user_id = $2
+      LEFT JOIN LATERAL (
+        SELECT source.id AS source_page_id, source.title AS source_title, source.revision::text AS source_revision,
+          source.updated_at AS source_updated_at, refs.occurrence, refs.snippet
+        FROM page_links refs
+        JOIN pages source ON source.workspace_id = refs.workspace_id AND source.id = refs.source_page_id
+          AND source.deleted_at IS NULL
+        WHERE refs.workspace_id = target.workspace_id AND refs.target_page_id = target.id
+        ORDER BY source.updated_at DESC, source.id, refs.occurrence
+        LIMIT $4
+      ) link ON true
+      WHERE target.workspace_id = $1 AND target.id = $3 AND target.deleted_at IS NULL
+      ORDER BY link.source_updated_at DESC, link.source_page_id, link.occurrence
+    `, [workspaceId, actorId, pageId, pageBacklinkLimit + 1]);
+    if (!result.rows.length) return null;
+    const links = result.rows.filter(row => row.source_page_id !== null);
+    return { links: links.slice(0, pageBacklinkLimit).map(row => ({
+      sourcePageId: row.source_page_id, sourceTitle: row.source_title, sourceRevision: row.source_revision,
+      occurrence: row.occurrence, snippet: row.snippet,
+    })), truncated: links.length > pageBacklinkLimit };
+  }
+
   async list(workspaceId: string, actorId: string, parentId: string | null,
     limit: number, cursor: { createdAt: string; id: string } | null): Promise<PageListResponse> {
     const result = await this.pool.query<PageRow>(`
@@ -235,12 +272,13 @@ export class PgPageRepository {
       FROM page_mutation_receipts r
       JOIN workspace_memberships m ON m.workspace_id = r.workspace_id AND m.user_id = $2
       WHERE r.workspace_id = $1 AND r.actor_user_id = $2 AND r.client_mutation_id = $3
+        AND r.page_id IS NOT NULL
     `, [workspaceId, actorId, mutationId]);
     const row = result.rows[0];
     return row ? { statusCode: row.response_status, body: row.response_json } : null;
   }
 
-  async search(workspaceId: string, actorId: string, phrase: string, limit: number): Promise<SearchResponse> {
+  async search(workspaceId: string, actorId: string, phrase: string, limit: number, tagIds: string[] = []): Promise<SearchResponse> {
     const result = await this.pool.query<{ id: string; parent_id: string | null; title: string; icon: string | null;
       revision: string; updated_at: Date; search_text: string; title_match: boolean }>(`
       SELECT p.id, p.parent_id, p.title, p.icon, p.revision::text AS revision, p.updated_at, p.search_text,
@@ -250,27 +288,35 @@ export class PgPageRepository {
       WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
         AND (position(lower($3) in lower(p.title)) > 0
           OR position(lower($3) in lower(p.search_text)) > 0)
+        AND NOT EXISTS (
+          SELECT 1 FROM unnest($5::uuid[]) AS required(tag_id)
+          WHERE NOT EXISTS (SELECT 1 FROM page_tags pt
+            WHERE pt.workspace_id = p.workspace_id AND pt.page_id = p.id AND pt.tag_id = required.tag_id)
+        )
       ORDER BY title_match DESC, p.updated_at DESC, p.id
       LIMIT $4
-    `, [workspaceId, actorId, phrase, limit + 1]);
+    `, [workspaceId, actorId, phrase, limit + 1, tagIds]);
     return { results: result.rows.slice(0, limit).map(row => ({ pageId: row.id, title: row.title, icon: row.icon ?? null,
       parentId: row.parent_id, revision: row.revision, updatedAt: row.updated_at.toISOString(),
       snippet: searchSnippet(row.search_text, phrase), matchField: row.title_match ? 'title' as const : 'content' as const })),
     truncated: result.rows.length > limit };
   }
 
-  private async mutate(
+  /** Run one authorized write and its idempotency receipt under the workspace lock. */
+  async mutate<T extends object>(
     workspaceId: string, actorId: string, mutationId: string, operation: string,
     pageId: string | null, body: unknown,
-    action: (client: PoolClient) => Promise<MutationResult<PageDocument>>,
-  ): Promise<MutationResult<PageDocument>> {
+    action: (client: PoolClient, role: 'owner' | 'editor') => Promise<MutationResult<T>>,
+    receiptPageId: (response: T) => string | null = response =>
+      'id' in response && typeof response.id === 'string' ? response.id : null,
+  ): Promise<MutationResult<T>> {
     const client = await this.pool.connect();
     let transactionOpen = false;
     try {
       await client.query('BEGIN');
       transactionOpen = true;
       // Serializes every tree mutation and same-key retry in this workspace.
-      const membership = await client.query<{ role: string }>(`
+      const membership = await client.query<{ role: 'owner' | 'editor' | 'viewer' }>(`
         SELECT m.role FROM workspaces w
         JOIN workspace_memberships m ON m.workspace_id = w.id AND m.user_id = $2
         WHERE w.id = $1 FOR UPDATE OF w
@@ -279,7 +325,7 @@ export class PgPageRepository {
       if (membership.rows[0].role === 'viewer') throw new PageError(403, 'FORBIDDEN');
 
       const hash = requestHash(operation, pageId, body);
-      const prior = await client.query<ReceiptRow>(`
+      const prior = await client.query<ReceiptRow<T>>(`
         SELECT operation, request_hash, response_status, response_json FROM page_mutation_receipts
         WHERE workspace_id = $1 AND actor_user_id = $2 AND client_mutation_id = $3
       `, [workspaceId, actorId, mutationId]);
@@ -293,12 +339,12 @@ export class PgPageRepository {
         return { statusCode: receipt.response_status, body: receipt.response_json };
       }
 
-      const result = await action(client);
+      const result = await action(client, membership.rows[0].role);
       await client.query(`
         INSERT INTO page_mutation_receipts
           (workspace_id, actor_user_id, client_mutation_id, operation, request_hash, page_id, response_status, response_json)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-      `, [workspaceId, actorId, mutationId, operation, hash, result.body.id, result.statusCode, JSON.stringify(result.body)]);
+      `, [workspaceId, actorId, mutationId, operation, hash, receiptPageId(result.body), result.statusCode, JSON.stringify(result.body)]);
       await client.query('COMMIT');
       transactionOpen = false;
       return result;
@@ -327,25 +373,68 @@ export class PgPageRepository {
     })) throw new PageError(422, 'ATTACHMENT_INVALID');
   }
 
+  private async validatePageReferenceTargets(client: PoolClient, workspaceId: string,
+    references: IndexedPageReference[]): Promise<void> {
+    if (!references.length) return;
+    const ids = [...new Set(references.map(reference => reference.targetPageId))];
+    // Trashed targets keep their identity so saved references can resolve after restoration.
+    const result = await client.query('SELECT id FROM pages WHERE workspace_id = $1 AND id = ANY($2::uuid[])',
+      [workspaceId, ids]);
+    if (result.rows.length !== ids.length) throw new PageError(422, 'PAGE_REFERENCE_INVALID');
+  }
+
   async create(workspaceId: string, actorId: string, body: CreatePageRequest): Promise<MutationResult<PageDocument>> {
-    return this.mutate(workspaceId, actorId, body.clientMutationId, 'create', null, body, async (client) => {
-      await this.validateAttachments(client, workspaceId, body.content);
-      if (body.parentId !== null) {
-        const parent = await client.query(
-          'SELECT 1 FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL',
-          [workspaceId, body.parentId],
-        );
-        if (!parent.rows[0]) throw new PageError(422, 'PAGE_TREE_INVALID');
-      }
-      const result = await client.query<PageRow>(`
-        INSERT INTO pages (id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, search_text)
-        VALUES ($1, $2, $3, $4, $7, $8, $5::jsonb, 1, $6)
-        RETURNING ${pageColumns}
-      `, [randomUUID(), workspaceId, body.parentId, body.title, JSON.stringify(body.content),
-        extractSearchText(body.content), body.icon ?? null, body.cover ?? null]);
-      await this.snapshot(client, workspaceId, [result.rows[0]!.id], actorId, 'create');
-      return { statusCode: 201, body: pageFromRow(result.rows[0]!) };
-    });
+    return this.mutate(workspaceId, actorId, body.clientMutationId, 'create', null, body,
+      client => this.createInTransaction(client, workspaceId, actorId, body));
+  }
+
+  private async replaceTags(client: PoolClient, workspaceId: string, pageId: string, tagIds: string[]): Promise<string[]> {
+    const next = tagIds.map(id => id.toLowerCase()).sort();
+    if (next.length) {
+      const allowed = await client.query('SELECT id FROM workspace_tags WHERE workspace_id = $1 AND id = ANY($2::uuid[])',
+        [workspaceId, next]);
+      if (allowed.rows.length !== next.length) throw new PageError(422, 'TAG_INVALID');
+    }
+    await client.query('DELETE FROM page_tags WHERE workspace_id = $1 AND page_id = $2 AND tag_id <> ALL($3::uuid[])',
+      [workspaceId, pageId, next]);
+    if (next.length) await client.query(`INSERT INTO page_tags (workspace_id, page_id, tag_id)
+      SELECT $1, $2, tag_id FROM unnest($3::uuid[]) AS tags(tag_id) ON CONFLICT DO NOTHING`, [workspaceId, pageId, next]);
+    return next;
+  }
+
+  async getInTransaction(client: PoolClient, workspaceId: string, pageId: string): Promise<PageDocument> {
+    const result = await client.query<PageRow>(`
+      SELECT ${joinedPageColumns} FROM pages p WHERE p.workspace_id = $1 AND p.id = $2 AND p.deleted_at IS NULL FOR UPDATE OF p
+    `, [workspaceId, pageId]);
+    const row = result.rows[0];
+    if (!row) throw new PageError(404, 'NOT_FOUND');
+    if (row.content_schema_version !== 1) throw new PageError(422, 'CONTENT_VERSION_UNSUPPORTED');
+    return pageFromRow(row);
+  }
+
+  async createInTransaction(client: PoolClient, workspaceId: string, actorId: string,
+    body: CreatePageRequest): Promise<MutationResult<PageDocument>> {
+    await this.validateAttachments(client, workspaceId, body.content);
+    const index = extractDocumentIndex(body.content);
+    await this.validatePageReferenceTargets(client, workspaceId, index.references);
+    if (body.parentId !== null) {
+      const parent = await client.query(
+        'SELECT 1 FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL',
+        [workspaceId, body.parentId],
+      );
+      if (!parent.rows[0]) throw new PageError(422, 'PAGE_TREE_INVALID');
+    }
+    const result = await client.query<PageRow>(`
+      INSERT INTO pages (id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, search_text)
+      VALUES ($1, $2, $3, $4, $7, $8, $5::jsonb, 1, $6)
+      RETURNING ${pageColumns}
+    `, [randomUUID(), workspaceId, body.parentId, body.title, JSON.stringify(body.content),
+      index.searchText, body.icon ?? null, body.cover ?? null]);
+    const page = pageFromRow(result.rows[0]!);
+    if (body.tagIds?.length) page.tagIds = await this.replaceTags(client, workspaceId, page.id, body.tagIds);
+    if (index.references.length) await replacePageLinks(client, workspaceId, page.id, index.references);
+    await this.snapshot(client, workspaceId, [page.id], actorId, 'create');
+    return { statusCode: 201, body: page };
   }
 
   private async validateParent(client: PoolClient, workspaceId: string, pageId: string, parentId: string): Promise<void> {
@@ -367,40 +456,48 @@ export class PgPageRepository {
 
   async update(workspaceId: string, actorId: string, pageId: string,
     body: UpdatePageRequest): Promise<MutationResult<PageDocument>> {
-    return this.mutate(workspaceId, actorId, body.clientMutationId, 'update', pageId, body, async (client) => {
-      const existing = await client.query<PageRow>(`
-        SELECT ${pageColumns} FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE
-      `, [workspaceId, pageId]);
-      const row = existing.rows[0];
-      if (!row) throw new PageError(404, 'NOT_FOUND');
-      if (row.content_schema_version !== 1) throw new PageError(422, 'CONTENT_VERSION_UNSUPPORTED');
-      if (row.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', row.revision);
-      if (body.content) await this.validateAttachments(client, workspaceId, body.content);
-      const parentId = body.parentId === undefined ? row.parent_id : body.parentId;
-      if (parentId !== null && parentId !== row.parent_id) await this.validateParent(client, workspaceId, pageId, parentId);
-      const icon = body.icon === undefined ? row.icon : body.icon;
-      const cover = body.cover === undefined ? row.cover : body.cover;
+    return this.mutate(workspaceId, actorId, body.clientMutationId, 'update', pageId, body,
+      client => this.updateInTransaction(client, workspaceId, actorId, pageId, body));
+  }
 
-      const result = await client.query<PageRow>(`
-        UPDATE pages SET title = $3, parent_id = $4, content_json = $5::jsonb,
-          content_schema_version = 1, search_text = $7, icon = $8, cover = $9,
-          revision = revision + 1, updated_at = now()
-        WHERE workspace_id = $1 AND id = $2 AND revision = $6::bigint AND deleted_at IS NULL
-        RETURNING ${pageColumns}
-      `, [workspaceId, pageId, body.title ?? row.title, parentId,
-        JSON.stringify(body.content ?? row.content_json), body.expectedRevision,
-        body.content ? extractSearchText(body.content) : extractSearchText(row.content_json), icon, cover]);
-      if (!result.rows[0]) throw new PageError(409, 'REVISION_CONFLICT');
-      await this.snapshot(client, workspaceId, [pageId], actorId, 'update');
-      return { statusCode: 200, body: pageFromRow(result.rows[0]) };
-    });
+  async updateInTransaction(client: PoolClient, workspaceId: string, actorId: string,
+    pageId: string, body: UpdatePageRequest): Promise<MutationResult<PageDocument>> {
+    const existing = await client.query<PageRow>(`
+      SELECT ${joinedPageColumns} FROM pages p WHERE p.workspace_id = $1 AND p.id = $2 AND p.deleted_at IS NULL FOR UPDATE OF p
+    `, [workspaceId, pageId]);
+    const row = existing.rows[0];
+    if (!row) throw new PageError(404, 'NOT_FOUND');
+    if (row.content_schema_version !== 1) throw new PageError(422, 'CONTENT_VERSION_UNSUPPORTED');
+    if (row.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', row.revision);
+    if (body.content) await this.validateAttachments(client, workspaceId, body.content);
+    const index = body.content ? extractDocumentIndex(body.content) : null;
+    if (index) await this.validatePageReferenceTargets(client, workspaceId, index.references);
+    const parentId = body.parentId === undefined ? row.parent_id : body.parentId;
+    if (parentId !== null && parentId !== row.parent_id) await this.validateParent(client, workspaceId, pageId, parentId);
+    const icon = body.icon === undefined ? row.icon : body.icon;
+    const cover = body.cover === undefined ? row.cover : body.cover;
+
+    const result = await client.query<PageRow>(`
+      UPDATE pages SET title = $3, parent_id = $4, content_json = $5::jsonb,
+        content_schema_version = 1, search_text = COALESCE($7, search_text), icon = $8, cover = $9,
+        revision = revision + 1, updated_at = now()
+      WHERE workspace_id = $1 AND id = $2 AND revision = $6::bigint AND deleted_at IS NULL
+      RETURNING ${pageColumns}
+    `, [workspaceId, pageId, body.title ?? row.title, parentId,
+      JSON.stringify(body.content ?? row.content_json), body.expectedRevision,
+      index?.searchText ?? null, icon, cover]);
+    if (!result.rows[0]) throw new PageError(409, 'REVISION_CONFLICT');
+    const tagIds = body.tagIds === undefined ? row.tag_ids : await this.replaceTags(client, workspaceId, pageId, body.tagIds);
+    if (index) await replacePageLinks(client, workspaceId, pageId, index.references);
+    await this.snapshot(client, workspaceId, [pageId], actorId, 'update');
+    return { statusCode: 200, body: pageFromRow({ ...result.rows[0], tag_ids: tagIds ?? [] }) };
   }
 
   async trash(workspaceId: string, actorId: string, pageId: string,
     body: TrashPageRequest): Promise<MutationResult<PageDocument>> {
     return this.mutate(workspaceId, actorId, body.clientMutationId, 'trash', pageId, body, async (client) => {
       const existing = await client.query<PageRow>(`
-        SELECT ${pageColumns} FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE
+        SELECT ${joinedPageColumns} FROM pages p WHERE p.workspace_id = $1 AND p.id = $2 AND p.deleted_at IS NULL FOR UPDATE OF p
       `, [workspaceId, pageId]);
       const row = existing.rows[0];
       if (!row) throw new PageError(404, 'NOT_FOUND');
@@ -431,7 +528,7 @@ export class PgPageRepository {
       const root = deleted.rows.find(item => item.id === pageId);
       if (!root) throw new PageError(404, 'NOT_FOUND');
       await this.snapshot(client, workspaceId, deleted.rows.map(item => item.id), actorId, 'trash');
-      return { statusCode: 200, body: pageFromRow(root) };
+      return { statusCode: 200, body: pageFromRow({ ...root, tag_ids: row.tag_ids ?? [] }) };
     });
   }
 
@@ -439,8 +536,8 @@ export class PgPageRepository {
     body: PageStateRequest): Promise<MutationResult<PageDocument>> {
     return this.mutate(workspaceId, actorId, body.clientMutationId, 'restore', pageId, body, async (client) => {
       const existing = await client.query<PageRow & { deletion_group_id: string }>(`
-        SELECT ${pageColumns}, deletion_group_id FROM pages
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NOT NULL FOR UPDATE
+        SELECT ${joinedPageColumns}, p.deletion_group_id FROM pages p
+        WHERE p.workspace_id = $1 AND p.id = $2 AND p.deleted_at IS NOT NULL FOR UPDATE OF p
       `, [workspaceId, pageId]);
       const row = existing.rows[0];
       if (!row) throw new PageError(404, 'NOT_FOUND');
@@ -467,15 +564,15 @@ export class PgPageRepository {
       const root = restored.rows.find(item => item.id === pageId);
       if (!root) throw new PageError(404, 'NOT_FOUND');
       await this.snapshot(client, workspaceId, restored.rows.map(item => item.id), actorId, 'restore');
-      return { statusCode: 200, body: pageFromRow(root) };
+      return { statusCode: 200, body: pageFromRow({ ...root, tag_ids: row.tag_ids ?? [] }) };
     });
   }
 
   async restoreVersion(workspaceId: string, actorId: string, pageId: string,
     body: RestorePageVersionRequest): Promise<MutationResult<PageDocument>> {
     return this.mutate(workspaceId, actorId, body.clientMutationId, 'restore-version', pageId, body, async client => {
-      const existing = await client.query<PageRow>(`SELECT ${pageColumns} FROM pages
-        WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE`, [workspaceId, pageId]);
+      const existing = await client.query<PageRow>(`SELECT ${joinedPageColumns} FROM pages p
+        WHERE p.workspace_id = $1 AND p.id = $2 AND p.deleted_at IS NULL FOR UPDATE OF p`, [workspaceId, pageId]);
       const current = existing.rows[0];
       if (!current) throw new PageError(404, 'NOT_FOUND');
       if (current.content_schema_version !== 1) throw new PageError(422, 'CONTENT_VERSION_UNSUPPORTED');
@@ -487,13 +584,16 @@ export class PgPageRepository {
       if (!version) throw new PageError(404, 'NOT_FOUND');
       const content = validateDocumentContent(version.content_json);
       await this.validateAttachments(client, workspaceId, content);
-      // Restore only title/body; the current icon, cover and tree position are kept.
+      const index = extractDocumentIndex(content);
+      await this.validatePageReferenceTargets(client, workspaceId, index.references);
+      // Restore title/body and retain the current page metadata.
       const result = await client.query<PageRow>(`UPDATE pages SET title = $3, content_json = $4::jsonb,
         content_schema_version = 1, search_text = $5, revision = revision + 1, updated_at = now()
         WHERE workspace_id = $1 AND id = $2 RETURNING ${pageColumns}`,
-      [workspaceId, pageId, version.title, JSON.stringify(content), extractSearchText(content)]);
+      [workspaceId, pageId, version.title, JSON.stringify(content), index.searchText]);
+      await replacePageLinks(client, workspaceId, pageId, index.references);
       await this.snapshot(client, workspaceId, [pageId], actorId, 'restore-version');
-      return { statusCode: 200, body: pageFromRow(result.rows[0]!) };
+      return { statusCode: 200, body: pageFromRow({ ...result.rows[0]!, tag_ids: current.tag_ids ?? [] }) };
     });
   }
 

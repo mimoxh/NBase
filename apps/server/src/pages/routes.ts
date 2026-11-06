@@ -1,4 +1,4 @@
-import type { CreatePageRequest, PageStateRequest, UpdatePageRequest } from '@nbase/contracts';
+import { pageTagLimit, type CreatePageRequest, type PageStateRequest, type UpdatePageRequest } from '@nbase/contracts';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AuthRepository } from '../auth/repository.js';
 import {
@@ -27,6 +27,15 @@ function parentId(value: unknown): value is string | null {
   return value === null || isUuid(value);
 }
 
+function pageTagIds(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > pageTagLimit || !value.every(isUuid)) {
+    throw new RouteError(400, 'INVALID_REQUEST');
+  }
+  const ids = value.map(id => id.toLowerCase()).sort();
+  if (new Set(ids).size !== ids.length) throw new RouteError(400, 'INVALID_REQUEST');
+  return ids;
+}
+
 function createBody(value: unknown): CreatePageRequest {
   if (!object(value) || !isUuid(value.clientMutationId) || !parentId(value.parentId) || !title(value.title)) {
     throw new RouteError(400, 'INVALID_REQUEST');
@@ -39,12 +48,13 @@ function createBody(value: unknown): CreatePageRequest {
   };
   if (Object.hasOwn(value, 'icon')) body.icon = validatePageIcon(value.icon);
   if (Object.hasOwn(value, 'cover')) body.cover = validatePageCover(value.cover);
+  if (Object.hasOwn(value, 'tagIds')) body.tagIds = pageTagIds(value.tagIds);
   return body;
 }
 
 function updateBody(value: unknown): UpdatePageRequest {
   if (!object(value) || !isUuid(value.clientMutationId) || !isRevision(value.expectedRevision)
-    || !(['title', 'parentId', 'content', 'icon', 'cover'].some((key) => Object.hasOwn(value, key)))) {
+    || !(['title', 'parentId', 'content', 'icon', 'cover', 'tagIds'].some((key) => Object.hasOwn(value, key)))) {
     throw new RouteError(400, 'INVALID_REQUEST');
   }
   if (Object.hasOwn(value, 'title') && !title(value.title)) throw new RouteError(400, 'INVALID_REQUEST');
@@ -55,6 +65,7 @@ function updateBody(value: unknown): UpdatePageRequest {
   if (Object.hasOwn(value, 'content')) body.content = validateDocumentContent(value.content);
   if (Object.hasOwn(value, 'icon')) body.icon = validatePageIcon(value.icon);
   if (Object.hasOwn(value, 'cover')) body.cover = validatePageCover(value.cover);
+  if (Object.hasOwn(value, 'tagIds')) body.tagIds = pageTagIds(value.tagIds);
   return body;
 }
 
@@ -65,7 +76,7 @@ function stateBody(value: unknown): PageStateRequest {
   return { clientMutationId: value.clientMutationId, expectedRevision: value.expectedRevision };
 }
 
-function sendError(request: FastifyRequest, reply: FastifyReply, error: unknown, secure: boolean) {
+export function sendError(request: FastifyRequest, reply: FastifyReply, error: unknown, secure: boolean) {
   reply.header('Cache-Control', 'no-store');
   if (error instanceof PageError) return reply.code(error.statusCode).send(error.response());
   if (error instanceof ContentValidationError) return reply.code(422).send({ error: error.code });
@@ -117,13 +128,15 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
     try {
       const actorId = await authorize(request, request.params.workspaceId, false);
       const query: unknown = request.query;
-      if (!object(query) || typeof query.q !== 'string') throw new RouteError(400, 'INVALID_REQUEST');
-      const phrase = query.q.trim();
-      if (!phrase || phrase.length > 100 || Buffer.byteLength(phrase, 'utf8') > 256
+      if (!object(query) || (query.q !== undefined && typeof query.q !== 'string')
+        || (query.tagIds !== undefined && typeof query.tagIds !== 'string')) throw new RouteError(400, 'INVALID_REQUEST');
+      const tagIds = query.tagIds === undefined ? [] : pageTagIds(query.tagIds.split(','));
+      const phrase = query.q?.trim() ?? '';
+      if ((!phrase && !tagIds.length) || phrase.length > 100 || Buffer.byteLength(phrase, 'utf8') > 256
         || /[\u0000-\u001f\u007f]/.test(phrase)) throw new RouteError(400, 'INVALID_REQUEST');
       const limit = query.limit === undefined ? 20 : Number(query.limit);
       if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new RouteError(400, 'INVALID_REQUEST');
-      return reply.send(await pages.search(request.params.workspaceId, actorId, phrase, limit));
+      return reply.send(await pages.search(request.params.workspaceId, actorId, phrase, limit, tagIds));
     } catch (error) { return sendError(request, reply, error, secure); }
   });
 
@@ -149,6 +162,17 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
         || (query.beforeRevision !== undefined && !isRevision(query.beforeRevision))) throw new RouteError(400, 'INVALID_REQUEST');
       return reply.send(await pages.history(request.params.workspaceId, actorId, request.params.pageId,
         limit, query.beforeRevision as string | undefined ?? null));
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.get<{ Params: PageParams }>('/api/workspaces/:workspaceId/pages/:pageId/backlinks', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId, pageId } = request.params;
+      const actorId = await authorize(request, workspaceId, false);
+      if (!isUuid(pageId)) throw new RouteError(404, 'NOT_FOUND');
+      const backlinks = await pages.backlinks(workspaceId, actorId, pageId);
+      return backlinks ? reply.send(backlinks) : reply.code(404).send({ error: 'NOT_FOUND' });
     } catch (error) { return sendError(request, reply, error, secure); }
   });
 

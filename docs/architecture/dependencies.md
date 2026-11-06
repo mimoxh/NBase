@@ -11,8 +11,14 @@
 | @lexical/code-prism | 0.52.0 | MIT；与 lexical 同版本，Prism 代码高亮、行号 gutter 与代码块缩进 |
 | prismjs | 1.30.0 | MIT；Prism 语法高亮内核，组件形式按需加载语言 |
 | katex | 0.19.1 | MIT；公式本地渲染，字体随构建打包，不产生外部请求 |
+| yaml | 2.9.1 | ISC，解析和导出 Markdown front matter |
+| mermaid | 12.3.0 | MIT，自部署流程图与时序图的按需渲染 |
 
 版本、许可和兼容条件以 npm 官方 registry 元数据及实际安装包的 package.json / LICENSE 核对。Lexical React 包要求 React >=18、TypeScript >=5.2；当前 React 19 / TypeScript 5.9 满足。jsdom 的 Node 24 条件为 >=24.15，当前 Node 24.19 满足。直接依赖锁定精确版本，完整传递依赖见 package-lock.json。
+
+2026-11-05 核对了 `yaml` 和 `mermaid` 的锁定版本与许可。YAML 限制输入体积、层级和节点数。Mermaid 渲染限制图表类型、源码和复杂度，资源从本机应用加载。 [YAML 官方文档](https://eemeli.org/yaml/) · [Mermaid 官方配置](https://mermaid.js.org/config/schema-docs/config.html)
+
+标签判重固定使用 Unicode 17.0.0 默认完整大小写折叠（C + F），数据生成于 `packages/contracts/src/tagNameKey.ts`，文件头保留 Unicode License V3。输入和结果均 NFC，显示名称不作折叠。来源：[CaseFolding 数据](https://www.unicode.org/Public/17.0.0/ucd/CaseFolding.txt)、[许可](https://www.unicode.org/license.txt)。2026-11-05 依赖审计仍为既有静态服务链的 3 项 moderate，新增 YAML/Mermaid 没有新增已知审计项；未自动升级其他依赖。
 
 参考：[Lexical 源码与许可](https://github.com/facebook/lexical)、[React 集成](https://lexical.dev/docs/getting-started/react)、[Markdown 包](https://lexical.dev/docs/packages/lexical-markdown)、[jsdom 源码与许可](https://github.com/jsdom/jsdom)。
 

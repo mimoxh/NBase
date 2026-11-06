@@ -1,13 +1,14 @@
-import { pageCoverIds, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
+import { isCalloutKind, isCalloutTitle, isFootnoteId, isMarkdownFrontMatter, isStoredMermaidSource, markdownFrontMatterKey, pageCoverIds, quickCaptureMarker, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
+import { isPageReference } from './search-text.js';
 
 export const maxContentBytes = 1024 * 1024;
 const maxNodes = 20_000;
 const maxDepth = 64;
 const elementTypes = new Set([
-  'root', 'paragraph', 'heading', 'quote', 'list', 'listitem', 'code',
-  'link', 'autolink', 'table', 'tablerow', 'tablecell',
+  'root', 'paragraph', 'heading', 'quote', 'callout', 'list', 'listitem', 'code',
+  'link', 'autolink', 'table', 'tablerow', 'tablecell', 'footnote-definition',
 ]);
-const leafTypes = new Set(['text', 'code-highlight', 'linebreak', 'tab', 'horizontalrule', 'image-reference', 'attachment', 'equation']);
+const leafTypes = new Set(['text', 'code-highlight', 'linebreak', 'tab', 'horizontalrule', 'image-reference', 'attachment', 'equation', 'page-reference', 'footnote-reference', 'mermaid']);
 const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype']);
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -41,13 +42,23 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
   if (!object(value.editorState) || !object(value.editorState.root)) invalid();
 
   let count = 0;
-  function visit(node: unknown, depth: number, inTable: boolean): void {
+  let captureHeading = false;
+  function visit(node: unknown, depth: number, inTable: boolean, inLinkOrCode: boolean): void {
     if (!object(node) || depth > maxDepth || ++count > maxNodes) invalid();
     if (Object.keys(node).some((key) => forbiddenKeys.has(key))) invalid();
     if (typeof node.type !== 'string' || node.version !== 1) invalid();
+    if (node.$ !== undefined && (!object(node.$) || Object.keys(node.$).some(key => forbiddenKeys.has(key)))) invalid();
+    if (object(node.$) && Object.hasOwn(node.$, markdownFrontMatterKey)
+      && (depth !== 0 || node.type !== 'root' || !isMarkdownFrontMatter(node.$[markdownFrontMatterKey]))) invalid();
+    if (object(node.$) && Object.hasOwn(node.$, quickCaptureMarker)) {
+      if (captureHeading || depth !== 1 || node.type !== 'heading' || node.$[quickCaptureMarker] !== true) invalid();
+      captureHeading = true;
+    }
     if (node.textStyle !== undefined && node.textStyle !== '') invalid();
     if (node.style !== undefined && node.style !== '') invalid();
     if (node.type === 'table' && inTable) invalid();
+    if (node.type === 'callout' && (inTable || !isCalloutKind(node.kind) || !isCalloutTitle(node.title)
+      || !Array.isArray(node.children))) invalid();
     if ((node.type === 'link' || node.type === 'autolink')
       && (typeof node.url !== 'string' || !safeLinkUrl(node.url))) invalid();
     if (node.type === 'heading' && !['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(String(node.tag))) invalid();
@@ -57,6 +68,12 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
       && (typeof node.markdown !== 'string' || typeof node.alt !== 'string')) invalid();
     if (node.type === 'equation' && (typeof node.equation !== 'string' || node.equation.length > 10_000
       || typeof node.inline !== 'boolean')) invalid();
+    if (node.type === 'mermaid' && (inTable || inLinkOrCode || !isStoredMermaidSource(node.source))) invalid();
+    if (node.type === 'page-reference'
+      && (inLinkOrCode || !isPageReference(node) || node.targetPageId !== node.targetPageId.toLowerCase())) invalid();
+    if ((node.type === 'footnote-reference' || node.type === 'footnote-definition') && !isFootnoteId(node.footnoteId)) invalid();
+    if (node.type === 'footnote-reference' && inLinkOrCode) invalid();
+    if (node.type === 'footnote-definition' && depth !== 1) invalid();
     if (node.type === 'attachment' && (!uuidPattern.test(String(node.attachmentId))
       || typeof node.alt !== 'string' || node.alt.length > 500
       || typeof node.fileName !== 'string' || node.fileName.length < 1 || node.fileName.length > 180
@@ -64,7 +81,8 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
 
     if (elementTypes.has(node.type)) {
       if (!Array.isArray(node.children)) invalid();
-      for (const child of node.children) visit(child, depth + 1, inTable || node.type === 'table');
+      const childInLinkOrCode = inLinkOrCode || node.type === 'link' || node.type === 'autolink' || node.type === 'code';
+      for (const child of node.children) visit(child, depth + 1, inTable || node.type === 'table', childInLinkOrCode);
       return;
     }
     if (!leafTypes.has(node.type) || node.children !== undefined) invalid();
@@ -72,7 +90,7 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
   }
 
   if (value.editorState.root.type !== 'root') invalid();
-  visit(value.editorState.root, 0, false);
+  visit(value.editorState.root, 0, false, false);
   return value as unknown as StoredDocumentContent;
 }
 

@@ -1,5 +1,7 @@
 import { $createCodeNode } from '@lexical/code';
-import { createEditor } from 'lexical';
+import { isCalloutKind, isCalloutTitle, isMarkdownFrontMatter, markdownFrontMatterKey, pageIdFromReferenceUrl, pageReferenceUrl } from '@nbase/contracts';
+import { createEditor, createState, $setState } from 'lexical';
+import type { EditorState } from 'lexical';
 import { $isLinkNode } from '@lexical/link';
 import {
   $convertFromMarkdownString, $convertToMarkdownString, CHECK_LIST, CODE, LINK, TRANSFORMERS,
@@ -11,15 +13,29 @@ import {
   $createTableCellNode, $createTableNode, $createTableRowNode, $isTableCellNode,
   $isTableNode, $isTableRowNode, TableCellHeaderStates, TableCellNode, TableNode, TableRowNode,
 } from '@lexical/table';
-import { $createTextNode, $getRoot, $isElementNode, $isTextNode } from 'lexical';
+import { $createTextNode, $findMatchingParent, $getRoot, $isElementNode, $isTextNode } from 'lexical';
 import type { LexicalNode, SerializedLexicalNode, SerializedRootNode } from 'lexical';
 import { EDITOR_NODES } from './nodes';
 import { $createImageReferenceNode, ImageReferenceNode } from './nodes/ImageReferenceNode';
 import { AttachmentNode } from './nodes/AttachmentNode';
 import { $createEquationNode, $isEquationNode, $requestEquationEdit, EquationNode } from './nodes/EquationNode';
+import { $createCalloutNode, $isCalloutNode, CalloutNode } from './nodes/CalloutNode';
+import { $createPageReferenceNode, $isPageReferenceNode, isPageReferenceLabel, PageReferenceNode } from './nodes/PageReferenceNode';
+import {
+  $createFootnoteDefinitionNode, $createFootnoteReferenceNode, $isFootnoteDefinitionNode, $isFootnoteReferenceNode,
+  FootnoteDefinitionNode, FootnoteReferenceNode,
+} from './nodes/FootnoteNodes';
+import { legacyPageReferencePattern } from './legacyPageReferences';
+import { readMarkdownFrontMatter } from './markdownFrontMatter';
+import { maskMarkdownInlineLiterals, resolveMarkdownReferences } from './markdownReferences';
 import { normalizeCodeBlockLanguage } from './codeLanguages';
+import { MERMAID_TRANSFORMER } from './mermaidMarkdown';
 import { normalizeDocumentContent } from './normalize';
 import type { DocumentContent, EditorSnapshot, MarkdownAssessment, OutlineItem } from './types';
+
+export { addMarkdownFrontMatter, getMarkdownFrontMatter, readMarkdownFrontMatter } from './markdownFrontMatter';
+
+const frontMatterState = createState(markdownFrontMatterKey, { parse: value => isMarkdownFrontMatter(value) ? value : null });
 
 /** Relative paths and explicit web/mail protocols only. Reject control-character scheme obfuscation. */
 export function isSafeLinkUrl(url: string): boolean {
@@ -35,12 +51,74 @@ const SAFE_LINK: TextMatchTransformer = {
   replace(node, match) {
     const replacement = LINK.replace?.(node, match);
     const parent = replacement?.getParent();
-    if ($isLinkNode(parent) && !isSafeLinkUrl(parent.getURL())) {
-      const literal = $createTextNode(match[0]);
-      parent.replace(literal);
-      return;
+    if ($isLinkNode(parent)) {
+      const raw = parent.getURL();
+      const relativeAngle = match[2] !== undefined && !/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(raw.trim());
+      const url = relativeAngle ? raw.replace(/ /g, '%20') : raw;
+      if (!isSafeLinkUrl(url)) {
+        parent.replace($createTextNode(match[0]));
+        return;
+      }
+      if (url !== raw) parent.setURL(url);
     }
     return replacement;
+  },
+};
+
+const PAGE_REFERENCE_PATTERN = /(?<!(?<!\\)(?:\\\\)*\\)\[((?:\\.|[^[\]\\\r\n]){1,510})\]\((\/\?page=[0-9a-f-]{36})\)/iu;
+const PAGE_REFERENCE: TextMatchTransformer = {
+  type: 'text-match', dependencies: [PageReferenceNode],
+  importRegExp: PAGE_REFERENCE_PATTERN, regExp: /(?!)x/,
+  export(node) {
+    if (!$isPageReferenceNode(node)) return null;
+    const label = node.getTextContent().replace(/[\\[\]`*_~=$<>!&]/g, '\\$&');
+    return '[' + label + '](' + pageReferenceUrl(node.getTargetPageId()) + ')';
+  },
+  replace(node, match) {
+    if ($findMatchingParent(node, $isLinkNode)) return;
+    const target = pageIdFromReferenceUrl(match[2]!);
+    const label = match[1]!.replace(/\\([!-/:-@[-`{-~])/g, '$1');
+    if (target && isPageReferenceLabel(label)) node.replace($createPageReferenceNode(target, label));
+  },
+};
+
+const LITERAL_LEGACY_REFERENCE: TextMatchTransformer = {
+  type: 'text-match', dependencies: [],
+  importRegExp: legacyPageReferencePattern, regExp: /(?!)x/,
+  replace(node, match) { node.replace($createTextNode(match[0]).setFormat(node.getFormat())); },
+};
+
+const FOOTNOTE_REFERENCE: TextMatchTransformer = {
+  type: 'text-match', dependencies: [FootnoteReferenceNode],
+  importRegExp: /(?<!(?<!\\)(?:\\\\)*\\)\[\^([\p{L}\p{N}._-]{1,64})\]/u, regExp: /(?!)x/,
+  export: node => $isFootnoteReferenceNode(node) ? node.getTextContent() : null,
+  replace(node, match) {
+    if (!$findMatchingParent(node, $isLinkNode)) node.replace($createFootnoteReferenceNode(match[1]!));
+  },
+};
+
+const FOOTNOTE_DEFINITION: ElementTransformer = {
+  type: 'element', dependencies: [FootnoteDefinitionNode], regExp: /(?!)x/,
+  replace: () => false,
+  export(node) {
+    if (!$isFootnoteDefinitionNode(node)) return null;
+    const [first, ...rest] = $convertToMarkdownString(MARKDOWN_TRANSFORMERS, node).split('\n');
+    const header = '[^' + node.getFootnoteId() + ']:' + (first ? ' ' + first : '');
+    return [header, ...rest.map(line => line ? '    ' + line : '')].join('\n');
+  },
+};
+
+// Match a complete span before Lexical's generic unescape pass, which also
+// runs on native code spans. The opening run must not be escaped, and the
+// closing run must have the same length. Backslashes inside are literal.
+const LITERAL_INLINE_CODE: TextMatchTransformer = {
+  type: 'text-match', dependencies: [],
+  importRegExp: /(?=`)(?<!(?<!\\)(?:\\\\)*\\)(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)/,
+  regExp: /(?!)x/,
+  replace(node, match) {
+    const raw = match[2] ?? '';
+    const text = raw.startsWith(' ') && raw.endsWith(' ') && /[^ ]/.test(raw) ? raw.slice(1, -1) : raw;
+    return node.replace($createTextNode(text).setFormat(node.getFormat()).toggleFormat('code'));
   },
 };
 
@@ -134,26 +212,54 @@ const EQUATION_BLOCK: MultilineElementTransformer = {
   },
 };
 
-// Plain text `$` must round-trip as a literal: export escapes it to `\$`, and
-// the importer's unescapeText turns `\$` back into `$`. A private-use sentinel
-// carries the `$` through format escaping so it stays a literal on the way out.
-const DOLLAR_SENTINEL = '';
-const DOLLAR_ESCAPE: TextMatchTransformer = {
+// Escape literal delimiter characters before Lexical wraps the formatted span.
+// Lexical doubles backslashes, so remove the extra backslash it adds to each
+// of our new escapes. An original backslash remains independently escaped.
+const DELIMITER_ESCAPE: TextMatchTransformer = {
   type: 'text-match', dependencies: [],
   importRegExp: /(?!)x/, regExp: /(?!)x/,
   export: (node, _children, exportFormat) => {
     if (!$isTextNode(node) || node.hasFormat('code')) return null;
     const text = node.getTextContent();
-    if (!text.includes('$') || text.includes(DOLLAR_SENTINEL)) return null;
-    return exportFormat(node, text.replace(/\$/g, DOLLAR_SENTINEL));
+    if (!/[=$]|\[\^/.test(text)) return null;
+    return exportFormat(node, text.replace(/[=$]|\[(?=\^)/g, '\\$&')).replace(/\\\\(?=[=$]|\[\^)/g, '\\');
   },
   replace: () => {},
 };
 
-/** Sentinels left by DOLLAR_ESCAPE become literal `\$` escapes in Markdown output. */
-function restoreDollarEscapes(markdown: string): string {
-  return markdown.replaceAll(DOLLAR_SENTINEL, '\\$');
+const CALLOUT_HEADER = /^ {0,3}>[ \t]?\[!(NOTE|WARNING|IMPORTANT)\](?:[ \t]+(.*))?$/;
+const CALLOUT_BODY_LINE = /^ {0,3}>[ \t]?/;
+function createCalloutTransformer(transformers: () => Transformer[]): MultilineElementTransformer {
+const callout: MultilineElementTransformer = {
+  type: 'multiline-element', dependencies: [CalloutNode],
+  regExpStart: CALLOUT_HEADER,
+  replace: () => false,
+  handleImportAfterStartMatch({ lines, rootNode, startLineIndex, startMatch }) {
+    const kind = startMatch[1];
+    const title = startMatch[2]?.trim() ?? '';
+    if (!isCalloutKind(kind) || !isCalloutTitle(title)) return null;
+    const body: string[] = [];
+    let end = startLineIndex;
+    while (end + 1 < lines.length && CALLOUT_BODY_LINE.test(lines[end + 1]!)) {
+      body.push(lines[++end]!.replace(CALLOUT_BODY_LINE, ''));
+    }
+    const node = $createCalloutNode(kind, title);
+    rootNode.append(node);
+    $convertFromMarkdownString(body.join('\n'), transformers().filter(item => item !== callout), node);
+    return [true, end];
+  },
+  export(node) {
+    if (!$isCalloutNode(node)) return null;
+    const title = node.getTitle();
+    const heading = `> [!${node.getKind()}]${title ? ` ${title}` : ''}`;
+    const body = $convertToMarkdownString(transformers(), node);
+    return body ? `${heading}\n${body.split('\n').map(line => line ? `> ${line}` : '>').join('\n')}` : heading;
+  },
+};
+
+return callout;
 }
+const CALLOUT = createCalloutTransformer(() => MARKDOWN_TRANSFORMERS);
 
 /** Split only unescaped pipes. GFM requires pipes inside code spans to be escaped too. */
 function tableCells(line: string): string[] {
@@ -185,7 +291,8 @@ function escapeTablePipes(text: string): string {
   return result;
 }
 
-const TABLE: MultilineElementTransformer = {
+function createTableTransformer(inlineTransformers: () => Transformer[]): MultilineElementTransformer {
+return {
   type: 'multiline-element', dependencies: [TableNode, TableRowNode, TableCellNode],
   regExpStart: /^.*\|.*$/,
   replace: () => false,
@@ -211,7 +318,7 @@ const TABLE: MultilineElementTransformer = {
         if (alignment.startsWith(':') && alignment.endsWith(':')) cell.setFormat('center');
         else if (alignment.endsWith(':')) cell.setFormat('right');
         else if (alignment.startsWith(':')) cell.setFormat('left');
-        $convertFromMarkdownString(text.replace(/\\\|/g, '|'), INLINE_TRANSFORMERS, cell);
+        $convertFromMarkdownString(text.replace(/\\\|/g, '|'), inlineTransformers(), cell);
         row.append(cell);
       });
       table.append(row);
@@ -234,17 +341,44 @@ const TABLE: MultilineElementTransformer = {
   },
 };
 
-const INLINE_TRANSFORMERS: Transformer[] = [IMAGE, SAFE_LINK, EQUATION_INLINE, ...TRANSFORMERS.filter(item => item.type === 'text-format')];
+}
+const TABLE = createTableTransformer(() => INLINE_TRANSFORMERS);
+
+const INLINE_TRANSFORMERS: Transformer[] = [IMAGE, PAGE_REFERENCE, LITERAL_LEGACY_REFERENCE, SAFE_LINK, FOOTNOTE_REFERENCE, EQUATION_INLINE, LITERAL_INLINE_CODE,
+  ...TRANSFORMERS.filter(item => item.type === 'text-format')];
 export const MARKDOWN_TRANSFORMERS: Transformer[] = [
-  EQUATION_BLOCK, TABLE, HORIZONTAL_RULE, CHECK_LIST,
-  ATTACHMENT, IMAGE, SAFE_LINK, EQUATION_INLINE, DOLLAR_ESCAPE,
-  CODE_ALIASED, ...TRANSFORMERS.filter(item => item !== LINK && item !== CHECK_LIST && item !== CODE),
+  CALLOUT, EQUATION_BLOCK, TABLE, HORIZONTAL_RULE, CHECK_LIST, FOOTNOTE_DEFINITION,
+  ATTACHMENT, IMAGE, PAGE_REFERENCE, LITERAL_LEGACY_REFERENCE, SAFE_LINK, FOOTNOTE_REFERENCE, EQUATION_INLINE, LITERAL_INLINE_CODE, DELIMITER_ESCAPE,
+  MERMAID_TRANSFORMER, CODE_ALIASED, ...TRANSFORMERS.filter(item => item !== LINK && item !== CHECK_LIST && item !== CODE),
 ];
 
+/** Extra transformers also participate inside callouts and table cells. */
+export function withMarkdownTransformers(extra: Transformer[]): Transformer[] {
+  const transformers: Transformer[] = [];
+  const callout = createCalloutTransformer(() => transformers);
+  const table = createTableTransformer(() => transformers.filter(item => item.type === 'text-format' || item.type === 'text-match'));
+  transformers.push(...extra, ...MARKDOWN_TRANSFORMERS.map(item => item === CALLOUT ? callout : item === TABLE ? table : item));
+  return transformers;
+}
+
 /** Exclude fenced examples from feature detection, honoring marker and opening length. */
-function proseLines(markdown: string): string[] {
+function proseLines(markdown: string): { lines: string[]; invalidCalloutTitle: boolean } {
   let fence: { marker: string; length: number } | undefined;
-  return markdown.replace(/\r\n?/g, '\n').split('\n').map(line => {
+  let callout = false;
+  let invalidCalloutTitle = false;
+  const lines = markdown.replace(/\r\n?/g, '\n').split('\n').map(line => {
+    if (callout) {
+      if (CALLOUT_BODY_LINE.test(line)) line = line.replace(CALLOUT_BODY_LINE, '');
+      else { callout = false; fence = undefined; }
+    }
+    if (!callout && !fence) {
+      const header = CALLOUT_HEADER.exec(line);
+      if (header) {
+        callout = true;
+        if (!isCalloutTitle(header[2]?.trim() ?? '')) invalidCalloutTitle = true;
+        return '';
+      }
+    }
     const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
     if (fence) {
       if (match && match[1]![0] === fence.marker && match[1]!.length >= fence.length && !match[2]!.trim()) fence = undefined;
@@ -253,21 +387,24 @@ function proseLines(markdown: string): string[] {
     if (match) { fence = { marker: match[1]![0]!, length: match[1]!.length }; return match[1]![0] === '~' ? '~~~' : ''; }
     return line;
   });
+  return { lines, invalidCalloutTitle };
 }
 function unsupportedReasons(markdown: string): string[] {
-  const lines = proseLines(markdown);
-  const prose = lines.join('\n');
+  const { lines, invalidCalloutTitle } = proseLines(markdown);
+  const masked = lines.map(maskMarkdownInlineLiterals).join('\n');
+  const prose = masked
+    .replace(new RegExp(PAGE_REFERENCE_PATTERN.source, 'giu'), '链接')
+    .replace(new RegExp(legacyPageReferencePattern.source, 'gu'), '引用')
+    .replace(/\]\([ \t]*<[^<>\r\n]*>/g, '](地址');
   const reasons: string[] = [];
-  if (/^---\s*\n[\s\S]*?\n(?:---|\.\.\.)\s*(?:\n|$)/.test(markdown)) reasons.push('YAML front matter');
+  if (invalidCalloutTitle) reasons.push('提示块标题过长或含控制字符');
   if (/<\/?[a-z][\w:-]*(?:\s|\/?>)|<!--/i.test(prose)) reasons.push('HTML（含合并或嵌套表格）');
-  if (/^\s*\[[^\]]+\]:\s*\S/m.test(prose) || /\[[^\]]+\]\[[^\]]*\]/.test(prose)) reasons.push('引用式链接或脚注');
-  if (/\[\^[^\]]+\]/.test(prose)) reasons.push('脚注');
-  if (/(?<!\\)\\\(|^\s*(?<!\\)\\\[/m.test(prose)) reasons.push('数学公式（\\( \\) 或 \\[ \\] 语法）');
+  if (/^(?:\s*>)*\s*\[[^\]]+\]:\s*\S/m.test(prose) || /(?<!\\)\[[^\]]+\]\[(?!\^)[^\]]*\]/.test(prose)) reasons.push('不受支持的引用式链接或脚注');
+  if (/(?<!\\)\\\(|^[ \t]*(?<!\\)\\\[(?:[ \t]*$|[^\n]*\\\])/m.test(prose)) reasons.push('数学公式（\\( \\) 或 \\[ \\] 语法）');
   if (lines.filter(line => /^\s*\$\$\s*$/.test(line)).length % 2) reasons.push('未闭合的公式块');
   if (/^\s*(?:~~~|:::)\s*$/m.test(prose)) reasons.push('波浪号围栏或自定义容器');
   if (/^\S[^\n]*\n(?:={3,}|-{3,})\s*$/m.test(prose)) reasons.push('Setext 标题');
-    if (/\[\[[^\]]+\]\]/.test(prose)) reasons.push('双链');
-  if (/!\[/.test(prose.replace(new RegExp(IMAGE_PATTERN.source, 'g'), ''))) reasons.push('复杂或不完整的图片引用');
+  if (/(?<!\\)!\[/.test(masked.replace(new RegExp(IMAGE_PATTERN.source, 'g'), ''))) reasons.push('复杂或不完整的图片引用');
   for (let index = 1; index < lines.length; index++) {
     const delimiters = delimiterCells(lines[index]!);
     if (!delimiters) continue;
@@ -279,25 +416,82 @@ function unsupportedReasons(markdown: string): string[] {
   return [...new Set(reasons)];
 }
 
-export function assessMarkdown(markdown: string): MarkdownAssessment {
-  const warnings = unsupportedReasons(markdown).map(reason => `检测到${reason}：此文档将以 Markdown 代码原文保留，请保留原始文件。`);
-  const prose = proseLines(markdown).join('\n');
+function analyzeMarkdown(markdown: string, footnoteSlot?: (id: string) => string) {
+  const header = readMarkdownFrontMatter(markdown);
+  const document = resolveMarkdownReferences(header.body, footnoteSlot);
+  const sections = [document.body, ...document.footnotes.map(note => note.markdown)];
+  const reasons = [...new Set([...document.warnings, ...sections.flatMap(unsupportedReasons)])];
+  const preservedAsSource = header.preservedAsSource || reasons.length > 0;
+  const warnings = [...header.warnings, ...reasons.map(reason => '检测到' + reason + '，此文档将以 Markdown 代码原文保留。')];
+  const prose = sections.flatMap(section => proseLines(section).lines.map(maskMarkdownInlineLiterals)).join('\n');
   if (/!\[/.test(prose)) warnings.push('图片仅保留引用并显示未加载占位，不会请求远程图片；复杂图片语法可能保持文本。');
-  if (/\]\(\s*(?:javascript|data|vbscript|file):/i.test(prose)) warnings.push('危险协议链接将保留为不可点击的文字。');
+  if (/\]\(\s*<?(?:javascript|data|vbscript|file):/i.test(prose)) warnings.push('危险协议链接将保留为不可点击的文字。');
+  return { header, document, warnings, preservedAsSource };
+}
+
+export function assessMarkdown(markdown: string): MarkdownAssessment {
+  const { warnings } = analyzeMarkdown(markdown);
   return { warnings };
 }
 
+export interface MarkdownImportResult {
+  content: DocumentContent;
+  title?: string;
+  tagNames: string[];
+  warnings: string[];
+  preservedAsSource: boolean;
+}
+
 /** Unsupported document dialects are kept wholly as a Markdown code block, never partially erased. */
-export function createContentFromMarkdown(markdown: string): DocumentContent {
+export function parseMarkdownImport(markdown: string, transformers = MARKDOWN_TRANSFORMERS,
+  options: { preserveFootnotePosition?: boolean } = {}): MarkdownImportResult {
+  const preserveFootnotePosition = options.preserveFootnotePosition !== false;
+  const slots = new Map<string, string>();
+  const prefix = '\ue000NBASE_FOOTNOTE_' + crypto.randomUUID() + '_';
+  const { header, document, warnings, preservedAsSource } = analyzeMarkdown(markdown,
+    preserveFootnotePosition ? id => {
+      let token = prefix + slots.size + '\ue001';
+      while (markdown.includes(token)) token += '_';
+      slots.set(token, id);
+      return token;
+    } : undefined);
+  const definitions = new Map<string, ReturnType<typeof $createFootnoteDefinitionNode>>();
+  const slotTransformer: MultilineElementTransformer = {
+    type: 'multiline-element', dependencies: [FootnoteDefinitionNode], regExpStart: /^\ue000NBASE_FOOTNOTE_.*$/,
+    replace: () => false,
+    handleImportAfterStartMatch({ lines, rootNode, startLineIndex }) {
+      const id = slots.get(lines[startLineIndex]!);
+      if (!id) return null;
+      const definition = $createFootnoteDefinitionNode(id);
+      definitions.set(id, definition);
+      rootNode.append(definition);
+      return [true, startLineIndex];
+    },
+  };
   const editor = createEditor({ namespace: 'nbase-markdown', nodes: EDITOR_NODES, onError: error => { throw error; } });
   editor.update(() => {
-    if (unsupportedReasons(markdown).length) {
+    if (preservedAsSource) {
       $getRoot().clear().append($createCodeNode('markdown').append($createTextNode(markdown)));
     } else {
-      $convertFromMarkdownString(markdown, MARKDOWN_TRANSFORMERS);
+      $convertFromMarkdownString(document.body, preserveFootnotePosition ? [slotTransformer, ...transformers] : transformers);
+      const root = $getRoot();
+      for (const note of document.footnotes) {
+        const definition = definitions.get(note.id) ?? $createFootnoteDefinitionNode(note.id);
+        if (!definition.isAttached()) root.append(definition);
+        $convertFromMarkdownString(note.markdown, transformers, definition);
+      }
+      if (Object.keys(header.metadata).length) $setState(root, frontMatterState, header.metadata);
     }
   }, { discrete: true });
-  return { schemaVersion: 1, editorState: editor.getEditorState().toJSON() };
+  return {
+    content: { schemaVersion: 1, editorState: editor.getEditorState().toJSON() },
+    ...(!preservedAsSource && header.title !== undefined ? { title: header.title } : {}),
+    tagNames: preservedAsSource ? [] : header.tagNames, warnings, preservedAsSource,
+  };
+}
+
+export function createContentFromMarkdown(markdown: string): DocumentContent {
+  return parseMarkdownImport(markdown).content;
 }
 
 function serializeNode(node: LexicalNode): SerializedLexicalNode {
@@ -316,13 +510,37 @@ export function $collectOutline(): OutlineItem[] {
   return outline;
 }
 
-/** Call inside an EditorState.read callback. Anchors are view-only and never persisted IDs. */
-export function $createSnapshot(): EditorSnapshot {
+function $exportMarkdown(): string {
+  return $convertToMarkdownString(MARKDOWN_TRANSFORMERS);
+}
+
+function $snapshotContent() {
   return {
     content: normalizeDocumentContent({ schemaVersion: 1, editorState: { root: serializeNode($getRoot()) as SerializedRootNode } }),
-    markdown: restoreDollarEscapes($convertToMarkdownString(MARKDOWN_TRANSFORMERS)),
-    plainText: $getRoot().getTextContent(), outline: $collectOutline(),
+    outline: $collectOutline(),
   };
+}
+
+/** Call inside an EditorState.read callback. Anchors are view-only and never persisted IDs. */
+export function $createSnapshot(): EditorSnapshot {
+  return { ...$snapshotContent(), markdown: $exportMarkdown(), plainText: $getRoot().getTextContent() };
+}
+
+/** Keep expensive text projections out of the save path; the captured state is immutable. */
+export function readEditorSnapshot(state: EditorState): EditorSnapshot {
+  let markdown: string | undefined;
+  let plainText: string | undefined;
+  return {
+    ...state.read($snapshotContent),
+    get markdown() { return markdown ??= state.read($exportMarkdown); },
+    get plainText() { return plainText ??= state.read(() => $getRoot().getTextContent()); },
+  };
+}
+
+export function markdownFromContent(content: DocumentContent, transformers = MARKDOWN_TRANSFORMERS): string {
+  if (content.schemaVersion !== 1) throw new Error('不支持的文档内容版本');
+  const editor = createEditor({ nodes: EDITOR_NODES, onError: error => { throw error; } });
+  return editor.parseEditorState(content.editorState).read(() => $convertToMarkdownString(transformers));
 }
 
 

@@ -3,7 +3,7 @@ import type { PageSummary, PageVersion, PageVersionSummary, StoredDocumentConten
 import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { DocumentEditor } from '../editor/DocumentEditor';
-import type { DocumentContent } from '../editor/types';
+import type { DocumentContent, EditorPageReferences } from '../editor/types';
 import { ApiError, pageClient } from './client';
 import { diffVersions, type DiffLine } from './versionDiff';
 import { PageIcon } from '../shell/PageTree';
@@ -13,15 +13,16 @@ const operationNames: Record<PageVersionSummary['operation'], string> = {
   baseline: '迁移基线', create: '创建', update: '保存', trash: '移入回收站', restore: '从回收站恢复', 'restore-version': '恢复历史',
 };
 
-function Preview({ id, title, content, workspaceId }: { id: string; title: string; content: StoredDocumentContent; workspaceId: string }) {
+function Preview({ id, title, content, workspaceId, pageReferences }: { id: string; title: string; content: StoredDocumentContent;
+  workspaceId: string; pageReferences?: EditorPageReferences | undefined }) {
   const downloadRaw = () => {
     const url = URL.createObjectURL(new Blob([JSON.stringify(content, null, 2)], { type: 'application/json' }));
     const link = document.createElement('a'); link.href = url; link.download = 'nbase-original-content.json'; link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
-  return <div className="nbase-history-preview"><h3 className="nb-preview-title">{title || '未命名页面'}</h3>
-    {content.schemaVersion === 1 ? <DocumentEditor key={id} documentId={id} initialContent={content as DocumentContent}
-      workspaceId={workspaceId} readOnly onChange={() => {}} />
+  return <div className="nbase-history-preview"><h3 className="nb-preview-title" data-nbase-find-title>{title || '未命名页面'}</h3>
+    {content.schemaVersion === 1 ? <DocumentEditor key={id} documentId={id} title={title} initialContent={content as DocumentContent}
+      workspaceId={workspaceId} pageReferences={pageReferences} readOnly onChange={() => {}} />
       : <div role="alert"><p>暂不支持此版本的正文预览，原始数据仍保留。</p><button className="nb-btn" onClick={downloadRaw}>下载原始 JSON</button></div>}
   </div>;
 }
@@ -47,8 +48,9 @@ function sameLocalDay(a: Date, b: Date) {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
 
-export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, onRestore, onClose }: {
+export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, pageReferences, onRestore, onClose }: {
   workspaceId: string; pageId: string; currentRevision: string; busy: boolean;
+  pageReferences?: EditorPageReferences | undefined;
   onRestore: (version: PageVersion) => void; onClose: () => void;
 }) {
   const [versions, setVersions] = useState<PageVersionSummary[]>([]);
@@ -126,7 +128,8 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
         <div className="nb-hist-preview-scroll">
           {previewLoading && <p role="status">正在读取预览…</p>}
           {previewError && <p role="alert">{previewError}<button onClick={() => setPreviewRetry(value => value + 1)}>重试预览</button></p>}
-          {preview && !showDiff && <Preview id={`history:${pageId}:${preview.revision}`} title={preview.title} content={preview.content} workspaceId={workspaceId} />}
+          {preview && !showDiff && <Preview id={`history:${pageId}:${preview.revision}`} title={preview.title} content={preview.content}
+            workspaceId={workspaceId} pageReferences={pageReferences} />}
           {preview && showDiff && <div className="nbase-history-preview">
             <h3>{preview.title || '未命名页面'}</h3>
             {!older && hasOlder && <p role="status">正在读取对比版本…</p>}
@@ -168,14 +171,15 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
   </Modal>;
 }
 
-export function TrashDialog({ workspaceId, busy, pages: activePages, onRestore, onClose }: {
-  workspaceId: string; busy: boolean; pages: PageSummary[];
+export function TrashDialog({ workspaceId, busy, pages: activePages, initialPageId, pageReferences, onRestore, onClose }: {
+  workspaceId: string; busy: boolean; pages: PageSummary[]; initialPageId?: string | undefined;
+  pageReferences?: EditorPageReferences | undefined;
   onRestore: (page: TrashedPageDocument) => void; onClose: () => void;
 }) {
   const [pages, setPages] = useState<TrashedPageSummary[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | undefined>();
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(initialPageId ?? null);
   const [preview, setPreview] = useState<TrashedPageDocument | null>(null);
   const [filter, setFilter] = useState('');
   const [error, setError] = useState('');
@@ -188,7 +192,7 @@ export function TrashDialog({ workspaceId, busy, pages: activePages, onRestore, 
       if (controller.signal.aborted) return;
       setPages(previous => cursor ? [...new Map([...previous, ...response.pages].map(item => [item.id, item])).values()] : response.pages);
       setNext(response.nextCursor);
-      if (!cursor) setSelected(response.pages[0]?.id ?? null);
+      if (!cursor) setSelected(previous => previous ?? response.pages[0]?.id ?? null);
     }).catch(cause => { if (!controller.signal.aborted) setError(failure(cause)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
@@ -260,7 +264,8 @@ export function TrashDialog({ workspaceId, busy, pages: activePages, onRestore, 
           <div className="nb-trash-body-head"><h3 style={{ margin: 0 }}>{preview.title || '未命名页面'}</h3>
             <button className="nb-btn nb-btn-primary" disabled={busy} onClick={() => onRestore(preview)}>
               {busy ? '正在处理…' : '恢复'}</button></div>
-          <Preview id={`trash:${preview.id}:${preview.revision}`} title={preview.title} content={preview.content} workspaceId={workspaceId} />
+          <Preview id={`trash:${preview.id}:${preview.revision}`} title={preview.title} content={preview.content}
+            workspaceId={workspaceId} pageReferences={pageReferences} />
         </>}
       </div>
     </div>

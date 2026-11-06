@@ -196,4 +196,78 @@ CREATE TABLE page_favorites (
 CREATE INDEX page_favorites_user_idx ON page_favorites (workspace_id, user_id, created_at, page_id);
 `,
   },
+  {
+    version: 7,
+    name: 'workspace_tags',
+    sql: `
+CREATE TABLE workspace_tags (
+  workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE RESTRICT,
+  id uuid NOT NULL,
+  name text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 32),
+  name_key text COLLATE "C" NOT NULL,
+  PRIMARY KEY (workspace_id, id),
+  CONSTRAINT workspace_tags_name_key UNIQUE (workspace_id, name_key)
+);
+CREATE TABLE page_tags (
+  workspace_id uuid NOT NULL,
+  page_id uuid NOT NULL,
+  tag_id uuid NOT NULL,
+  PRIMARY KEY (workspace_id, page_id, tag_id),
+  FOREIGN KEY (workspace_id, page_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT,
+  FOREIGN KEY (workspace_id, tag_id) REFERENCES workspace_tags (workspace_id, id) ON DELETE CASCADE
+);
+CREATE INDEX page_tags_tag_idx ON page_tags (workspace_id, tag_id, page_id);
+`,
+  },
+  {
+    version: 8,
+    name: 'personal_note_templates',
+    sql: `
+CREATE TABLE note_templates (
+  id uuid PRIMARY KEY,
+  workspace_id uuid NOT NULL,
+  owner_user_id uuid NOT NULL,
+  name text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 80),
+  content_json jsonb NOT NULL CHECK (jsonb_typeof(content_json) = 'object'),
+  revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (workspace_id, owner_user_id) REFERENCES workspace_memberships (workspace_id, user_id) ON DELETE RESTRICT
+);
+CREATE INDEX note_templates_owner_idx ON note_templates (workspace_id, owner_user_id, created_at, id);
+`,
+  },
+  {
+    version: 9,
+    name: 'daily_notes',
+    sql: `
+ALTER TABLE workspaces
+  ADD COLUMN note_time_zone text NOT NULL DEFAULT 'Asia/Shanghai',
+  ADD COLUMN daily_parent_id uuid,
+  ADD COLUMN daily_template_id text,
+  ADD CONSTRAINT workspaces_note_time_zone_length CHECK (char_length(note_time_zone) BETWEEN 1 AND 100),
+  ADD CONSTRAINT workspaces_daily_parent_fk FOREIGN KEY (id, daily_parent_id)
+    REFERENCES pages(workspace_id, id) ON DELETE RESTRICT;
+ALTER TABLE pages ADD COLUMN daily_note_date date;
+CREATE UNIQUE INDEX pages_daily_note_identity_idx ON pages (workspace_id, daily_note_date)
+  WHERE daily_note_date IS NOT NULL;
+`,
+  },
+  {
+    version: 10,
+    name: 'page_backlinks',
+    sql: `
+CREATE TABLE page_links (
+  workspace_id uuid NOT NULL,
+  source_page_id uuid NOT NULL,
+  target_page_id uuid NOT NULL,
+  occurrence integer NOT NULL CHECK (occurrence >= 0),
+  snippet text NOT NULL CHECK (char_length(snippet) BETWEEN 1 AND 353),
+  PRIMARY KEY (workspace_id, source_page_id, occurrence),
+  FOREIGN KEY (workspace_id, source_page_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT,
+  FOREIGN KEY (workspace_id, target_page_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT
+);
+CREATE INDEX page_links_target_idx ON page_links (workspace_id, target_page_id, source_page_id, occurrence);
+`,
+  },
 ];

@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
 import { LexicalTypeaheadMenuPlugin, MenuOption } from '@lexical/react/LexicalTypeaheadMenuPlugin';
 import type { MenuRenderFn, MenuTextMatch } from '@lexical/react/LexicalTypeaheadMenuPlugin';
-import { $getSelection, $isRangeSelection, $isTextNode, COMMAND_PRIORITY_HIGH, KEY_ENTER_COMMAND } from 'lexical';
+import { $getSelection, $isParagraphNode, $isRangeSelection, $isTextNode, COMMAND_PRIORITY_HIGH, KEY_ENTER_COMMAND } from 'lexical';
 import { $isCodeNode } from '@lexical/code';
 import type { LexicalEditor, TextNode } from 'lexical';
 import { $getTableCellNodeFromLexicalNode, INSERT_TABLE_COMMAND } from '@lexical/table';
@@ -11,11 +11,16 @@ import { INSERT_HORIZONTAL_RULE_COMMAND } from '@lexical/react/LexicalHorizontal
 import { $applyBlockStyle } from '../blockStyles';
 import type { BlockStyle } from '../blockStyles';
 import { $createEquationNode, $insertEquationNode, $requestEquationEdit } from '../nodes/EquationNode';
+import { $applyCallout, calloutLabels } from '../nodes/CalloutNode';
+import { INSERT_MERMAID_COMMAND } from '../nodes/MermaidNode';
+import { calloutKinds, type CalloutKind } from '@nbase/contracts';
 
 type SlashAction =
   | { kind: 'block'; value: BlockStyle }
   | { kind: 'hr' }
   | { kind: 'table' }
+  | { kind: 'mermaid' }
+  | { kind: 'callout'; value: CalloutKind }
   | { kind: 'equation'; inline: boolean };
 
 type SlashCommand = {
@@ -34,6 +39,11 @@ const COMMANDS: SlashCommand[] = [
   { key: 'code', label: '代码块', hint: '``` 代码', keywords: ['code', 'codeblock', '代码'], action: { kind: 'block', value: 'code' } },
   { key: 'hr', label: '分割线', hint: '--- 水平线', keywords: ['hr', 'divider', 'line', '分割线', '分隔线'], action: { kind: 'hr' } },
   { key: 'table', label: '表格', hint: '3 × 3 表格', keywords: ['table', '表格'], action: { kind: 'table' }, hideInTable: true },
+  { key: 'mermaid', label: '图表', hint: 'Mermaid 流程图或时序图', keywords: ['mermaid', 'diagram', '图表', '流程图', '时序图'], action: { kind: 'mermaid' }, hideInTable: true },
+  ...calloutKinds.map((kind): SlashCommand => ({
+    key: 'callout-' + kind, label: '提示 · ' + calloutLabels[kind], hint: '提示块',
+    keywords: ['提示', 'callout', kind], action: { kind: 'callout', value: kind }, hideInTable: true,
+  })),
   { key: 'equation-block', label: '块级公式', hint: '$$ LaTeX', keywords: ['math', 'equation', 'formula', 'latex', 'block', '公式', '块级公式'], action: { kind: 'equation', inline: false }, hideInTable: true },
   { key: 'equation-inline', label: '行内公式', hint: '$ LaTeX', keywords: ['inline', 'math', 'equation', 'formula', 'latex', '公式', '行内公式'], action: { kind: 'equation', inline: true } },
 ];
@@ -137,10 +147,19 @@ export function SlashCommandPlugin() {
         closeMenu();
         return;
       }
+      const tableTriggerParagraph = action.kind === 'table' ? nodeToRemove?.getParent() : null;
       nodeToRemove?.remove();
       if (action.kind === 'block') $applyBlockStyle(editor, action.value);
       else if (action.kind === 'hr') editor.dispatchCommand(INSERT_HORIZONTAL_RULE_COMMAND, undefined);
-      else if (action.kind === 'table') editor.dispatchCommand(INSERT_TABLE_COMMAND, { columns: '3', rows: '3', includeHeaders: true });
+      else if (action.kind === 'table') {
+        const inserted = editor.dispatchCommand(INSERT_TABLE_COMMAND, { columns: '3', rows: '3', includeHeaders: { rows: true, columns: false } });
+        // Consume the command's own now-empty paragraph, retaining the new
+        // paragraph after the table so the user can move out of its last cell.
+        if (inserted && $isParagraphNode(tableTriggerParagraph) && tableTriggerParagraph.isAttached()
+          && tableTriggerParagraph.isEmpty()) tableTriggerParagraph.remove();
+      }
+      else if (action.kind === 'mermaid') editor.dispatchCommand(INSERT_MERMAID_COMMAND, undefined);
+      else if (action.kind === 'callout') $applyCallout(action.value);
       else $requestEquationEdit($insertEquationNode('', false));
       closeMenu();
     });

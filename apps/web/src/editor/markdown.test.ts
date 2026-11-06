@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { createEditor, $createParagraphNode, $getRoot, $isElementNode } from 'lexical';
+import { createEditor, $createParagraphNode, $getRoot, $isElementNode, $isTextNode } from 'lexical';
 import type { LexicalNode } from 'lexical';
 import { $isLinkNode } from '@lexical/link';
 import { $isTableNode, $isTableCellNode } from '@lexical/table';
@@ -11,6 +11,8 @@ import { EDITOR_NODES } from './nodes';
 import { ImageReferenceNode } from './nodes/ImageReferenceNode';
 import { $createAttachmentNode, AttachmentNode } from './nodes/AttachmentNode';
 import { EquationNode } from './nodes/EquationNode';
+import { $isCalloutNode } from './nodes/CalloutNode';
+import { $createPageReferenceNode, $isPageReferenceNode } from './nodes/PageReferenceNode';
 import type { DocumentContent } from './types';
 
 function reopen(content: DocumentContent) {
@@ -25,6 +27,81 @@ function walk(node: LexicalNode = $getRoot()): LexicalNode[] {
   return [node, ...($isElementNode(node) ? node.getChildren().flatMap(child => walk(child)) : [])];
 }
 const fixture = (name: string) => readFileSync(new URL(`../../../../docs/fixtures/markdown/${name}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+
+describe('page-reference Markdown', () => {
+  const id = '11111111-1111-4111-8111-111111111111';
+  const link = `[链接标题](/?page=${id})`;
+
+  it('keeps a stable target and the visible label through JSON and Markdown', () => {
+    const label = '中文 [注] $值$ ==着重== <字面> \\路径';
+    const editor = createEditor({ namespace: 'reference-test', nodes: EDITOR_NODES, onError: error => { throw error; } });
+    editor.update(() => $getRoot().append($createParagraphNode().append($createPageReferenceNode(id, label))), { discrete: true });
+    const first = editor.getEditorState().read($createSnapshot);
+    expect(assessMarkdown(first.markdown).warnings).toEqual([]);
+    const parsed = reopen(createContentFromMarkdown(first.markdown));
+    parsed.getEditorState().read(() => {
+      expect(walk().filter($isPageReferenceNode).map(node => [node.getTargetPageId(), node.getTextContent()]))
+        .toEqual([[id, label]]);
+    });
+    expect(parsed.getEditorState().read($createSnapshot).markdown).toBe(first.markdown);
+  });
+
+  it('opens references in callouts and tables while preserving code and unconverted legacy links', () => {
+    const input = ['# 页面', '正文 [[同名]] 与 [[缺失]]', `> [!NOTE]\n> ${link}`,
+      `| 表格 |\n| --- |\n| ${link} |`, `\`${link}\``, '```md\n' + link + '\n```'].join('\n\n');
+    const first = snapshot(input);
+    expect(first.plainText).toContain('正文 [[同名]] 与 [[缺失]]');
+    expect(first.plainText).toContain(link);
+    const references = (content: DocumentContent) => reopen(content).getEditorState().read(() =>
+      walk().filter($isPageReferenceNode).map(node => node.getTargetPageId()));
+    expect(references(first.content)).toEqual([id, id]);
+    expect(references(snapshot(first.markdown).content)).toEqual([id, id]);
+    expect(snapshot(first.markdown).plainText).toBe(first.plainText);
+  });
+});
+
+describe('callout and highlight Markdown', () => {
+  it('preserves typed callouts, plain unknown quotes and formatting through JSON and Markdown', () => {
+    const first = snapshot(fixture('callout-highlight.md'));
+    reopen(first.content).getEditorState().read(() => {
+      const nodes = walk();
+      const callouts = nodes.filter($isCalloutNode);
+      expect(callouts.map(node => [node.getKind(), node.getTitle()])).toEqual([
+        ['NOTE', '中文提示 <原样标题>'], ['WARNING', ''], ['IMPORTANT', ''],
+      ]);
+      expect(callouts[0]!.getChildren().some($isListNode)).toBe(true);
+      expect(callouts[2]!.getChildrenSize()).toBe(1);
+      const highlighted = nodes.filter($isTextNode).filter(node => node.hasFormat('highlight'));
+      expect(highlighted.map(node => node.getTextContent())).toEqual(['重点', '链接']);
+      expect(highlighted[0]!.hasFormat('bold')).toBe(true);
+      expect($isLinkNode(highlighted[1]!.getParent())).toBe(true);
+      expect(nodes.filter(node => node.getType() === 'quote')[0]?.getTextContent()).toContain('[!UNKNOWN]');
+    });
+    expect(first.markdown).toContain('`[等号==和\\=]`');
+    expect(first.markdown).toContain('\\=\\=字面\\=\\=');
+    expect(first.markdown).toContain('<p>==代码里的等号==</p>');
+    const second = snapshot(first.markdown);
+    expect(second.markdown).toBe(first.markdown);
+    expect(second.content).toEqual(first.content);
+  });
+
+  it('round-trips escaped equal signs in formatted prose and table cells', () => {
+    const first = snapshot('甲 **==乙\\=丙==** 后\\\\\\=前\n\n| a | b |\n| --- | --- |\n| ==测试== | \\=\\=普通\\=\\= |');
+    const second = snapshot(first.markdown);
+    expect(first.plainText).toContain('甲 乙=丙 后\\=前');
+    expect(first.plainText).toContain('==普通==');
+    expect(second.content).toEqual(first.content);
+  });
+
+  it('keeps quoted fenced examples and invalid headers without dropping original text', () => {
+    const code = '> [!NOTE]\n> ```html\n> <script>==样例==</script>\n> ```';
+    expect(assessMarkdown(code).warnings).toEqual([]);
+    expect(snapshot(code).markdown).toContain('> <script>==样例==</script>');
+    const invalid = '> [!NOTE] ' + '长'.repeat(121);
+    expect(assessMarkdown(invalid).warnings.join()).toContain('标题过长');
+    expect(snapshot(invalid).plainText).toContain(invalid);
+  });
+});
 
 describe('Markdown common document subset', () => {
   it('reopens versioned JSON and preserves headings, inline formats, quote, code, links and divider', () => {
@@ -127,8 +204,8 @@ describe('untrusted and unsupported Markdown', () => {
     expect(assessMarkdown(input).warnings).toEqual([]);
     expect(snapshot(input).plainText).toContain('<script>alert(1)</script>');
   });
-  it('warns and preserves tilde fences, front matter, \\( \\) math and reference links', () => {
-    for (const input of ['~~~js\nconst a=1\n~~~', '---\ntitle: 文档\n---\n# body', '公式 \\(a+b\\)', '\\[\nx^2\n\\]', '[ref][id]\n\n[id]: https://example.com']) {
+  it('warns and preserves tilde fences, invalid front matter, \\( \\) math and unresolved reference links', () => {
+    for (const input of ['~~~js\nconst a=1\n~~~', '---\ntitle: [无效\n---\n# body', '公式 \\(a+b\\)', '\\[\nx^2\n\\]', '[ref][missing]']) {
       expect(assessMarkdown(input).warnings.length).toBeGreaterThan(0);
       expect(snapshot(input).plainText).toBe(input);
     }

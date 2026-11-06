@@ -1,6 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
-import { $getSelection, $insertNodes, $isRangeSelection, CLICK_COMMAND, COMMAND_PRIORITY_CRITICAL, DROP_COMMAND, PASTE_COMMAND } from 'lexical';
+import {
+  $addUpdateTag, $getNodeByKey, $getSelection, $insertNodes, $isRangeSelection, $setSelection,
+  CLICK_COMMAND, COMMAND_PRIORITY_CRITICAL, DROP_COMMAND, HISTORY_PUSH_TAG, PASTE_COMMAND,
+} from 'lexical';
+import type { BaseSelection } from 'lexical';
 import { $generateNodesFromDOM } from '@lexical/html';
 import { $generateNodesFromSerializedNodes } from '@lexical/clipboard';
 import type { BaseSerializedNode } from '@lexical/clipboard';
@@ -9,24 +13,38 @@ import { $getTableCellNodeFromLexicalNode, $isTableSelection } from '@lexical/ta
 import { mergeRegister } from '@lexical/utils';
 import { isSafeLinkUrl } from '../markdown';
 import { $insertAttachments } from '../nodes/AttachmentNode';
-import type { AttachmentMetadata } from '@nbase/contracts';
+import { calloutTitleMaxLength, isCalloutKind, isCalloutTitle, isFootnoteId, isStoredMermaidSource, pageIdFromReferenceUrl, quickCaptureMarker, type AttachmentMetadata } from '@nbase/contracts';
+import { isPageReferenceLabel } from '../nodes/PageReferenceNode';
+import { Modal } from '../../components/Modal';
+import { $applyTablePaste, $isCurrentTablePaste, $previewTablePaste, $tablePasteTarget, parseTsv } from '../tableEditing';
+import type { TablePasteTarget } from '../tableEditing';
 
-const knownNodeTypes = new Set(['paragraph', 'heading', 'quote', 'list', 'listitem', 'code', 'code-highlight', 'link', 'autolink', 'table', 'tablerow', 'tablecell', 'horizontalrule', 'image-reference', 'attachment', 'equation', 'text', 'linebreak', 'tab']);
-function safeInternalNodes(nodes: unknown, insideTable = false, depth = 0): nodes is BaseSerializedNode[] {
+const knownNodeTypes = new Set(['paragraph', 'heading', 'quote', 'callout', 'list', 'listitem', 'code', 'code-highlight', 'link', 'autolink', 'table', 'tablerow', 'tablecell', 'horizontalrule', 'image-reference', 'attachment', 'equation', 'page-reference', 'footnote-reference', 'footnote-definition', 'mermaid', 'text', 'linebreak', 'tab']);
+function safeInternalNodes(nodes: unknown, insideTable = false, depth = 0, insideLinkOrCode = false): nodes is BaseSerializedNode[] {
   return depth < 64 && Array.isArray(nodes) && nodes.every((node: unknown) => {
     if (!node || typeof node !== 'object') return false;
     const value = node as Record<string, unknown>;
     if (typeof value.type !== 'string' || !knownNodeTypes.has(value.type)) return false;
     if ((value.type === 'link' || value.type === 'autolink') && (typeof value.url !== 'string' || !isSafeLinkUrl(value.url))) return false;
     if (value.type === 'table' && insideTable) return false;
+    if (value.type === 'callout' && (insideTable || !isCalloutKind(value.kind) || !isCalloutTitle(value.title)
+      || !Array.isArray(value.children))) return false;
     if (value.type === 'tablecell' && (Number(value.colSpan ?? 1) !== 1 || Number(value.rowSpan ?? 1) !== 1)) return false;
     if (value.type === 'equation' && (typeof value.equation !== 'string' || value.equation.length > 10_000
       || typeof value.inline !== 'boolean')) return false;
+    if (value.type === 'mermaid' && (insideTable || insideLinkOrCode || !isStoredMermaidSource(value.source) || value.children !== undefined)) return false;
+    if (value.type === 'page-reference' && (insideLinkOrCode || typeof value.targetPageId !== 'string'
+      || pageIdFromReferenceUrl('/?page=' + value.targetPageId) !== value.targetPageId
+      || !isPageReferenceLabel(value.label) || value.children !== undefined)) return false;
+    if ((value.type === 'footnote-reference' || value.type === 'footnote-definition') && !isFootnoteId(value.footnoteId)) return false;
+    if (value.type === 'footnote-reference' && (insideLinkOrCode || value.children !== undefined)) return false;
+    if (value.type === 'footnote-definition' && (depth !== 0 || insideTable || insideLinkOrCode || !Array.isArray(value.children))) return false;
     if (value.type === 'attachment' && (typeof value.attachmentId !== 'string'
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.attachmentId)
       || typeof value.fileName !== 'string' || value.fileName.length > 180
       || typeof value.mediaType !== 'string' || typeof value.alt !== 'string')) return false;
-    return value.children === undefined || safeInternalNodes(value.children, insideTable || value.type === 'table', depth + 1);
+    return value.children === undefined || safeInternalNodes(value.children, insideTable || value.type === 'table', depth + 1,
+      insideLinkOrCode || value.type === 'link' || value.type === 'autolink' || value.type === 'code');
   });
 }
 
@@ -35,11 +53,24 @@ function readableInternalText(nodes: unknown, depth = 0): string {
   return nodes.map((node: unknown) => {
     if (!node || typeof node !== 'object') return '';
     const value = node as Record<string, unknown>;
-    const text = typeof value.text === 'string' ? value.text.slice(0, 100_000) : '';
+    const visibleText = value.type === 'page-reference' ? value.label
+      : value.type === 'footnote-reference' && isFootnoteId(value.footnoteId) ? '[^' + value.footnoteId + ']' : value.type === 'mermaid' ? value.source : value.text;
+    const text = typeof visibleText === 'string' ? visibleText.slice(0, 100_000) : '';
     const children = readableInternalText(value.children, depth + 1);
-    const line = ['paragraph', 'heading', 'quote', 'listitem', 'tablerow'].includes(String(value.type)) ? '\n' : '';
-    return text + children + line;
+    const line = ['paragraph', 'heading', 'quote', 'listitem', 'tablerow', 'mermaid'].includes(String(value.type)) ? '\n' : '';
+    const title = value.type === 'callout' && typeof value.title === 'string'
+      ? value.title.slice(0, calloutTitleMaxLength) + '\n' : '';
+    return title + text + children + line;
   }).join('').slice(0, 100_000);
+}
+
+/** The quick-capture heading's role belongs to its original document. */
+function clearCaptureMarkers(nodes: BaseSerializedNode[]): void {
+  for (const node of nodes) {
+    const { $, children } = node as BaseSerializedNode & { $?: Record<string, unknown>; children?: BaseSerializedNode[] };
+    if ($ && typeof $ === 'object' && !Array.isArray($)) delete $[quickCaptureMarker];
+    if (children) clearCaptureMarkers(children);
+  }
 }
 
 type Props = {
@@ -94,8 +125,48 @@ export function preparePastedHtml(html: string) {
   return { document, warnings, plainOnly, plainText };
 }
 
+type TablePaste = {
+  target: TablePasteTarget;
+  preview: NonNullable<ReturnType<typeof $previewTablePaste>>;
+  data: string[][];
+  text: string;
+  selection: BaseSelection;
+  error?: string;
+};
+
+function $pasteMatrixAsText(selection: BaseSelection, text: string): boolean {
+  if (!$isRangeSelection(selection) && !$isTableSelection(selection)) return false;
+  if (!$getNodeByKey(selection.anchor.key) || !$getNodeByKey(selection.focus.key)) return false;
+  $addUpdateTag(HISTORY_PUSH_TAG);
+  if ($isRangeSelection(selection)) {
+    $setSelection(selection);
+    selection.insertRawText(text);
+  } else {
+    const cell = $getTableCellNodeFromLexicalNode(selection.anchor.getNode());
+    if (!cell) return false;
+    cell.selectEnd().insertRawText(text);
+  }
+  return true;
+}
+
 export function SafePastePlugin({ onNotice, onUploadFiles }: Props) {
   const [editor] = useLexicalComposerContext();
+  const [tablePaste, setTablePaste] = useState<TablePaste | null>(null);
+  const completeTablePaste = (plain: boolean) => {
+    if (!tablePaste || !editor.isEditable()) return;
+    const { target, preview, data, selection, text } = tablePaste;
+    editor.update(() => {
+      const result = plain ? ($isCurrentTablePaste(target, data, preview) && $pasteMatrixAsText(selection.clone(), text)
+        ? 'applied' : 'changed')
+        : $applyTablePaste(target, data, preview);
+      if (result === 'limit') {
+        setTablePaste(current => current && { ...current, error: '表格会超出文档大小限制，可选择保留纯文本。' });
+        return;
+      }
+      setTablePaste(null);
+      if (result === 'changed') onNotice?.('粘贴位置已变化，请重新粘贴。');
+    });
+  };
   const notice = useRef(onNotice);
   notice.current = onNotice;
   const upload = useRef(onUploadFiles);
@@ -111,6 +182,7 @@ export function SafePastePlugin({ onNotice, onUploadFiles }: Props) {
       }).catch(() => { if (mounted) notice.current?.('附件上传失败，原文件未修改，请重试。'); });
     };
     const unregister = mergeRegister(
+    editor.registerEditableListener(editable => { if (!editable) setTablePaste(null); }),
     editor.registerNodeTransform(LinkNode, (node) => {
       if (!isSafeLinkUrl(node.getURL())) {
         for (const child of node.getChildren()) node.insertBefore(child);
@@ -129,9 +201,35 @@ export function SafePastePlugin({ onNotice, onUploadFiles }: Props) {
       const html = clipboard.getData('text/html');
       const internal = clipboard.getData('application/x-lexical-editor');
       const files = Array.from(clipboard.files);
+      const text = clipboard.getData('text/plain');
+      const selection = $getSelection();
+      const target = $tablePasteTarget(selection);
+      const clipboardTable = !internal && files.length === 0 && target && /<table[\s>]/i.test(html)
+        ? preparePastedHtml(html) : null;
+      const fromTable = Boolean(clipboardTable && !clipboardTable.plainOnly && clipboardTable.document.querySelector('table'));
+      const matrix = target && !internal && files.length === 0 && (!html || fromTable) ? parseTsv(text, fromTable) : null;
+      if (matrix && target && selection) {
+        event.preventDefault();
+        if ('warning' in matrix) {
+          $pasteMatrixAsText(selection, text);
+          notice.current?.(matrix.warning);
+        } else {
+          const preview = $previewTablePaste(target, matrix.rows);
+          if (preview?.confirm) {
+            setTablePaste({ target, preview, data: matrix.rows, selection: selection.clone(), text });
+          } else {
+            const result = preview ? $applyTablePaste(target, matrix.rows, preview) : 'changed';
+            if (result !== 'applied') {
+              $pasteMatrixAsText(selection, text);
+              notice.current?.(result === 'limit' ? '表格会超出文档大小限制，已按纯文本粘贴。'
+                : '无法安全扩展当前表格，已按纯文本粘贴。');
+            }
+          }
+        }
+        return true;
+      }
       if (!html && !internal && files.length === 0) return false;
       event.preventDefault();
-      const selection = $getSelection();
       if (!selection) return true;
       if (files.length && upload.current) {
         queueMicrotask(() => startUpload(files));
@@ -145,6 +243,7 @@ export function SafePastePlugin({ onNotice, onUploadFiles }: Props) {
           if (payload && typeof payload === 'object' && 'namespace' in payload && payload.namespace === 'nbase-document' && 'nodes' in payload) {
             const insideTable = $isTableSelection(selection) || ($isRangeSelection(selection) && Boolean($getTableCellNodeFromLexicalNode(selection.anchor.getNode())));
             if (safeInternalNodes(payload.nodes, insideTable)) {
+              clearCaptureMarkers(payload.nodes);
               $insertNodes($generateNodesFromSerializedNodes(payload.nodes));
               return true;
             }
@@ -153,7 +252,7 @@ export function SafePastePlugin({ onNotice, onUploadFiles }: Props) {
         } catch { warnings.push('剪贴板结构无法读取，已改用可读内容。'); }
       }
       let inserted = false;
-      let plainText = clipboard.getData('text/plain');
+      let plainText = text;
       if (!plainText && internal) {
         try {
           const payload: unknown = JSON.parse(internal);
@@ -161,7 +260,7 @@ export function SafePastePlugin({ onNotice, onUploadFiles }: Props) {
         } catch { /* A malformed internal payload has no text to recover. */ }
       }
       if (html) {
-        const prepared = preparePastedHtml(html);
+        const prepared = clipboardTable ?? preparePastedHtml(html);
         warnings.push(...prepared.warnings);
         const insideTable = $isTableSelection(selection) || ($isRangeSelection(selection) && Boolean($getTableCellNodeFromLexicalNode(selection.anchor.getNode())));
         const containsTable = Boolean(prepared.document.querySelector('table'));
@@ -206,5 +305,21 @@ export function SafePastePlugin({ onNotice, onUploadFiles }: Props) {
     );
     return () => { mounted = false; unregister(); };
   }, [editor]);
-  return null;
+  if (!tablePaste) return null;
+  const { target, preview, data, error } = tablePaste;
+  const close = () => setTablePaste(null);
+  return <Modal title={target.kind === 'paragraph' ? '将剪贴板转换为表格' : '扩展当前表格'} onClose={close}>
+    <p className="dialog-description">剪贴板包含 {data.length} 行 × {data[0]!.length} 列文本。</p>
+    {target.kind === 'table' && <p className="dialog-description">
+      从第 {preview.row + 1} 行第 {preview.column + 1} 列开始覆盖，表格将扩展为 {preview.rows} 行 × {preview.columns} 列。
+    </p>}
+    {error && <p role="alert">{error}</p>}
+    <div className="dialog-actions">
+      <button className="nb-btn" type="button" onClick={close}>取消</button>
+      <button className="nb-btn" type="button" onClick={() => completeTablePaste(true)}>粘贴为文本</button>
+      <button className="nb-btn nb-btn-primary" type="button" disabled={Boolean(error)} onClick={() => completeTablePaste(false)}>
+        {target.kind === 'paragraph' ? '创建表格' : '扩展并粘贴'}
+      </button>
+    </div>
+  </Modal>;
 }

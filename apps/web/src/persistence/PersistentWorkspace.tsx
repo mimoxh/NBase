@@ -1,19 +1,32 @@
-﻿import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import type { AttachmentMetadata, AuthSessionResponse, PageCoverId, PageDocument, PageSummary, PageVersion, SearchResult,
-  StoredDocumentContent, TrashedPageDocument, UpdatePageRequest } from '@nbase/contracts';
+﻿import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import type { AttachmentMetadata, AuthSessionResponse, DailyNoteSettings, DailyNoteStatus, NoteTemplate, OpenDailyNoteRequest,
+  PageBacklink, PageCoverId, PageDocument, PageSummary, PageVersion, QuickCaptureRequest, SearchResult,
+  StoredDocumentContent, TrashedPageDocument, UpdatePageRequest, WorkspaceTag } from '@nbase/contracts';
+import { pageIdFromReferenceUrl } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { DocumentEditor } from '../editor/DocumentEditor';
-import { assessMarkdown, createContentFromMarkdown } from '../editor/markdown';
+import { SourceEditorDialog } from '../editor/SourceEditorDialog';
+import { addMarkdownFrontMatter, createContentFromMarkdown, markdownFromContent, parseMarkdownImport } from '../editor/markdown';
 import { normalizeDocumentContent } from '../editor/normalize';
 import type { DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
-import { ApiError, attachmentClient, loadPageTree, pageClient } from './client';
+import { ApiError, attachmentClient, loadPageTree, pageClient, tagClient } from './client';
 import { draftKey, draftVersion, localDrafts, sameDraftVersion,
-  type LocalPageDraft, type LocalPendingAction, type LocalPendingCreate } from './drafts';
+  type LocalPageDraft, type LocalPendingAction, type LocalPendingCreate, type LocalPendingNoteWrite } from './drafts';
+import { useNoteWrites } from './useNoteWrites';
+import type { NoteWrite } from './noteWrites';
 import { isDefiniteUpdateRejection, releaseRejectedMutation } from './savePolicy';
 import { exportAttachments, packagePage } from './attachmentExport';
 import { PersistentSearchDialog } from './PersistentSearchDialog';
 import { PageHistoryDialog, TrashDialog } from './PageRecoveryDialogs';
+import { PageBacklinks } from './PageBacklinks';
+import { FolderImportDialog } from './FolderImportDialog';
+import { packageFolderSubtree } from './folderExport';
+import { resolveImportTags } from './importTags';
+import { CopyNoteDialog, NewNoteDialog, TemplateManagerDialog } from './NoteTemplateDialogs';
+import { noteTemplateClient } from './noteTemplateClient';
+import { DailyNoteDialog, dailyClient } from './DailyNoteDialog';
+import { PageTagControls, TagFilter, TagManagerDialog, filterPageTree } from './PageTags';
 import { useTheme } from '../shell/theme';
 import { saveToneFor, type SaveStatus } from '../shell/saveTone';
 import { Sidebar } from '../shell/Sidebar';
@@ -48,6 +61,9 @@ function message(error: unknown): string {
     ATTACHMENT_MISSING: '附件文件缺失，导出已停止。',
     ATTACHMENT_CORRUPT: '附件文件与数据库记录不一致，导出已停止。',
     FAVORITE_LIMIT: '收藏已达 200 个上限。',
+    DAILY_NOTE_TRASHED: '这一天的笔记在回收站，请先恢复。',
+    DAILY_PARENT_UNAVAILABLE: '每日笔记的默认父页不可用，请更新设置。',
+    PAGE_REFERENCE_INVALID: '正文引用的页面不在当前工作区，请检查引用或下载本机草稿。',
   };
   return messages[error.code] ?? '服务暂时无法完成操作，请重试。';
 }
@@ -144,8 +160,23 @@ export function PersistentWorkspace() {
   const [notice, setNotice] = useState('');
   const [readOnly, setReadOnly] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [dialog, setDialog] = useState<'source' | 'import' | 'move' | 'search' | 'history' | 'trash' | 'delete' | null>(null);
-  const [pendingImport, setPendingImport] = useState<{ title: string; markdown: string } | null>(null);
+  const [dialog, setDialog] = useState<'source' | 'import' | 'move' | 'search' | 'history' | 'trash' | 'delete' |
+    'new' | 'templates' | 'copy' | 'tags' | 'today' | 'quick-capture' | 'settings' | 'folder-import' | null>(null);
+  const [newParent, setNewParent] = useState<string | null>(null);
+  const [copyPreparing, setCopyPreparing] = useState(false);
+  const [noteDialogError, setNoteDialogError] = useState('');
+  const [templateSource, setTemplateSource] = useState<{ title: string; content: StoredDocumentContent }>();
+  const [templates, setTemplates] = useState<NoteTemplate[]>([]);
+  const [tags, setTags] = useState<WorkspaceTag[]>([]);
+  const [treeTagIds, setTreeTagIds] = useState<string[]>([]);
+  const [trashTarget, setTrashTarget] = useState<string>();
+  const [pendingImport, setPendingImport] = useState<{ title: string; markdown: string; parsed: ReturnType<typeof parseMarkdownImport> } | null>(null);
+  const [importResolving, setImportResolving] = useState(false);
+  const [folderExporting, setFolderExporting] = useState(false);
+  const [sourceSession, setSourceSession] = useState<{ pageId: string; instanceId: string; content: DocumentContent;
+    baseRevision: string; title: string; parentId: string | null; scope: string } | null>(null);
+  const importResolvingRef = useRef(false);
+  const folderExportingRef = useRef(false);
   const [moveTarget, setMoveTarget] = useState('');
   const [createBusy, setCreateBusy] = useState(false);
   const [pendingCreates, setPendingCreates] = useState<LocalPendingCreate[]>([]);
@@ -173,9 +204,17 @@ export function PersistentWorkspace() {
   const writeQueues = useRef(new Map<string, Promise<void>>());
   const openSequence = useRef(0);
   const pendingSearchRef = useRef<{ pageId: string; phrase: string; field: SearchResult['matchField'] } | null>(null);
+  const pendingBacklinkRef = useRef<{ link: PageBacklink; targetPageId: string } | null>(null);
+  const initialPageReference = useRef(pageIdFromReferenceUrl(location.pathname + location.search));
   const pendingCreatesRef = useRef(new Map<string, LocalPendingCreate>());
   const createBusyRef = useRef(false);
   const workspace = session?.workspaces[0];
+  const canWrite = Boolean(workspace && workspace.role !== 'viewer');
+  const workspaceScope = session && workspace ? `${session.user.id}:${workspace.id}` : null;
+  const liveScope = useRef(workspaceScope);
+  liveScope.current = workspaceScope;
+  const noteWrites = useNoteWrites(session, workspace?.id, setNotice);
+  const dailyMode = dialog === 'today' || dialog === 'quick-capture' || dialog === 'settings' ? dialog : null;
 
   const trackPendingCreate = (pending: LocalPendingCreate) => {
     pendingCreatesRef.current.set(pending.key, pending);
@@ -246,7 +285,7 @@ export function PersistentWorkspace() {
     const draft: LocalPageDraft = {
       key: draftKey(session.user.id, workspace.id, pageId, tabId),
       userId: session.user.id, workspaceId: workspace.id, pageId,
-      title: nextTitle, content: snapshot.content, markdown: snapshot.markdown,
+      title: nextTitle, content: snapshot.content,
       baseRevision: previous?.baseRevision ?? server.revision,
       sequence: (previous?.sequence ?? 0) + 1,
       updatedAt: new Date().toISOString(),
@@ -385,6 +424,24 @@ export function PersistentWorkspace() {
 
   useEffect(() => { if (session) void reloadTree(session); }, [session, reloadTree]);
   useEffect(() => {
+    setTags([]); setTreeTagIds([]);
+    if (!workspace?.id) return;
+    const controller = new AbortController();
+    void tagClient.list(workspace.id, controller.signal).then(response => {
+      if (!controller.signal.aborted) setTags(response.tags);
+    }).catch(() => undefined);
+    return () => controller.abort();
+  }, [workspaceScope, workspace?.id]);
+  useEffect(() => {
+    if (!dailyMode || !workspace?.id) return;
+    let active = true;
+    setTemplates([]);
+    void noteTemplateClient.list(workspace.id).then(response => {
+      if (active) setTemplates(response);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [dailyMode, workspace?.id]);
+  useEffect(() => {
     if (!session || !workspace) return;
     let active = true;
     setActionsLoaded(false); setActionStorageError('');
@@ -408,6 +465,7 @@ export function PersistentWorkspace() {
 
   const openPage = useCallback(async (pageId: string, force = false) => {
     if (!session || !workspace) return false;
+    if (pendingBacklinkRef.current?.link.sourcePageId !== pageId) pendingBacklinkRef.current = null;
     const previousId = activeIdRef.current;
     if (!force && previousId === pageId && editorRef.current) return true;
     if (previousId && previousId !== pageId) {
@@ -464,6 +522,43 @@ export function PersistentWorkspace() {
   const openPageRef = useRef(openPage);
   openPageRef.current = openPage;
   const openTreePage = useCallback((id: string) => { void openPageRef.current(id); }, []);
+  const openReferencedPage = useCallback((pageId: string) => {
+    setDialog(null); void openPageRef.current(pageId);
+  }, []);
+  const pageReferenceAccess = useMemo(() => ({ pages, open: openReferencedPage }), [pages, openReferencedPage]);
+
+  useEffect(() => {
+    if (!session || !workspace || !initialPageReference.current) return;
+    const target = initialPageReference.current;
+    initialPageReference.current = null;
+    void openPageRef.current(target);
+  }, [session, workspace]);
+
+  const locatePendingBacklink = (pageId: string) => {
+    const pending = pendingBacklinkRef.current;
+    if (!pending || pending.link.sourcePageId !== pageId || activeIdRef.current !== pageId) return;
+    pendingBacklinkRef.current = null;
+    const editor = editorRef.current;
+    const currentRevision = docsRef.current.get(pageId)?.revision;
+    const hasLocalChanges = draftsRef.current.has(pageId);
+    if (currentRevision === pending.link.sourceRevision && !hasLocalChanges
+      && editor?.locatePageReference(pending.targetPageId, pending.link.occurrence)) return;
+    const found = editor?.locatePageReference(pending.targetPageId);
+    setNotice(found ? '来源页已更新，定位到当前正文中的第一处引用。' : '来源页已打开，引用可能已移除。');
+  };
+
+  const openBacklink = (link: PageBacklink, targetPageId: string) => {
+    const samePage = activeIdRef.current === link.sourcePageId && Boolean(editorRef.current);
+    const pending = { link, targetPageId };
+    pendingBacklinkRef.current = pending;
+    void openPage(link.sourcePageId).then(opened => {
+      if (pendingBacklinkRef.current !== pending) return;
+      if (!opened || docsRef.current.get(link.sourcePageId)?.content.schemaVersion !== 1) {
+        pendingBacklinkRef.current = null;
+        setNotice('来源页暂时无法定位，请刷新反向链接。');
+      } else if (samePage) requestAnimationFrame(() => locatePendingBacklink(link.sourcePageId));
+    });
+  };
 
   const locatePendingSearch = (pageId: string) => {
     const pending = pendingSearchRef.current;
@@ -489,7 +584,7 @@ export function PersistentWorkspace() {
 
   const openSearchResult = (result: SearchResult, phrase: string) => {
     const samePage = activeIdRef.current === result.pageId && Boolean(editorRef.current);
-    pendingSearchRef.current = { pageId: result.pageId, phrase, field: result.matchField };
+    pendingSearchRef.current = phrase ? { pageId: result.pageId, phrase, field: result.matchField } : null;
     setDialog(null);
     void openPage(result.pageId).then(opened => {
       if (!opened) {
@@ -497,6 +592,7 @@ export function PersistentWorkspace() {
         setNotice('搜索结果已变化，页面暂时无法打开。请重新搜索。');
         return;
       }
+      if (!phrase) return;
       if (samePage) requestAnimationFrame(() => locatePendingSearch(result.pageId));
       else if (docsRef.current.get(result.pageId)?.content.schemaVersion !== 1) {
         pendingSearchRef.current = null;
@@ -505,7 +601,7 @@ export function PersistentWorkspace() {
     });
   };
 
-  const performCreate = async (pending: LocalPendingCreate) => {
+  const performCreate = async (pending: LocalPendingCreate, openResult = true) => {
     if (!session || !workspace || createBusyRef.current) return;
     if (pending.userId !== session.user.id || pending.workspaceId !== workspace.id) {
       setNotice('待创建记录属于其他账号或工作区。'); return;
@@ -528,21 +624,27 @@ export function PersistentWorkspace() {
         try { await queueWrite(source.key, () => localDrafts.removeIfVersion(source)); }
         catch { setNotice('新页面已创建，本机旧草稿清理失败；重新打开原页面时可再次检查。'); }
       }
-      upsertPage(page); setDialog(null); setPendingImport(null); await openPage(page.id);
+      upsertPage(page);
+      if (openResult) { setDialog(null); setPendingImport(null); await openPage(page.id); }
+      if (page.tagIds?.length) void refreshTags().catch(() => undefined);
+      return page;
     } catch (error) {
-      setNotice(message(error)); if (isAuthError(error)) setReauth(true);
+      setNotice(message(error)); setNoteDialogError(message(error)); if (isAuthError(error)) setReauth(true);
     } finally { createBusyRef.current = false; setCreateBusy(false); }
   };
 
   const createPage = async (parentId: string | null, titleValue = '未命名页面',
-    content: StoredDocumentContent = createContentFromMarkdown(''), resolvesDraft?: LocalPageDraft) => {
+    content: StoredDocumentContent = createContentFromMarkdown(''), resolvesDraft?: LocalPageDraft, tagIds?: string[], openResult = true) => {
     if (!session || !workspace || createBusyRef.current) return;
-    if (pendingCreatesRef.current.size) { setNotice('上一笔创建尚未确认，请先重试或处理待创建记录。'); return; }
+    if (pendingCreatesRef.current.size) {
+      const text = '上一笔创建尚未确认，请关闭窗口处理待创建记录。';
+      setNotice(text); setNoteDialogError(text); return;
+    }
     const clientMutationId = crypto.randomUUID();
     const pending: LocalPendingCreate = {
       key: `${session.user.id}:${workspace.id}:${clientMutationId}`, userId: session.user.id,
       workspaceId: workspace.id,
-      body: { clientMutationId, parentId, title: titleValue, content },
+      body: { clientMutationId, parentId, title: titleValue, content, ...(tagIds?.length ? { tagIds } : {}) },
       createdAt: new Date().toISOString(),
       ...(resolvesDraft ? {
         resolvesDraftPageId: resolvesDraft.pageId,
@@ -553,10 +655,11 @@ export function PersistentWorkspace() {
     try { await localDrafts.putCreate(pending); }
     catch {
       untrackPendingCreate(pending.key);
-      setNotice('无法先保留本机创建记录，未向服务端提交。请检查浏览器存储。');
+      const text = '无法先保留本机创建记录，请检查浏览器存储。';
+      setNotice(text); setNoteDialogError(text);
       return;
     }
-    await performCreate(pending);
+    return performCreate(pending, openResult);
   };
 
   const changeTitle = (value: string) => {
@@ -595,6 +698,117 @@ export function PersistentWorkspace() {
     if (!savingRef.current.has(pageId)) return Promise.resolve();
     return new Promise(resolve => saveWaitersRef.current.set(pageId, [...(saveWaitersRef.current.get(pageId) ?? []), resolve]));
   };
+
+  const settlePageBeforeWrite = async (pageId: string) => {
+    if (!actionsLoaded || pageActionBusyRef.current
+      || [...pendingActionsRef.current.values()].some(item => item.affectedIds.includes(pageId))
+      || [...pendingCreatesRef.current.values()].some(item => item.resolvesDraftPageId === pageId)
+      || pendingUploads.some(item => item.pageId === pageId)
+      || (activeIdRef.current === pageId && otherDraft)) {
+      throw new Error('此页还有待确认的操作或草稿，请先处理。');
+    }
+    await waitForSave(pageId);
+    await savePage(pageId);
+    await waitForSave(pageId);
+    if (draftsRef.current.has(pageId)) throw new Error('请先完成此页的保存或解决冲突。');
+  };
+
+  const refreshTags = async () => {
+    if (!workspace || !session) return;
+    const response = await tagClient.list(workspace.id);
+    if (liveScope.current !== workspaceScope) return;
+    setTags(response.tags);
+    const known = new Set(response.tags.map(tag => tag.id));
+    setTreeTagIds(previous => previous.filter(id => known.has(id)));
+  };
+
+  const finishNoteWrite = async (write: NoteWrite, saved: PageDocument, pageAtStart: string | null) => {
+    if (!session || liveScope.current !== workspaceScope) return;
+    void reloadTree(session);
+    if (write.kind === 'copy') void refreshTags().catch(() => undefined);
+    if (write.kind === 'quick') {
+      if (activeIdRef.current === saved.id && !draftsRef.current.has(saved.id)) await openPage(saved.id, true);
+      setNotice('快速记录已保存。');
+    } else if (activeIdRef.current === pageAtStart) {
+      setDialog(null);
+      await openPage(saved.id);
+    }
+  };
+
+  const copyCurrentNote = async (nextTitle: string, parentId: string | null) => {
+    if (!canWrite || !workspace || !activeId || copyPreparing) return;
+    const sourceId = activeId;
+    setNoteDialogError(''); setCopyPreparing(true);
+    try {
+      await settlePageBeforeWrite(sourceId);
+      const saved = await pageClient.get(workspace.id, sourceId);
+      if (activeIdRef.current !== sourceId || liveScope.current !== workspaceScope) return;
+      const write: NoteWrite = { kind: 'copy', sourceId, body: { clientMutationId: crypto.randomUUID(),
+        title: nextTitle, parentId, sourceRevision: saved.revision } };
+      await finishNoteWrite(write, await noteWrites.submit(write), sourceId);
+    } catch (error) { setNoteDialogError(message(error)); if (isAuthError(error)) setReauth(true); }
+    finally { setCopyPreparing(false); }
+  };
+
+  const openDailyNote = async (input: Omit<OpenDailyNoteRequest, 'clientMutationId'>) => {
+    const pageAtStart = activeIdRef.current;
+    const write: NoteWrite = { kind: 'daily', body: { ...input, clientMutationId: crypto.randomUUID() } };
+    await finishNoteWrite(write, await noteWrites.submit(write), pageAtStart);
+  };
+
+  const prepareQuickWrite = async (write: NoteWrite): Promise<NoteWrite> => {
+    if (write.kind !== 'quick' || !write.targetPageId) return write;
+    await settlePageBeforeWrite(write.targetPageId);
+    const local = docsRef.current.get(write.targetPageId);
+    const base = write.body.expectedRevision;
+    if (!local || (base && BigInt(local.revision) <= BigInt(base))) return write;
+    return { ...write, body: { ...write.body, expectedRevision: local.revision } };
+  };
+
+  const quickCapture = async (input: Omit<QuickCaptureRequest, 'clientMutationId'>, target: DailyNoteStatus['page']) => {
+    if (!workspace) throw new Error('工作区不可用。');
+    const pageAtStart = activeIdRef.current;
+    const write: NoteWrite = { kind: 'quick', ...(target ? { targetPageId: target.id } : {}),
+      body: { ...input, clientMutationId: crypto.randomUUID() } };
+    await finishNoteWrite(write, await noteWrites.submit(write, target ? prepareQuickWrite : undefined), pageAtStart);
+  };
+
+  const retryNoteWrite = async (item: LocalPendingNoteWrite, rebase = false) => {
+    if (!workspace) return;
+    const pageAtStart = activeIdRef.current;
+    try {
+      if (item.preparing) {
+        await finishNoteWrite(item.write, await noteWrites.retry(item, prepareQuickWrite), pageAtStart);
+        return;
+      }
+      const confirmed = await noteWrites.confirm(item);
+      if (confirmed) {
+        await finishNoteWrite(item.write, confirmed, pageAtStart);
+        return;
+      }
+      if (item.write.kind === 'copy') await settlePageBeforeWrite(item.write.sourceId);
+      if (item.write.kind === 'quick') {
+        const { page } = await dailyClient.status(workspace.id, item.write.body.date);
+        if (page && !page.deleted) await settlePageBeforeWrite(page.id);
+        if (rebase) {
+          if (page?.deleted) throw new Error('这一天的笔记在回收站，请先恢复。');
+          const latest = page ? await pageClient.get(workspace.id, page.id) : null;
+          await finishNoteWrite(item.write, await noteWrites.rebaseQuick(item, latest?.revision), pageAtStart);
+          return;
+        }
+      }
+      await finishNoteWrite(item.write, await noteWrites.retry(item), pageAtStart);
+    } catch (error) { setNotice(message(error)); if (isAuthError(error)) setReauth(true); }
+  };
+
+  const saveDailySettings = async (input: DailyNoteSettings) => {
+    if (!workspace || !session) throw new Error('请先登录。');
+    await dailyClient.updateSettings(workspace.id, { ...input, clientMutationId: crypto.randomUUID() }, session.csrfToken);
+    setNotice('每日笔记设置已保存。');
+  };
+
+  const openTrash = (pageId?: string) => { setTrashTarget(pageId); setDialog('trash'); };
+
   const syncPendingActions = () => setPendingActions([...pendingActionsRef.current.values()]);
   const performPageAction = async (pending: LocalPendingAction) => {
     if (!session || !workspace || pageActionBusyRef.current) return;
@@ -642,6 +856,7 @@ export function PersistentWorkspace() {
           : saved.parentId === null ? '页面已恢复到个人空间根目录。' : '页面已恢复，ID 与子页面关系保留。');
       }
       await reloadTree(session);
+      if (pending.operation !== 'restore-version') void refreshTags().catch(() => undefined);
     } catch (error) {
       setDialog(null);
       if (isAuthError(error)) setReauth(true);
@@ -737,28 +952,37 @@ export function PersistentWorkspace() {
   };
 
   /** One revisioned PATCH for parent/icon/cover; keeps the save-guard sequence of the old move flow. */
-  const updatePageMeta = async (pageId: string, patch: Pick<UpdatePageRequest, 'parentId' | 'icon' | 'cover'>,
+  const updatePageMeta = async (pageId: string, patch: Pick<UpdatePageRequest, 'parentId' | 'icon' | 'cover' | 'tagIds'>,
     done: string, problem = '请先解决本页的保存问题，再修改页面。') => {
-    if (!session || !workspace || readOnly) return;
+    if (!session || !workspace || readOnly || !canWrite) return false;
     if (pageActionBusyRef.current
       || [...pendingActionsRef.current.values()].some(action => action.affectedIds.includes(pageId))
       || [...pendingCreatesRef.current.values()].some(create => create.resolvesDraftPageId === pageId)
       || pendingUploads.some(upload => upload.pageId === pageId)) {
-      setNotice('该页面还有待确认的操作，请先完成或重试，再修改页面。'); return;
+      setNotice('该页面还有待确认的操作，请先完成或重试，再修改页面。'); return false;
     }
     await waitForSave(pageId);
     await savePage(pageId);
     await waitForSave(pageId);
-    if (draftsRef.current.has(pageId)) { setNotice(problem); return; }
+    if (draftsRef.current.has(pageId)) { setNotice(problem); return false; }
     const current = docsRef.current.get(pageId);
-    if (!current) return;
+    if (!current) return false;
     try {
       const body: UpdatePageRequest = {
         clientMutationId: crypto.randomUUID(), expectedRevision: current.revision, ...patch,
       };
-      const updated = await pageClient.update(workspace.id, pageId, body, session.csrfToken);
+      let updated: PageDocument;
+      try { updated = await pageClient.update(workspace.id, pageId, body, session.csrfToken); }
+      catch (error) {
+        if (!(error instanceof ApiError) || error.status !== 0) throw error;
+        const receipt = await pageClient.receipt(workspace.id, body.clientMutationId).catch(() => null);
+        if (!receipt) throw error;
+        updated = receipt.response;
+      }
       upsertPage(updated); setNotice(done);
-    } catch (error) { setNotice(message(error)); if (isAuthError(error)) setReauth(true); }
+      if (patch.tagIds) void refreshTags().catch(() => undefined);
+      return true;
+    } catch (error) { setNotice(message(error)); if (isAuthError(error)) setReauth(true); return false; }
   };
 
   const movePage = async () => {
@@ -771,8 +995,8 @@ export function PersistentWorkspace() {
       }
       return false;
     })) { setNotice('不能把页面移动到自己的子页面中。'); return; }
-    await updatePageMeta(activeId, { parentId: moveTarget || null }, '页面已移动并保存。', '请先解决本页的保存问题，再移动页面。');
-    if (!draftsRef.current.has(activeId)) setDialog(null);
+    if (await updatePageMeta(activeId, { parentId: moveTarget || null }, '页面已移动并保存。',
+      '请先解决本页的保存问题，再移动页面。')) setDialog(null);
   };
 
   const setIcon = (pageId: string, icon: string | null) =>
@@ -839,6 +1063,12 @@ export function PersistentWorkspace() {
     return () => window.removeEventListener('keydown', handler);
   }, [sessionPhase, workspace, dialog]);
 
+  const conflictMarkdown = useMemo(() => {
+    if (!conflict) return null;
+    try { return conflict.draft.markdown ?? markdownFromContent(conflict.draft.content as DocumentContent); }
+    catch { return null; }
+  }, [conflict]);
+
   if (sessionPhase === 'checking') return <div className="nb-gate"><main role="status">正在检查登录状态…</main></div>;
   if (sessionPhase === 'error') return <div className="nb-gate"><main role="alert">
     <h1>无法读取登录状态</h1><p>{authError}</p><button className="nb-btn nb-btn-primary" onClick={() => location.reload()}>重试</button>
@@ -851,26 +1081,94 @@ export function PersistentWorkspace() {
   const currentLocked = pageActionBusy || pendingActions.some(item => activeId && item.affectedIds.includes(activeId));
   const rawContent = initialContent ?? current?.content;
   const supported = rawContent?.schemaVersion === 1;
-  const downloadPage = async (name: string, markdown: string, content: StoredDocumentContent) => {
-    const attachments = exportAttachments(content);
-    if (!attachments.length) { download(name, markdown); return; }
-    if (!workspace) { setNotice('当前工作区不可用，无法导出附件。'); return; }
-    setNotice(`正在读取 ${attachments.length} 个附件并生成 ZIP…`);
+  const openSource = () => {
+    const snapshot = editorRef.current?.getSnapshot();
+    if (!current || !snapshot || !workspaceScope) { setNotice('当前正文还未打开。'); return; }
+    setSourceSession({ pageId: current.id, instanceId: crypto.randomUUID(), content: snapshot.content,
+      baseRevision: draftsRef.current.get(current.id)?.baseRevision ?? current.revision,
+      title: titleRef.current, parentId: current.parentId, scope: workspaceScope });
+    setDialog('source');
+  };
+  const verifySourceAttachments = async (content: DocumentContent) => {
+    if (!workspace || !sourceSession || sourceSession.scope !== liveScope.current) throw new Error('账号或工作区已改变，请重新打开源码。');
     try {
-      const packageBlob = await packagePage(markdown, content, id => attachmentClient.download(workspace.id, id));
+      for (const item of exportAttachments(content)) await attachmentClient.verify(workspace.id, item.id);
+    } catch (error) { if (isAuthError(error)) setReauth(true); throw new Error(message(error)); }
+    if (sourceSession.scope !== liveScope.current) throw new Error('附件校验期间账号或工作区已改变，源码仍保留。');
+  };
+  const applySource = async (content: DocumentContent, baseContent: DocumentContent, _baseRevision: string) => {
+    if (!sourceSession || !canWrite || readOnly || currentLocked || conflict || otherDraft) {
+      throw new Error('请先处理此页的只读状态、冲突或待确认操作。源码仍保留。');
+    }
+    const editor = editorRef.current;
+    const isCurrent = () => sourceSession.scope === liveScope.current && sourceSession.pageId === activeIdRef.current
+      && editor && editor === editorRef.current
+      && canonicalContent(editor.getSnapshot().content) === canonicalContent(baseContent);
+    if (!isCurrent()) throw new Error('当前正文已与源码会话的基准不同，请复制源码或另存为新页面。');
+    await verifySourceAttachments(content);
+    if (!isCurrent()) throw new Error('校验期间正文或页面发生变化，源码仍保留，请重新打开或另存。');
+    if (editor!.replaceContent(content)) {
+      const draft = draftsRef.current.get(sourceSession.pageId);
+      if (!draft || !await persistDraft(draft)) throw new Error('正文已应用到本机编辑器，但草稿写入失败。请保留并复制源码。');
+    }
+    setNotice('源码已应用，可一次撤销；服务端状态以保存提示为准。');
+  };
+  const saveSourceCopy = async (content: DocumentContent) => {
+    if (!sourceSession || !canWrite || sourceSession.scope !== liveScope.current) throw new Error('当前无法创建副本，源码仍保留。');
+    await verifySourceAttachments(content);
+    const copyTitle = (sourceSession.title || '未命名页面').slice(0, 240).replace(/[\ud800-\udbff]$/, '') + '-源码副本';
+    const saved = await createPage(sourceSession.parentId, copyTitle, content,
+      undefined, undefined, false);
+    if (!saved) throw new Error('副本尚未确认；源码与待创建操作仍保留，请先处理待创建记录。');
+    setNotice('源码已另存为新页面，可从侧栏打开。');
+  };
+  const tagNamesFor = (ids: string[] | undefined) => tags.filter(tag => ids?.includes(tag.id)).map(tag => tag.name);
+  const downloadPage = async (name: string, markdown: string, content: StoredDocumentContent, documentTitle: string, tagNames: string[]) => {
+    try {
+      const portable = addMarkdownFrontMatter(markdown, content, documentTitle, tagNames);
+      const attachments = exportAttachments(content);
+      if (!attachments.length) { download(name, portable); return; }
+      if (!workspace) { setNotice('当前工作区不可用，无法导出附件。'); return; }
+      setNotice(`正在读取 ${attachments.length} 个附件并生成 ZIP…`);
+      const packageBlob = await packagePage(portable, content, id => attachmentClient.download(workspace.id, id));
       downloadBlob(name, packageBlob, '.zip');
       setNotice('页面和附件 ZIP 已发起下载，请检查浏览器下载记录。');
     } catch (error) { setNotice(`导出未完成：${message(error)} 原页面没有修改。`); }
   };
   const exportCurrent = () => {
     if (!current) return;
-    if (conflict) { void downloadPage(conflict.draft.title || '未命名页面', conflict.draft.markdown, conflict.draft.content); return; }
+    if (conflict) {
+      const name = `${conflict.draft.title || '未命名页面'}-本机草稿`;
+      if (conflictMarkdown !== null) void downloadPage(name, conflictMarkdown, conflict.draft.content,
+        conflict.draft.title || '未命名页面', tagNamesFor(conflict.server.tagIds));
+      else download(name, JSON.stringify(conflict.draft.content, null, 2), 'application/json', '.json');
+      return;
+    }
     if (!supported) download(`${current.title || '页面'}-原始数据`, JSON.stringify(current.content, null, 2), 'application/json', '.json');
     else {
       const snapshot = editorRef.current?.getSnapshot();
       void downloadPage(title || '未命名页面', snapshot?.markdown ?? editorSnapshot?.markdown ?? '',
-        snapshot?.content ?? editorSnapshot?.content ?? current.content);
+        snapshot?.content ?? editorSnapshot?.content ?? current.content, title || '未命名页面', tagNamesFor(current.tagIds));
     }
+  };
+  const exportFolder = async () => {
+    if (!current || !workspace || folderExportingRef.current) return;
+    folderExportingRef.current = true; setFolderExporting(true);
+    try {
+      if (draftsRef.current.has(current.id)) await settlePageBeforeWrite(current.id);
+      setNotice('正在打包已保存的页面、子页面和附件…');
+      const currentPages = await loadPageTree(workspace.id);
+      const availableTags = (await tagClient.list(workspace.id)).tags;
+      const blob = await packageFolderSubtree({ rootPageId: current.id, pages: currentPages,
+        fetchPage: id => pageClient.get(workspace.id, id), fetchAttachment: id => attachmentClient.download(workspace.id, id),
+        formatMarkdown: page => addMarkdownFrontMatter(markdownFromContent(page.content as DocumentContent),
+          page.content, page.title || '未命名页面', availableTags.filter(tag => page.tagIds?.includes(tag.id)).map(tag => tag.name)),
+      });
+      if (liveScope.current !== workspaceScope) return;
+      downloadBlob(current.title || '页面与子页面', blob, '.zip');
+      setNotice('页面与子页面 ZIP 已发起下载。');
+    } catch (error) { setNotice(message(error)); if (isAuthError(error)) setReauth(true); }
+    finally { folderExportingRef.current = false; setFolderExporting(false); }
   };
   const uploadFiles = async (files: File[]): Promise<AttachmentMetadata[]> => {
     const pageId = activeIdRef.current;
@@ -918,17 +1216,24 @@ export function PersistentWorkspace() {
     } finally { uploadingRef.current -= 1; }
   };
   const importFile = async (file: File | undefined) => {
-    if (!file) return;
+    if (!file || !canWrite) return;
     if (!/\.md$/i.test(file.name) || file.size > 1024 * 1024) { setNotice('请选择不超过 1 MB 的 .md 文件。'); return; }
     try {
       const markdown = await file.text();
-      setPendingImport({ title: file.name.replace(/\.md$/i, ''), markdown }); setDialog('import');
+      const parsed = parseMarkdownImport(markdown);
+      setNoteDialogError('');
+      setPendingImport({ title: parsed.title ?? file.name.replace(/\.md$/i, ''), markdown, parsed }); setDialog('import');
     } catch { setNotice('无法读取文件，请重试。'); }
   };
-  const completeImport = () => {
-    if (!pendingImport) return;
-    try { void createPage(null, pendingImport.title, createContentFromMarkdown(pendingImport.markdown)); }
-    catch { setNotice('Markdown 转换失败，原始文件未修改；请先下载原文。'); }
+  const completeImport = async () => {
+    if (!pendingImport || !workspace || !canWrite || importResolvingRef.current || createBusyRef.current) return;
+    importResolvingRef.current = true; setImportResolving(true); setNoteDialogError('');
+    try {
+      const tagIds = await resolveImportTags(workspace.id, session.csrfToken, pendingImport.parsed.tagNames);
+      if (liveScope.current !== workspaceScope) return;
+      await createPage(null, pendingImport.title, pendingImport.parsed.content, undefined, tagIds);
+    } catch (error) { setNoteDialogError(message(error)); if (isAuthError(error)) setReauth(true); }
+    finally { importResolvingRef.current = false; setImportResolving(false); }
   };
   const toggleSidebar = () => {
     if (window.innerWidth <= 720) { setMobileOpen(!mobileOpen); return; }
@@ -968,9 +1273,21 @@ export function PersistentWorkspace() {
   const favoritePages = favoriteIds.flatMap(id => pages.filter(page => page.id === id));
   const recentPages = recentIds.flatMap(id => pages.filter(page => page.id === id)).slice(0, 5);
   const homePages = [...pages].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 10);
+  const editorReadOnly = readOnly || currentLocked || !canWrite;
+  const openNewNote = (parentId: string | null) => {
+    if (!canWrite || createBusyRef.current) return;
+    setNewParent(parentId); setNoteDialogError(''); setDialog('new');
+  };
+  const openTemplates = (fromPage = false) => {
+    if (!canWrite) return;
+    const content = fromPage ? editorRef.current?.getSnapshot().content : undefined;
+    if (fromPage && !content) return;
+    setTemplateSource(content ? { title: titleRef.current, content } : undefined);
+    setDialog('templates');
+  };
   const treeActions = {
     onOpen: openTreePage,
-    onAddChild: (id: string) => { void createPage(id); },
+    onAddChild: (id: string) => openNewNote(id),
     onFavorite: (id: string) => { void toggleFavorite(id); },
     onMove: (id: string) => {
       void openPage(id).then(opened => {
@@ -981,23 +1298,38 @@ export function PersistentWorkspace() {
     onTrash: (id: string) => { void openPage(id).then(opened => { if (opened) setDialog('delete'); }); },
   };
   const pageMenuItems: (MenuItem | 'divider')[] = current ? [
-    { key: 'mode', label: readOnly ? '切换为编辑' : '切换为阅读', icon: 'focus', onSelect: () => setReadOnly(!readOnly) },
-    { key: 'attach', label: '添加图片或附件', icon: 'image', disabled: readOnly || currentLocked, onSelect: () => attachmentInputRef.current?.click() },
-    { key: 'source', label: '查看 Markdown 源码', icon: 'code', onSelect: () => setDialog('source') },
+    { key: 'mode', label: readOnly ? '切换为编辑' : '切换为阅读', icon: 'focus', disabled: !canWrite, onSelect: () => setReadOnly(!readOnly) },
+    { key: 'attach', label: '添加图片或附件', icon: 'image', disabled: editorReadOnly, onSelect: () => attachmentInputRef.current?.click() },
+    { key: 'source', label: 'Markdown 源码', icon: 'code', onSelect: openSource },
     { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
+    { key: 'folder-zip', label: '导出已保存的页面与子页面 ZIP', icon: 'download', disabled: folderExporting, onSelect: () => void exportFolder() },
     'divider',
-    { key: 'child', label: '添加子页面', icon: 'plus', disabled: createBusy || currentLocked, onSelect: () => void createPage(current.id) },
-    { key: 'move', label: '移动到…', icon: 'folder', disabled: currentLocked, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialog('move'); } },
+    { key: 'child', label: '添加子页面', icon: 'plus', disabled: createBusy || currentLocked || !canWrite, onSelect: () => openNewNote(current.id) },
+    { key: 'copy', label: '复制页面', icon: 'copy', disabled: currentLocked || !canWrite || !noteWrites.ready || noteWrites.busy,
+      onSelect: () => { setNoteDialogError(''); setDialog('copy'); } },
+    { key: 'template', label: '另存为个人模板', icon: 'page', disabled: currentLocked || !canWrite, onSelect: () => openTemplates(true) },
+    { key: 'move', label: '移动到…', icon: 'folder', disabled: currentLocked || !canWrite, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialog('move'); } },
     'divider',
-    { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, disabled: currentLocked, onSelect: () => setDialog('delete') },
+    { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, disabled: currentLocked || !canWrite, onSelect: () => setDialog('delete') },
   ] : [];
 
   return <div className={`nb-app persistent-workspace ${sidebarHidden ? 'nb-sidebar-collapsed' : ''}`}>
     <Sidebar workspaceName={workspace?.name ?? '个人空间'} loginName={session.user.loginName}
       theme={theme} onTheme={setTheme} onLogout={() => void logout()}
-      onSearch={() => setDialog('search')} onTrash={() => setDialog('trash')}
-      onNewPage={() => void createPage(null)} onImport={() => fileRef.current?.click()}
-      createBusy={createBusy} pages={pages} activeId={activeId}
+      onSearch={() => setDialog('search')} onTrash={() => openTrash()}
+      noteActions={<>
+        <button className="nb-nav-row" onClick={() => setDialog('today')}><Icon name="clock" size={15} /><span>今天</span></button>
+        {canWrite && <>
+          <button className="nb-nav-row" disabled={!noteWrites.ready} onClick={() => setDialog('quick-capture')}><Icon name="plus" size={15} /><span>快速记录</span></button>
+          <button className="nb-nav-row" onClick={() => openTemplates()}><Icon name="page" size={15} /><span>笔记模板</span></button>
+          <button className="nb-nav-row" onClick={() => setDialog('tags')}><Icon name="folder" size={15} /><span>管理标签</span></button>
+        </>}
+        {workspace?.role === 'owner' && <button className="nb-nav-row" onClick={() => setDialog('settings')}><Icon name="settings" size={15} /><span>每日笔记设置</span></button>}
+      </>}
+      treeControls={tags.length > 0 && <TagFilter tags={tags} value={treeTagIds} onChange={setTreeTagIds} />}
+      onNewPage={() => openNewNote(null)} onImport={() => { if (canWrite) fileRef.current?.click(); }}
+      {...(canWrite ? { onImportFolder: () => setDialog('folder-import') } : {})}
+      createBusy={createBusy || !canWrite} pages={filterPageTree(pages, treeTagIds)} activeId={activeId}
       favorites={favoriteSet} favoritePages={favoritePages} recentPages={recentPages}
       treeLoading={treeLoading} treeError={treeError} onTreeRetry={() => void reloadTree(session)}
       treeActions={treeActions} open={mobileOpen} onClose={() => setMobileOpen(false)} />
@@ -1027,6 +1359,18 @@ export function PersistentWorkspace() {
           }).catch(() => setNotice('无法清除本机待创建记录。'));
         }}>放弃记录</button>
       </NoticeBar>)}
+      {noteWrites.pending.map(item => <NoticeBar tone="warn" key={item.key}>
+        {item.write.kind === 'quick' ? `${item.write.body.date} 的快速记录待确认。` : '有一笔笔记创建操作待确认。'}
+        <button disabled={noteWrites.busy || !canWrite} onClick={() => void retryNoteWrite(item)}>重试同一笔提交</button>
+        {item.write.kind === 'quick' && item.conflict && <button disabled={noteWrites.busy || !canWrite}
+          onClick={() => void retryNoteWrite(item, true)}>按最新修订重试</button>}
+        {item.write.kind === 'quick' && <button onClick={() => {
+          if (item.write.kind === 'quick') download('待提交快速记录', item.write.body.text, 'text/plain', '.txt');
+        }}>下载文字</button>}
+        <button disabled={noteWrites.busy} onClick={() => {
+          if (confirm('确定移除此本机待提交记录吗？服务端已确认的内容会保留。')) void noteWrites.dismiss(item).catch(error => setNotice(message(error)));
+        }}>移除记录</button>
+      </NoticeBar>)}
       {pendingUploads.filter(item => item.pageId === activeId).map(pending => <NoticeBar tone="warn" key={pending.id}>
         {pending.file.name || '附件'} 上传结果尚未确认，原文件仍在本机。
         <button onClick={() => void retryUpload(pending)}>用同一 ID 重试上传</button>
@@ -1047,29 +1391,36 @@ export function PersistentWorkspace() {
             <div className="nb-conflict-actions">
               <button className="nb-btn nb-btn-primary" disabled={createBusy} onClick={() => void createPage(conflict.server.parentId,
                 `${conflict.draft.title || '未命名页面'}（冲突副本）`, conflict.draft.content, conflict.draft)}>另存为副本</button>
-              <button className="nb-btn" onClick={() => void downloadPage(
-                `${conflict.draft.title || '页面'}-本机草稿`, conflict.draft.markdown, conflict.draft.content)}>下载我的内容</button>
+              <button className="nb-btn" onClick={exportCurrent}>下载我的内容</button>
             </div>
-            <details><summary>查看本机 Markdown</summary><pre>{conflict.draft.markdown}</pre></details>
+            <details><summary>{conflictMarkdown === null ? '查看本机原始数据' : '查看本机 Markdown'}</summary>
+              <pre>{conflictMarkdown ?? JSON.stringify(conflict.draft.content, null, 2)}</pre></details>
           </section> : current ? <>
-            <PageHeader icon={current.icon} cover={current.cover} editable={!readOnly && !currentLocked}
+            <PageHeader icon={current.icon} cover={current.cover} editable={!editorReadOnly}
               onIcon={icon => setIcon(current.id, icon)} onCover={cover => setCover(current.id, cover)}
-              title={readOnly ? <h1 className="nb-doc-title-static">{title || '未命名页面'}</h1>
-                : <input className="nb-doc-title page-title" aria-label="页面标题" value={title} disabled={currentLocked}
+              title={readOnly || !canWrite ? <h1 className="nb-doc-title-static" data-nbase-find-title>{title || '未命名页面'}</h1>
+                : <input className="nb-doc-title page-title" data-nbase-find-title aria-label="页面标题" value={title} disabled={currentLocked}
                   onChange={event => changeTitle(event.target.value)} placeholder="未命名页面" />} />
             <div className="nb-doc-body">
+              {(tags.length > 0 || current.tagIds?.length) && <PageTagControls tags={tags} value={current.tagIds ?? []}
+                disabled={editorReadOnly} {...(canWrite ? { onApply: (tagIds: string[]) => updatePageMeta(current.id, { tagIds }, '页面标签已保存。') } : {})} />}
               {supported && initialContent ? <DocumentEditor key={`${current.id}:${editorEpoch}`} ref={editorRef} documentId={current.id}
-                initialContent={initialContent} readOnly={readOnly || currentLocked}
+                pageReferences={pageReferenceAccess}
+                title={title} onReplaceTitle={(value, bodyChanged) => bodyChanged ? setCurrentTitle(value) : changeTitle(value)}
+                initialContent={initialContent} readOnly={editorReadOnly}
                 onChange={(id, snapshot) => { if (id === activeIdRef.current) markDraft(id, titleRef.current, snapshot); }}
                 onReady={(id, snapshot) => { setEditorSnapshot(snapshot);
                   if (pendingSearchRef.current?.pageId === id) requestAnimationFrame(() => locatePendingSearch(id));
+                  if (pendingBacklinkRef.current?.link.sourcePageId === id) requestAnimationFrame(() => locatePendingBacklink(id));
                 }} onNotice={setNotice}
                 workspaceId={workspace?.id} onUploadFiles={uploadFiles} />
                 : <div role="alert" className="nbase-unsupported"><h2>暂不能打开此格式版本</h2>
                   <p>原始数据仍保留在服务端。请先下载副本，等待兼容升级。</p>
                   <button className="nb-btn" onClick={exportCurrent}>下载原始 JSON</button></div>}
+              {workspace && <PageBacklinks key={current.id} workspaceId={workspace.id} pageId={current.id} revision={current.revision}
+                onOpen={link => openBacklink(link, current.id)} />}
             </div>
-            <Toc outline={editorSnapshot?.outline ?? []} />
+            <Toc outline={editorSnapshot?.outline ?? []} onJump={id => editorRef.current?.jumpToHeading(id)} />
           </> : <section className="nb-home" role="alert">页面暂时无法打开。{saveStatus.text}</section>
           : pages.length ? <section className="nb-home">
             <div className="nb-home-eyebrow">{workspace?.name}</div>
@@ -1079,7 +1430,7 @@ export function PersistentWorkspace() {
                 <strong>{page.title || '未命名页面'}</strong>
                 <small>{ancestorsOf(page.id)} · {relativeTime(page.updatedAt)}</small>
               </span></button>)}</div>
-            <div style={{ marginTop: 22 }}><button className="nb-btn nb-btn-primary" disabled={createBusy} onClick={() => void createPage(null)}><Icon name="plus" size={15} /> 新建页面</button></div>
+            <div style={{ marginTop: 22 }}><button className="nb-btn nb-btn-primary" disabled={createBusy || !canWrite} onClick={() => openNewNote(null)}><Icon name="plus" size={15} /> 新建页面</button></div>
           </section>
           : treeLoading ? <section className="nb-home" role="status">正在加载目录…</section>
           : <section className="nb-empty"><div>
@@ -1087,8 +1438,8 @@ export function PersistentWorkspace() {
             <h1>开始写第一篇页面</h1>
             <p>页面可以层层嵌套，组织你的笔记、计划和资料。</p>
             <div className="nb-empty-actions">
-              <button className="nb-btn nb-btn-primary" disabled={createBusy} onClick={() => void createPage(null)}>新建页面</button>
-              <button className="nb-btn" onClick={() => fileRef.current?.click()}>导入 Markdown</button>
+              <button className="nb-btn nb-btn-primary" disabled={createBusy || !canWrite} onClick={() => openNewNote(null)}>新建页面</button>
+              <button className="nb-btn" disabled={!canWrite} onClick={() => fileRef.current?.click()}>导入 Markdown</button>
             </div>
           </div></section>}
       </main>
@@ -1105,29 +1456,47 @@ export function PersistentWorkspace() {
       <p style={{ textAlign: 'center' }}><button className="nb-btn nb-btn-quiet" onClick={() => setShowReauthForm(false)}>继续写作</button></p>
       <p className="nb-login-foot">本机草稿仍保留。可以关闭窗口继续输入，稍后再登录。</p>
     </div></div>}
-    {dialog === 'source' && <Modal title="Markdown 源码" wide onClose={() => setDialog(null)}>
-      <p className="dialog-description">只读视图，包含当前编辑器尚未保存的内容。</p>
-      <textarea className="source-view" readOnly aria-label="Markdown 源码，只读"
-        value={editorRef.current?.getSnapshot().markdown ?? editorSnapshot?.markdown ?? ''} />
-      <div className="dialog-actions"><button className="nb-btn nb-btn-primary" onClick={exportCurrent}>下载页面（含附件）</button></div></Modal>}
+    {dialog === 'source' && sourceSession && workspace && sourceSession.scope === workspaceScope && <SourceEditorDialog key={sourceSession.instanceId}
+      scope={{ userId: session.user.id, workspaceId: workspace.id, pageId: sourceSession.pageId,
+        instanceId: sourceSession.instanceId, baseRevision: sourceSession.baseRevision }} initialContent={sourceSession.content}
+      readOnly={editorReadOnly} attachmentWorkspaceId={workspace.id} pageReferences={pageReferenceAccess}
+      onApply={applySource} onSaveCopy={saveSourceCopy} onClose={() => setDialog(null)} />}
     {dialog === 'search' && workspace && <PersistentSearchDialog workspaceId={workspace.id}
-      pages={pages} recentPages={recentPages}
+      pages={pages} recentPages={recentPages} tags={tags}
       onClose={() => setDialog(null)} onOpen={openSearchResult}
       onCommand={command => {
         setDialog(null);
-        if (command === 'new') void createPage(null);
-        if (command === 'import') fileRef.current?.click();
-        if (command === 'trash') setDialog('trash');
+        if (command === 'new') openNewNote(null);
+        if (command === 'import' && canWrite) fileRef.current?.click();
+        if (command === 'trash') openTrash();
         if (command === 'theme') setTheme(theme === 'dark' ? 'light' : 'dark');
       }}
       onAuthError={() => { setReauth(true); setShowReauthForm(true); setDialog(null); }} />}
     {dialog === 'history' && workspace && current && <PageHistoryDialog key={current.id} workspaceId={workspace.id}
-      pageId={current.id} currentRevision={current.revision} busy={pageActionBusy}
+      pageId={current.id} currentRevision={current.revision} busy={pageActionBusy || !canWrite} pageReferences={pageReferenceAccess}
       onRestore={(version: PageVersion) => void beginPageAction('restore-version', current.id, current.revision, title, version.revision)}
       onClose={() => setDialog(null)} />}
-    {dialog === 'trash' && workspace && <TrashDialog workspaceId={workspace.id} busy={pageActionBusy} pages={pages}
+    {dialog === 'trash' && workspace && <TrashDialog workspaceId={workspace.id} busy={pageActionBusy || !canWrite}
+      pages={pages} initialPageId={trashTarget} pageReferences={pageReferenceAccess}
       onRestore={(page: TrashedPageDocument) => void beginPageAction('restore', page.id, page.revision, page.title)}
       onClose={() => setDialog(null)} />}
+    {dialog === 'new' && workspace && canWrite && <NewNoteDialog workspaceId={workspace.id} csrfToken={session.csrfToken}
+      busy={createBusy} error={noteDialogError} onCreate={(nextTitle, content) => {
+        setNoteDialogError(''); void createPage(newParent, nextTitle, content);
+      }} onClose={() => setDialog(null)} />}
+    {dialog === 'templates' && workspace && canWrite && <TemplateManagerDialog key={JSON.stringify([session.user.id, workspace.id])}
+      userId={session.user.id} workspaceId={workspace.id}
+      csrfToken={session.csrfToken} {...(templateSource ? { source: templateSource } : {})} onClose={() => setDialog(null)} />}
+    {dialog === 'copy' && workspace && current && canWrite && <CopyNoteDialog source={current} pages={pages}
+      busy={copyPreparing || noteWrites.busy} error={noteDialogError} onCopy={(nextTitle, parentId) => void copyCurrentNote(nextTitle, parentId)}
+      onClose={() => setDialog(null)} />}
+    {dialog === 'tags' && workspace && canWrite && <TagManagerDialog tags={tags} workspaceId={workspace.id} csrfToken={session.csrfToken}
+      onChanged={async () => { await Promise.all([refreshTags(), reloadTree(session)]); }} onClose={() => setDialog(null)}
+      onAuthError={() => { setDialog(null); setReauth(true); setShowReauthForm(true); }} />}
+    {dailyMode && workspace && <DailyNoteDialog workspaceId={workspace.id} mode={dailyMode} templates={templates} parents={pages}
+      readOnly={!canWrite || !noteWrites.ready} onClose={() => setDialog(null)}
+      onOpenPage={async id => { if (!await openPage(id)) throw new Error('页面暂时无法打开。'); }}
+      onRestorePage={id => openTrash(id)} onCreate={openDailyNote} onCapture={quickCapture} onSaveSettings={saveDailySettings} />}
     {dialog === 'delete' && current && <Modal title="移入回收站" onClose={() => setDialog(null)}>
       <p className="dialog-description">将“{title || '未命名页面'}”及 {subtreeIds(current.id).length - 1} 篇子页面移入回收站。操作前会先保存当前更改；尚未处理的本机草稿会阻止删除。</p>
       <p className="dialog-description">历史、附件与页面 ID 保留，暂不自动清理。</p>
@@ -1141,13 +1510,20 @@ export function PersistentWorkspace() {
           <option key={page.id} value={page.id}>{page.title || '未命名页面'}</option>)}</select>
       <div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button>
         <button className="nb-btn nb-btn-primary" onClick={() => void movePage()}>移动并保存</button></div></Modal>}
-    {dialog === 'import' && pendingImport && <Modal title="导入 Markdown" onClose={() => setDialog(null)}>
-      <p className="dialog-description">转换为新的服务端页面。复杂格式可能变化，请保留原始文件。</p>
-      <div className="import-warning"><strong>转换提示</strong><ul>{assessMarkdown(pendingImport.markdown).warnings.map((warning, index) =>
-        <li key={index}>{warning}</li>)}</ul></div>
+    {dialog === 'folder-import' && workspace && canWrite && <FolderImportDialog userId={session.user.id} workspaceId={workspace.id}
+      csrfToken={session.csrfToken} pages={pages} defaultParentId={activeId} parseMarkdown={parseMarkdownImport}
+      resolveTagIds={names => resolveImportTags(workspace.id, session.csrfToken, names)}
+      onOpenPage={id => { setDialog(null); void openPage(id); }}
+      onImported={() => { void reloadTree(session); void refreshTags().catch(() => undefined); }} onClose={() => setDialog(null)} />}
+    {dialog === 'import' && pendingImport && <Modal title="导入 Markdown" onClose={() => { if (!importResolving) setDialog(null); }}>
+      <p className="dialog-description">创建页面「{pendingImport.title || '未命名页面'}」。</p>
+      {pendingImport.parsed.tagNames.length > 0 && <p>标签 {pendingImport.parsed.tagNames.join('、')}</p>}
+      {pendingImport.parsed.warnings.length > 0 && <div className="import-warning"><strong>转换提示</strong><ul>
+        {pendingImport.parsed.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div>}
+      {noteDialogError && <p role="alert">{noteDialogError}</p>}
       <details className="import-preview"><summary>查看原始文本</summary><pre>{pendingImport.markdown}</pre></details>
-      <div className="dialog-actions"><button className="nb-btn" onClick={() => setDialog(null)}>取消</button>
+      <div className="dialog-actions"><button className="nb-btn" disabled={importResolving} onClick={() => setDialog(null)}>取消</button>
         <button className="nb-btn" onClick={() => download(`${pendingImport.title}-原始文件`, pendingImport.markdown)}>下载原文</button>
-        <button className="nb-btn nb-btn-primary" disabled={createBusy} onClick={completeImport}>转换并创建</button></div></Modal>}
+        <button className="nb-btn nb-btn-primary" disabled={createBusy || importResolving} onClick={() => void completeImport()}>转换并创建</button></div></Modal>}
   </div>;
 }

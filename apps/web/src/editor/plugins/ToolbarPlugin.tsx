@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { TableActions } from './TableActions';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
+import { calloutKinds, calloutTitleMaxLength, isCalloutKind, isCalloutTitle, type CalloutKind } from '@nbase/contracts';
 import { $createTextNode, $getNodeByKey, $getRoot, $getSelection, $isRangeSelection, $setSelection, CAN_REDO_COMMAND, CAN_UNDO_COMMAND, COMMAND_PRIORITY_LOW, FORMAT_TEXT_COMMAND, REDO_COMMAND, UNDO_COMMAND } from 'lexical';
 import type { BaseSelection, LexicalNode, TextFormatType } from 'lexical';
 import { $isHeadingNode } from '@lexical/rich-text';
@@ -14,10 +16,12 @@ import { isSafeLinkUrl } from '../markdown';
 import { $applyBlockStyle } from '../blockStyles';
 import type { BlockStyle } from '../blockStyles';
 import { CODE_LANGUAGES } from '../codeLanguages';
+import { $calloutForNode, $isCalloutNode, $unwrapCallout, calloutLabels } from '../nodes/CalloutNode';
 
-type Props = { readOnly: boolean; onNotice?: ((message: string) => void) | undefined };
-type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; code: boolean; link: string; table: boolean; codeKey: string; codeLanguage: string };
-const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, code: false, link: '', table: false, codeKey: '', codeLanguage: '' };
+type Props = { readOnly: boolean; onNotice?: ((message: string) => void) | undefined; findPanel?: ReactNode };
+type CalloutState = { key: string; kind: CalloutKind; title: string };
+type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; highlight: boolean; code: boolean; link: string; table: boolean; codeKey: string; codeLanguage: string; callout: CalloutState | null };
+const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, highlight: false, code: false, link: '', table: false, codeKey: '', codeLanguage: '', callout: null };
 
 function $enclosingCodeBlock(node: LexicalNode): LexicalNode | null {
   for (let current: LexicalNode | null = node; current; current = current.getParent()) {
@@ -26,7 +30,7 @@ function $enclosingCodeBlock(node: LexicalNode): LexicalNode | null {
   return null;
 }
 
-export function ToolbarPlugin({ readOnly, onNotice }: Props) {
+export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
   const [editor] = useLexicalComposerContext();
   const [state, setState] = useState<ToolbarState>(emptyState);
   const [canUndo, setCanUndo] = useState(false);
@@ -52,10 +56,12 @@ export function ToolbarPlugin({ readOnly, onNotice }: Props) {
           parent = parent.getParent();
         }
         const codeBlock = $enclosingCodeBlock(node);
-        setState({ block, bold: selection.hasFormat('bold'), italic: selection.hasFormat('italic'), strikethrough: selection.hasFormat('strikethrough'), code: selection.hasFormat('code'), link, table: Boolean($getTableCellNodeFromLexicalNode(node)),
-          codeKey: codeBlock?.getKey() ?? '', codeLanguage: $isCodeNode(codeBlock) ? codeBlock.getLanguage() ?? '' : '' });
+        const callout = $calloutForNode(node);
+        setState({ block, bold: selection.hasFormat('bold'), italic: selection.hasFormat('italic'), strikethrough: selection.hasFormat('strikethrough'), highlight: selection.hasFormat('highlight'), code: selection.hasFormat('code'), link, table: Boolean($getTableCellNodeFromLexicalNode(node)),
+          codeKey: codeBlock?.getKey() ?? '', codeLanguage: $isCodeNode(codeBlock) ? codeBlock.getLanguage() ?? '' : '',
+          callout: callout ? { key: callout.getKey(), kind: callout.getKind(), title: callout.getTitle() } : null });
       } else if ($isTableSelection(selection)) {
-        setState((previous) => ({ ...previous, table: true, codeKey: '', codeLanguage: '' }));
+        setState((previous) => ({ ...previous, table: true, codeKey: '', codeLanguage: '', callout: null }));
       }
     };
     editor.read('latest', update);
@@ -91,6 +97,22 @@ export function ToolbarPlugin({ readOnly, onNotice }: Props) {
   };
   const button = (label: string, content: ReactNode, action: () => void, active = false, disabled = false) => <button type="button" title={label} aria-label={label} aria-pressed={active} disabled={readOnly || disabled} className={active ? 'is-active' : ''} onMouseDown={(event) => event.preventDefault()} onClick={action}>{content}</button>;
   const format = (type: TextFormatType) => edit(() => editor.dispatchCommand(FORMAT_TEXT_COMMAND, type));
+  const callout = state.callout;
+  const changeCalloutTitle = (input: HTMLInputElement) => {
+    if (!callout || !editor.isEditable()) return;
+    const title = input.value.trim();
+    if (!isCalloutTitle(title)) {
+      input.value = callout.title;
+      onNotice?.('提示块标题须为单行文字。');
+      return;
+    }
+    input.value = title;
+    if (title === callout.title) return;
+    editor.update(() => {
+      const node = $getNodeByKey(callout.key);
+      if ($isCalloutNode(node)) node.setTitle(title);
+    });
+  };
   const applyLink = () => {
     const url = linkUrl.trim();
     if (url && !isSafeLinkUrl(url)) { setLinkError('请输入 http、https、mailto 或安全的相对链接。'); return; }
@@ -118,6 +140,7 @@ export function ToolbarPlugin({ readOnly, onNotice }: Props) {
         {button('粗体 Ctrl+B', <b>B</b>, () => format('bold'), state.bold)}
         {button('斜体 Ctrl+I', <i>I</i>, () => format('italic'), state.italic)}
         {button('删除线', <s>S</s>, () => format('strikethrough'), state.strikethrough)}
+        {button('文字高亮', <mark className="nbase-highlight">高亮</mark>, () => format('highlight'), state.highlight, state.code || Boolean(state.codeKey))}
         {button('行内代码', <span className="nbase-code-icon">&lt;/&gt;</span>, () => format('code'), state.code)}
       </div>
       <div className="nbase-tool-group">
@@ -125,11 +148,12 @@ export function ToolbarPlugin({ readOnly, onNotice }: Props) {
         {button('插入分割线', '—', () => edit(() => editor.dispatchCommand(INSERT_HORIZONTAL_RULE_COMMAND, undefined)))}
         {button('插入 3 × 3 表格', '表格', () => {
           if (state.table) { onNotice?.('请先将光标移到表格外；暂不支持嵌套表格。'); return; }
-          edit(() => editor.dispatchCommand(INSERT_TABLE_COMMAND, { columns: '3', rows: '3', includeHeaders: true }));
+          edit(() => editor.dispatchCommand(INSERT_TABLE_COMMAND, { columns: '3', rows: '3', includeHeaders: { rows: true, columns: false } }));
         })}
       </div>
       {readOnly && <span className="nbase-readonly-label">只读</span>}
     </div>
+    {findPanel}
     {state.table && !readOnly && <div className="nbase-table-toolbar" role="toolbar" aria-label="表格操作">
       <span>表格</span>
       {button('在上方插入行', '上方插行', () => edit(() => { $insertTableRowAtSelection(false); }))}
@@ -138,7 +162,26 @@ export function ToolbarPlugin({ readOnly, onNotice }: Props) {
       {button('在右侧插入列', '右侧插列', () => edit(() => { $insertTableColumnAtSelection(true); }))}
       {button('删除当前行', '删除行', () => edit($deleteTableRowAtSelection))}
       {button('删除当前列', '删除列', () => edit($deleteTableColumnAtSelection))}
+      <TableActions edit={edit} />
       <small>Tab 切换单元格</small>
+    </div>}
+    {callout && !readOnly && <div className="nbase-callout-toolbar" role="toolbar" aria-label="提示块操作">
+      <select aria-label="提示块类型" value={callout.kind} onChange={event => {
+        const kind = event.target.value;
+        if (isCalloutKind(kind)) edit(() => {
+          const node = $getNodeByKey(callout.key);
+          if ($isCalloutNode(node)) node.setKind(kind);
+        });
+      }}>
+        {calloutKinds.map(kind => <option key={kind} value={kind}>{calloutLabels[kind]}</option>)}
+      </select>
+      <input key={callout.key + ':' + callout.title} aria-label="提示块标题" placeholder="可选标题" maxLength={calloutTitleMaxLength}
+        defaultValue={callout.title} onBlur={event => changeCalloutTitle(event.currentTarget)}
+        onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) event.currentTarget.blur(); }} />
+      {button('转换为普通正文', '转为正文', () => edit(() => {
+        const node = $getNodeByKey(callout.key);
+        if ($isCalloutNode(node)) $unwrapCallout(node);
+      }))}
     </div>}
     {state.codeKey && !readOnly && <div className="nbase-code-toolbar" role="toolbar" aria-label="代码操作">
       <span>代码</span>

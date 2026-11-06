@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, type ReactNode } from 'react';
 import type { PageSummary } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { Menu, type MenuItem } from './Menu';
@@ -15,8 +15,11 @@ export interface SidebarProps {
   onLogout: () => void;
   onSearch: () => void;
   onTrash: () => void;
+  noteActions?: ReactNode;
+  treeControls?: ReactNode;
   onNewPage: () => void;
   onImport: () => void;
+  onImportFolder?: () => void;
   createBusy: boolean;
   pages: PageSummary[];
   activeId: string | null;
@@ -58,6 +61,7 @@ export function Sidebar(props: SidebarProps) {
       <nav className="nb-nav">
         <button className="nb-nav-row" onClick={props.onSearch}><Icon name="search" size={15} /><span>搜索</span><kbd>Ctrl K</kbd></button>
         <button className="nb-nav-row" onClick={props.onTrash}><Icon name="trash" size={15} /><span>回收站</span></button>
+        {props.noteActions}
       </nav>
       {sections.favorites.length > 0 && <div className="nb-section">
         <div className="nb-section-label">收藏</div>
@@ -75,6 +79,7 @@ export function Sidebar(props: SidebarProps) {
       </div>}
       <div className="nb-section nb-section-grow">
         <div className="nb-section-label">页面</div>
+        {props.treeControls}
         {props.treeLoading && <p className="nb-tree-message">正在加载目录…</p>}
         {props.treeError && <p className="nb-tree-message" role="alert">{props.treeError}
           <button onClick={props.onTreeRetry}>重试</button></p>}
@@ -83,6 +88,7 @@ export function Sidebar(props: SidebarProps) {
       <div className="nb-sidebar-foot">
         <button className="nb-nav-row" disabled={props.createBusy} onClick={props.onNewPage}><Icon name="plus" size={15} /><span>新建页面</span></button>
         <button className="nb-nav-row" onClick={props.onImport}><Icon name="upload" size={15} /><span>导入 Markdown</span></button>
+        {props.onImportFolder && <button className="nb-nav-row" onClick={props.onImportFolder}><Icon name="folder" size={15} /><span>导入 Markdown 文件夹</span></button>}
       </div>
     </aside>
   </>;

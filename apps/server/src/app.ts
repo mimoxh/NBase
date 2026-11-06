@@ -2,12 +2,16 @@ import Fastify from 'fastify';
 import fastifyStatic from '@fastify/static';
 import { stat } from 'node:fs/promises';
 import type { HealthResponse } from '@nbase/contracts';
+import type { Pool } from 'pg';
 import type { AuthRepository } from './auth/repository.js';
 import { registerAuthRoutes } from './auth/routes.js';
 import { registerPageRoutes } from './pages/routes.js';
 import type { PgPageRepository } from './pages/repository.js';
 import { registerAttachmentRoutes } from './attachments/routes.js';
 import type { PgAttachmentRepository } from './attachments/repository.js';
+import { registerTemplateRoutes, renderNoteTemplate } from './notes/templates.js';
+import { registerTagRoutes } from './notes/tags.js';
+import { registerDailyRoutes } from './notes/daily.js';
 
 interface AuthOptions {
   repository: AuthRepository;
@@ -20,12 +24,14 @@ interface AppOptions {
   auth?: AuthOptions;
   pages?: PgPageRepository;
   attachments?: PgAttachmentRepository;
+  notesPool?: Pool;
   readyCheck?: () => Promise<void>;
 }
 
 export async function buildApp(options: AppOptions = {}) {
   if (options.pages && !options.auth) throw new Error('Page routes require authentication');
   if (options.attachments && !options.auth) throw new Error('Attachment routes require authentication');
+  if (options.notesPool && (!options.auth || !options.pages)) throw new Error('Note routes require authentication and pages');
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: 2 * 1024 * 1024 });
   app.get('/api/health', async (): Promise<HealthResponse> => ({
     service: 'nbase',
@@ -49,6 +55,11 @@ export async function buildApp(options: AppOptions = {}) {
   if (options.auth) {
     registerAuthRoutes(app, options.auth.repository, options.auth.publicOrigin);
     if (options.pages) registerPageRoutes(app, options.pages, options.auth.repository, options.auth.publicOrigin);
+    if (options.pages && options.notesPool) {
+      registerTagRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
+      registerTemplateRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
+      registerDailyRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin, renderNoteTemplate);
+    }
     if (options.attachments) registerAttachmentRoutes(app, options.attachments,
       options.auth.repository, options.auth.publicOrigin);
   }

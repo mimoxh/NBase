@@ -1,4 +1,6 @@
 import type { StoredDocumentContent } from '@nbase/contracts';
+import { readMarkdownFrontMatter } from '../editor/markdownFrontMatter';
+import { rewriteMarkdownProse } from '../editor/markdownReferences';
 
 export interface ExportAttachment {
   id: string;
@@ -32,10 +34,13 @@ export function exportAttachments(content: StoredDocumentContent): ExportAttachm
 export function portableMarkdown(markdown: string, attachments: ExportAttachment[]): string {
   const paths = new Map(attachments.map(item => [item.id.toLowerCase(),
     `attachments/${item.id.toLowerCase()}${extensionByType[item.mediaType]}`]));
-  return markdown.replace(/\]\(nbase-attachment:([0-9a-f-]{36})\)/gi, (match, id: string) => {
+  const header = readMarkdownFrontMatter(markdown);
+  const body = header.preservedAsSource ? markdown : header.body;
+  const prefix = markdown.slice(0, markdown.length - body.length);
+  return prefix + rewriteMarkdownProse(body, prose => prose.replace(/\]\(nbase-attachment:([0-9a-f-]{36})\)/gi, (match, id: string) => {
     const path = paths.get(id.toLowerCase());
     return path ? `](${path})` : match;
-  });
+  }));
 }
 
 export interface ZipEntry { name: string; bytes: Uint8Array<ArrayBuffer> }

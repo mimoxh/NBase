@@ -125,7 +125,7 @@ test('owner maintenance is atomic and invalidates in-flight logins in both lock 
     assert.equal(await repository.createSession(current, createSessionTokens()), false);
   } finally {
     await pool?.end();
-    if (created) await admin.query(`DROP DATABASE "${databaseName}" WITH (FORCE)`);
+    if (created) await admin.query(`DROP DATABASE "${databaseName}"`);
     await admin.end();
   }
 });

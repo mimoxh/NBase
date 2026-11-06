@@ -1,0 +1,27 @@
+.nbase-footnote-reference,
+.nbase-footnote-definition > [data-nbase-footnote-back] {
+  background: transparent;
+  border: 0;
+  color: var(--nb-accent);
+  cursor: pointer;
+  font: inherit;
+  padding: 0 0.2em;
+  text-decoration: underline;
+}
+
+.nbase-footnote-reference:focus-visible,
+.nbase-footnote-definition > [data-nbase-footnote-back]:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+.nbase-footnote-definition {
+  border-top: 1px solid var(--nb-line);
+  margin-block: 1rem;
+  padding-block: 0.5rem;
+}
+
+.nbase-footnote-status {
+  color: var(--nb-muted);
+  margin-inline-start: 0.3em;
+}

@@ -21,7 +21,7 @@ try {
     logger: true,
     staticRoot,
     ...(pool && publicOrigin ? { auth: { repository: new PgAuthRepository(pool), publicOrigin } } : {}),
-    ...(pool ? { pages: new PgPageRepository(pool) } : {}),
+    ...(pool ? { pages: new PgPageRepository(pool), notesPool: pool } : {}),
     ...(pool && attachmentRoot ? { attachments: new PgAttachmentRepository(pool, attachmentRoot) } : {}),
     ...(pool && attachmentRoot ? { readyCheck: async () => {
       // pool.query owns this one-shot connection and discards it on timeout.

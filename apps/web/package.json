@@ -26,9 +26,11 @@
     "@nbase/contracts": "*",
     "katex": "0.19.1",
     "lexical": "0.52.0",
+    "mermaid": "12.3.0",
     "prismjs": "1.30.0",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "yaml": "2.9.1"
   },
   "devDependencies": {
     "@types/prismjs": "1.26.6",

@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DocumentEditor } from './DocumentEditor';
 import { createContentFromMarkdown } from './markdown';
+import { parseSourceEdit, prepareSourceEdit } from './sourceEditing';
 import { preparePastedHtml } from './plugins/SafePastePlugin';
 import type { DocumentContent, DocumentEditorHandle } from './types';
 
@@ -26,6 +27,26 @@ afterEach(async () => {
 });
 
 describe('mounted document editor', () => {
+  it('applies a whole source conversion as one undoable edit, and ignores unchanged or read-only applications', async () => {
+    const ref = createRef<DocumentEditorHandle>();
+    const onChange = vi.fn();
+    const original = createContentFromMarkdown('原正文\n\n第二段');
+    const converted = createContentFromMarkdown('# 新标题\n\n> [!NOTE] 源码\n> ==高亮==\n\n| 列 |\n| --- |\n| 值 |');
+    await act(() => root.render(<DocumentEditor ref={ref} documentId="source-apply" initialContent={original} onChange={onChange} />));
+    await act(() => { expect(ref.current!.replaceContent(original)).toBe(false); });
+    expect(onChange).not.toHaveBeenCalled();
+    await act(() => { expect(ref.current!.replaceContent(converted)).toBe(true); });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(ref.current!.getSnapshot().markdown).toContain('==高亮==');
+    await act(() => host.querySelector<HTMLButtonElement>('[aria-label="撤销"]')!.click());
+    expect(ref.current!.getSnapshot().markdown).toBe('原正文\n\n第二段');
+    await act(() => host.querySelector<HTMLButtonElement>('[aria-label="重做"]')!.click());
+    expect(ref.current!.getSnapshot().markdown).toContain('# 新标题');
+    await act(() => root.render(<DocumentEditor ref={ref} documentId="source-apply" initialContent={original} readOnly onChange={onChange} />));
+    await act(() => { expect(ref.current!.replaceContent(original)).toBe(false); });
+    expect(ref.current!.getSnapshot().markdown).toContain('# 新标题');
+  });
+
   it('opens versioned content, exposes current Markdown and does not mark initial load dirty', async () => {
     const ref = createRef<DocumentEditorHandle>();
     const onReady = vi.fn();
@@ -79,6 +100,32 @@ describe('mounted document editor', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it('folds nested sections, reveals them from navigation, and preserves every block', async () => {
+    const ref = createRef<DocumentEditorHandle>();
+    const onChange = vi.fn();
+    const markdown = '# 总览\n\n开头\n\n## 子节\n\n可定位的中文\n\n# 后记\n\n末尾';
+    const render = (readOnly = false, documentId = 'folding') =>
+      root.render(<DocumentEditor ref={ref} documentId={documentId} initialMarkdown={markdown} readOnly={readOnly} onChange={onChange} />);
+    const button = (label: string) => host.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!;
+    const hidden = () => [...host.querySelectorAll('[data-nbase-folded]')].map(element => element.textContent);
+    await act(() => render());
+    const snapshot = ref.current!.getSnapshot();
+    await act(() => button('折叠章节 子节').click());
+    await act(() => button('折叠章节 总览').click());
+    await act(() => button('折叠章节 后记').click());
+    expect(hidden()).toEqual(['开头', '子节', '可定位的中文', '末尾']);
+    await act(() => render(true));
+    expect(hidden()).toContain('子节');
+    await act(() => ref.current!.jumpToHeading(snapshot.outline[1]!.id));
+    expect(hidden()).toEqual(['可定位的中文', '末尾']);
+    await act(() => { expect(ref.current!.findText('可定位的中文')).toBe(true); });
+    expect(hidden()).toEqual(['末尾']);
+    expect(ref.current!.getSnapshot()).toEqual(snapshot);
+    expect(onChange).not.toHaveBeenCalled();
+    await act(() => render(false, 'another-page'));
+    expect(hidden()).toEqual([]);
+  });
+
   it('applies a block command and immediately exports the changed document', async () => {
     const ref = createRef<DocumentEditorHandle>();
     const onChange = vi.fn();
@@ -105,6 +152,50 @@ describe('mounted document editor', () => {
     expect(host.querySelector('table')).toBeNull();
     await act(() => (host.querySelector('[aria-label="重做"]') as HTMLButtonElement).click());
     expect(host.querySelectorAll('table tr')).toHaveLength(3);
+  });
+
+  it('applies and undoes source changes around a table inserted from the toolbar', async () => {
+    const ref = createRef<DocumentEditorHandle>();
+    await act(() => root.render(<DocumentEditor ref={ref} documentId="table-source"
+      initialMarkdown="表格外的原正文" onChange={() => {}} />));
+    await act(() => ref.current!.focus());
+    await act(() => host.querySelector<HTMLButtonElement>('[aria-label="插入 3 × 3 表格"]')!.click());
+    const before = ref.current!.getSnapshot();
+    const prepared = prepareSourceEdit(before.content);
+    expect(prepared.diagnostics).toEqual([]);
+    expect(prepared.canApply).toBe(true);
+    expect(host.querySelectorAll('table tr:first-child th')).toHaveLength(3);
+    expect(host.querySelectorAll('table tr:not(:first-child) td')).toHaveLength(6);
+    const parsed = parseSourceEdit(prepared.source.replace('表格外的原正文', '源码修改后的正文'), before.content);
+    expect(parsed.diagnostics).toEqual([]);
+    expect(parsed.content).not.toBeNull();
+    await act(() => { expect(ref.current!.replaceContent(parsed.content!)).toBe(true); });
+    expect(ref.current!.getSnapshot().plainText).toContain('源码修改后的正文');
+    expect(host.querySelectorAll('table tr')).toHaveLength(3);
+    await act(() => host.querySelector<HTMLButtonElement>('[aria-label="撤销"]')!.click());
+    expect(ref.current!.getSnapshot().content).toEqual(before.content);
+    await act(() => host.querySelector<HTMLButtonElement>('[aria-label="重做"]')!.click());
+    expect(ref.current!.getSnapshot().plainText).toContain('源码修改后的正文');
+    expect(prepareSourceEdit(ref.current!.getSnapshot().content).canApply).toBe(true);
+  });
+
+  it('keeps tables inserted with the slash command within the same source contract', async () => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} });
+    const ref = createRef<DocumentEditorHandle>();
+    await act(() => root.render(<DocumentEditor ref={ref} documentId="slash-table-source"
+      initialMarkdown={'表格外正文\n\n/table'} onChange={() => {}} />));
+    await act(() => ref.current!.focus());
+    const option = [...document.querySelectorAll<HTMLLIElement>('[role="option"]')]
+      .find(item => item.querySelector('span')?.textContent === '表格');
+    expect(option).toBeDefined();
+    await act(() => option!.click());
+    expect(host.querySelectorAll('table tr:first-child th')).toHaveLength(3);
+    expect(host.querySelectorAll('table tr:not(:first-child) td')).toHaveLength(6);
+    const content = ref.current!.getSnapshot().content;
+    const prepared = prepareSourceEdit(content);
+    expect(prepared.diagnostics).toEqual([]);
+    expect(prepared.source).not.toContain('/table');
+    expect(parseSourceEdit(prepared.source.replace('表格外正文', '修改后的正文'), content).diagnostics).toEqual([]);
   });
 
   it('keeps readable rich paste while warning only about unsupported media and unsafe links', async () => {

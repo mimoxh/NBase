@@ -1,19 +1,20 @@
 import { Component, forwardRef, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode, Ref } from 'react';
-import { createEditor } from 'lexical';
+import { createEditor, HISTORY_PUSH_TAG } from 'lexical';
+import type { HistoryState } from '@lexical/history';
 import { LexicalComposer } from '@lexical/react/LexicalComposer';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
 import { ContentEditable } from '@lexical/react/LexicalContentEditable';
 import { LexicalErrorBoundary } from '@lexical/react/LexicalErrorBoundary';
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin';
-import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin';
+import { createEmptyHistoryState, HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin';
 import { ListPlugin } from '@lexical/react/LexicalListPlugin';
 import { CheckListPlugin } from '@lexical/react/LexicalCheckListPlugin';
 import { LinkPlugin } from '@lexical/react/LexicalLinkPlugin';
 import { TablePlugin } from '@lexical/react/LexicalTablePlugin';
 import { HorizontalRulePlugin } from '@lexical/react/LexicalHorizontalRulePlugin';
 import { MarkdownShortcutPlugin } from '@lexical/react/LexicalMarkdownShortcutPlugin';
-import { $collectOutline, $createSnapshot, createContentFromMarkdown, isSafeLinkUrl, MARKDOWN_TRANSFORMERS } from './markdown';
+import { createContentFromMarkdown, isSafeLinkUrl, MARKDOWN_TRANSFORMERS, readEditorSnapshot } from './markdown';
 import { EDITOR_NODES } from './nodes';
 import type { DocumentEditorHandle, DocumentEditorProps } from './types';
 import { ToolbarPlugin } from './plugins/ToolbarPlugin';
@@ -22,14 +23,22 @@ import { CodeHighlightPlugin } from './plugins/CodeHighlightPlugin';
 import { CodeCopyPlugin } from './plugins/CodeCopyPlugin';
 import { EquationPlugin } from './plugins/EquationPlugin';
 import { SlashCommandPlugin } from './plugins/SlashCommandPlugin';
+import { CalloutPlugin } from './plugins/CalloutPlugin';
+import { FindReplacePlugin } from './plugins/FindReplacePlugin';
+import { SectionFoldingPlugin, type SectionFoldingHandle } from './plugins/SectionFoldingPlugin';
+import { PageReferencesProvider } from './nodes/PageReferenceNode';
+import { PageReferencePlugin } from './plugins/PageReferencePlugin';
+import { MermaidPlugin } from './plugins/MermaidPlugin';
+import { FootnoteNavigationPlugin } from './nodes/FootnoteNodes';
 import { $insertAttachments, AttachmentWorkspaceContext } from './nodes/AttachmentNode';
 import 'katex/dist/katex.min.css';
 import './editor.css';
+import './formats.css';
 
 const theme = {
   paragraph: 'nbase-paragraph', quote: 'nbase-quote', link: 'nbase-link',
   heading: { h1: 'nbase-heading-1', h2: 'nbase-heading-2', h3: 'nbase-heading-3' },
-  text: { bold: 'nbase-bold', italic: 'nbase-italic', strikethrough: 'nbase-strikethrough', code: 'nbase-inline-code' },
+  text: { bold: 'nbase-bold', italic: 'nbase-italic', strikethrough: 'nbase-strikethrough', code: 'nbase-inline-code', highlight: 'nbase-highlight' },
   list: { ul: 'nbase-list-ul', ol: 'nbase-list-ol', listitem: 'nbase-list-item', listitemChecked: 'nbase-check-checked', listitemUnchecked: 'nbase-check-unchecked', nested: { listitem: 'nbase-list-nested' } },
   code: 'nbase-code-block', table: 'nbase-table', tableCell: 'nbase-table-cell', tableCellHeader: 'nbase-table-header', tableCellSelected: 'nbase-table-selected', tableSelection: 'nbase-table-selection', tableRow: 'nbase-table-row', hr: 'nbase-rule',
   codeHighlight: {
@@ -54,7 +63,7 @@ class EditorBoundary extends Component<{ children: ReactNode; original: string }
 }
 
 /** Select a visible match without changing Lexical nodes or persisting a search highlight. */
-function findVisibleText(root: HTMLElement, phrase: string): boolean {
+function findVisibleText(root: HTMLElement, phrase: string, reveal: (element: HTMLElement) => void): boolean {
   if (!phrase) return false;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
@@ -79,6 +88,8 @@ function findVisibleText(root: HTMLElement, phrase: string): boolean {
     const first = segments.find(item => item.end > position);
     const last = segments.find(item => item.end >= position + phrase.length);
     if (first && last) {
+      if (first.node.parentElement) reveal(first.node.parentElement);
+      if (last.node.parentElement && last.node.parentElement !== first.node.parentElement) reveal(last.node.parentElement);
       root.focus({ preventScroll: true });
       const range = document.createRange();
       range.setStart(first.node, Math.max(0, position - first.start));
@@ -91,55 +102,78 @@ function findVisibleText(root: HTMLElement, phrase: string): boolean {
   }
   const attachment = [...root.querySelectorAll<HTMLElement>('.nbase-attachment-node')].find(item =>
     [item.dataset.fileName, item.dataset.alt].some(value => value?.toLocaleLowerCase().includes(phrase.toLocaleLowerCase())));
-  if (attachment) { attachment.scrollIntoView?.({ behavior: 'smooth', block: 'center' }); return true; }
+  if (attachment) { reveal(attachment); attachment.scrollIntoView?.({ behavior: 'smooth', block: 'center' }); return true; }
   const equation = [...root.querySelectorAll<HTMLElement>('.nbase-equation-node')].find(item =>
     item.dataset.equation?.toLocaleLowerCase().includes(phrase.toLocaleLowerCase()));
-  if (equation) { equation.scrollIntoView?.({ behavior: 'smooth', block: 'center' }); return true; }
+  if (equation) { reveal(equation); equation.scrollIntoView?.({ behavior: 'smooth', block: 'center' }); return true; }
+  const callout = [...root.querySelectorAll<HTMLElement>('[data-callout-label]')].find(item =>
+    item.dataset.calloutLabel?.toLocaleLowerCase().includes(phrase.toLocaleLowerCase()));
+  if (callout) { reveal(callout); callout.scrollIntoView?.({ behavior: 'smooth', block: 'center' }); return true; }
   return false;
 }
 
-function StateBridge({ props, editorRef }: { props: DocumentEditorProps; editorRef: Ref<DocumentEditorHandle> }) {
+function StateBridge({ props, editorRef, folding, history }: { props: DocumentEditorProps; editorRef: Ref<DocumentEditorHandle>;
+  history: HistoryState;
+  folding: { current: SectionFoldingHandle | null } }) {
   const [editor] = useLexicalComposerContext();
   const callbacks = useRef(props);
   callbacks.current = props;
   useImperativeHandle(editorRef, () => ({
-    getSnapshot: () => editor.read('latest', $createSnapshot),
+    getSnapshot: () => readEditorSnapshot(editor.getEditorState()),
     focus: () => { if (editor.isEditable()) editor.focus(); },
     insertAttachments: attachments => {
       if (editor.isEditable() && attachments.length) editor.update(() => $insertAttachments(attachments));
     },
+    replaceContent: content => {
+      if (!editor.isEditable() || content.schemaVersion !== 1) return false;
+      const next = editor.parseEditorState(content.editorState);
+      if (next.isEmpty()) throw new Error('转换后的正文为空或不完整。');
+      if (JSON.stringify(readEditorSnapshot(editor.getEditorState()).content)
+        === JSON.stringify(readEditorSnapshot(next).content)) return false;
+      history.current ??= { editor, editorState: editor.getEditorState() };
+      editor.setEditorState(next, { tag: HISTORY_PUSH_TAG });
+      return true;
+    },
     findText: phrase => {
       const root = editor.getRootElement();
-      return root ? findVisibleText(root, phrase) : false;
+      return root ? findVisibleText(root, phrase, element => folding.current?.reveal(element)) : false;
     },
-  }), [editor]);
+    jumpToHeading: id => folding.current?.jump(id),
+    locatePageReference: (targetPageId, occurrence) => {
+      const nodes = editor.getRootElement()?.querySelectorAll<HTMLElement>('[data-nbase-page-reference]');
+      if (!nodes) return false;
+      const node = occurrence === undefined ? [...nodes].find(item => item.dataset.nbasePageReference === targetPageId)
+        : nodes.item(occurrence);
+      if (!node || node.dataset.nbasePageReference !== targetPageId) return false;
+      folding.current?.reveal(node);
+      node.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      node.querySelector<HTMLElement>('a,button')?.focus({ preventScroll: true });
+      return true;
+    },
+  }), [editor, folding, history]);
   useLayoutEffect(() => { editor.setEditable(!props.readOnly); }, [editor, props.readOnly]);
   useLayoutEffect(() => {
-    const initial = editor.read('latest', $createSnapshot);
+    const initial = readEditorSnapshot(editor.getEditorState());
     let signature = JSON.stringify(initial.content.editorState);
+    folding.current?.refresh(initial.outline);
     callbacks.current.onReady?.(props.documentId, initial);
-    const updateAnchors = () => editor.read('latest', () => {
-      for (const item of $collectOutline()) {
-        const element = editor.getElementByKey(item.id.replace(/^heading-/, ''));
-        if (element) element.id = item.id;
-      }
-    });
-    updateAnchors();
     return editor.registerUpdateListener(({ editorState, dirtyElements, dirtyLeaves }) => {
-      updateAnchors();
       if (dirtyElements.size === 0 && dirtyLeaves.size === 0) return;
-      const snapshot = editorState.read($createSnapshot, { editor });
+      const snapshot = readEditorSnapshot(editorState);
+      folding.current?.refresh(snapshot.outline);
       const nextSignature = JSON.stringify(snapshot.content.editorState);
       if (nextSignature === signature) return;
       signature = nextSignature;
       callbacks.current.onChange(props.documentId, snapshot);
     });
-  }, [editor, props.documentId]);
+  }, [editor, folding, props.documentId]);
   return null;
 }
 
 function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; editorRef: Ref<DocumentEditorHandle> }) {
   const [failure, setFailure] = useState('');
+  const history = useMemo(createEmptyHistoryState, []);
+  const folding = useRef<SectionFoldingHandle>(null);
   const noticeRef = useRef(props.onNotice);
   noticeRef.current = props.onNotice;
   const config = useMemo(() => {
@@ -157,23 +191,29 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
     },
   // The initial state belongs to this mounted document; edits never replace it.
   }; }, []);
-  return <AttachmentWorkspaceContext.Provider value={props.workspaceId ?? null}><LexicalComposer initialConfig={config}>
+  return <AttachmentWorkspaceContext.Provider value={props.workspaceId ?? null}>
+    <PageReferencesProvider references={props.pageReferences}><LexicalComposer initialConfig={config}>
     <div className="document-editor" data-readonly={Boolean(props.readOnly)}>
       {failure && <div className="nbase-editor-error" role="alert"><strong>编辑器发生错误，原始内容仍保留。</strong><span>{failure}</span><details><summary>查看打开时的原始内容</summary><pre>{props.initialMarkdown ?? JSON.stringify(props.initialContent, null, 2)}</pre></details></div>}
-      <ToolbarPlugin readOnly={Boolean(props.readOnly)} onNotice={props.onNotice} />
+      <ToolbarPlugin readOnly={Boolean(props.readOnly)} onNotice={props.onNotice}
+        findPanel={<FindReplacePlugin title={props.title} onReplaceTitle={props.onReplaceTitle}
+          readOnly={Boolean(props.readOnly)} reveal={element => folding.current?.reveal(element)} historyState={history} />} />
       <div className="nbase-editor-surface">
         <RichTextPlugin contentEditable={<ContentEditable className="nbase-editor-content" aria-label="文档正文" spellCheck={false} />} placeholder={<div className="nbase-editor-placeholder">{props.readOnly ? '这篇文档暂无正文。' : '输入 / 选择样式，或 # 标题、- 列表…'}</div>} ErrorBoundary={LexicalErrorBoundary} />
       </div>
-      <HistoryPlugin /><ListPlugin /><CheckListPlugin />
+      <HistoryPlugin externalHistoryState={history} /><ListPlugin /><CheckListPlugin />
       <LinkPlugin validateUrl={isSafeLinkUrl} attributes={{ rel: 'noopener noreferrer' }} />
       <TablePlugin hasTabHandler hasHorizontalScroll hasNestedTables={false} />
       <HorizontalRulePlugin /><MarkdownShortcutPlugin transformers={MARKDOWN_TRANSFORMERS} />
       <CodeHighlightPlugin /><CodeCopyPlugin onNotice={props.onNotice} />
-      <EquationPlugin /><SlashCommandPlugin />
+      <EquationPlugin /><SlashCommandPlugin /><CalloutPlugin /><PageReferencePlugin historyState={history} />
+      <MermaidPlugin historyState={history} />
+      <FootnoteNavigationPlugin reveal={element => folding.current?.reveal(element)} />
       <SafePastePlugin onNotice={props.onNotice} onUploadFiles={props.onUploadFiles} />
-      <StateBridge props={props} editorRef={editorRef} />
+      <SectionFoldingPlugin ref={folding} />
+      <StateBridge props={props} editorRef={editorRef} folding={folding} history={history} />
     </div>
-  </LexicalComposer></AttachmentWorkspaceContext.Provider>;
+  </LexicalComposer></PageReferencesProvider></AttachmentWorkspaceContext.Provider>;
 }
 
 export const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(function DocumentEditor(props, ref) {
