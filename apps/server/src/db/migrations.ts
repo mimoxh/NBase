@@ -283,4 +283,20 @@ WHERE r.operation IN ('create', 'update', 'trash', 'restore', 'restore-version',
   AND v.content_json = r.response_json->'content';
 `,
   },
+  {
+    version: 12,
+    name: 'page_sort_position',
+    sql: `
+CREATE SEQUENCE pages_sort_position_seq;
+ALTER TABLE pages ADD COLUMN sort_position bigint;
+UPDATE pages p SET sort_position = ranked.position * 1024
+FROM (SELECT id, row_number() OVER (ORDER BY created_at, id) AS position FROM pages) ranked
+WHERE ranked.id = p.id;
+SELECT setval('pages_sort_position_seq', (SELECT count(*) + 1 FROM pages), false);
+ALTER TABLE pages ALTER COLUMN sort_position SET DEFAULT nextval('pages_sort_position_seq') * 1024;
+ALTER TABLE pages ALTER COLUMN sort_position SET NOT NULL;
+ALTER SEQUENCE pages_sort_position_seq OWNED BY pages.sort_position;
+CREATE INDEX pages_sibling_order_idx ON pages (workspace_id, parent_id, sort_position, id) WHERE deleted_at IS NULL;
+`,
+  },
 ];

@@ -1,0 +1,5 @@
+.nbase-floating-toolbar { position:fixed; z-index:30; display:flex; align-items:center; gap:1px; padding:3px; background:var(--nb-bg,#fff); color:var(--nb-text,#2e3229); border:1px solid var(--editor-line); border-radius:8px; box-shadow:var(--nb-shadow-sm,0 3px 12px rgba(60,64,55,.14)); font-size:12px; }
+.nbase-floating-toolbar button { min-width:26px; min-height:26px; border:0; border-radius:5px; padding:3px 6px; background:transparent; color:inherit; font:inherit; cursor:pointer; }
+.nbase-floating-toolbar button:hover { background:var(--nb-hover,#f3f4f0); }
+.nbase-floating-toolbar button.is-active { background:var(--nb-accent-soft,#e8ede2); color:var(--nb-accent-text,#4c6736); }
+.nbase-floating-toolbar button:focus-visible { outline:2px solid var(--nb-accent-text,#647a45); outline-offset:1px; }

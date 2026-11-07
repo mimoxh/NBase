@@ -39,3 +39,31 @@ npm start
 P2 故障验收另用 4320 构建后应用、只监听 `localhost:4321` 的 `scripts/p2-fault-proxy.mjs` 和专用验收库进行；代理与 4320 应用在验收后已停止，验收库保留供复核。一次性验收 owner 密码放在系统临时目录，不作为工作库密码。详见 [验证记录](../validation.md) 最后一节。
 
 镜像卷路径使用 PostgreSQL 18 官方镜像的 `/var/lib/postgresql`；17 及更早版本的卷路径不同，不能直接替换主版本复用此卷。[Docker 官方镜像说明](https://hub.docker.com/_/postgres)和[Docker Desktop Windows 安装说明](https://docs.docker.com/desktop/setup/install/windows-install/)是本机安装依据。
+
+## 2026-11-07：便携 PostgreSQL（当前可用的测试库）
+
+Docker Desktop 已不在这台机器上。为完成数据库验收，用户确认改用 EDB 官方免安装版，只用于可丢弃的测试数据。
+
+| 项目 | 配置 |
+| --- | --- |
+| 程序 | `postgresql-18.6-2-windows-x64-binaries.zip`，来自 get.enterprisedb.com，343,811,176 字节，SHA-256 `41bb1496f60666d3745ae8a855753b877d14fa9e34667f266867635b790fc323`。EDB 不为 zip 版签名，也不公布校验值 |
+| 目录 | `C:\Users\mimox\NBaseData\postgres18`（`dist` 程序、`data` 数据、`download` 原始包），不在仓库和 OneDrive 内 |
+| 地址 | 只监听 `127.0.0.1:54329` |
+| 账号 | 超级用户与初始库均为 `nbase_p2`，scram-sha-256。随机密码在 `C:\Users\mimox\NBaseData\postgres18\superuser.password`，不进仓库 |
+| 运行库 | 系统没有 Visual C++ 运行库，已把 Edge 目录中微软签名的 x64 `msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`（14.51）复制到 `dist\pgsql\bin`，未改动系统。安装官方 VC++ 可再发行组件后可删除这三个文件 |
+
+启动（在普通终端运行，保持窗口打开；Ctrl+C 停止）：
+
+```powershell
+& 'C:\Users\mimox\NBaseData\postgres18\dist\pgsql\bin\postgres.exe' -D 'C:\Users\mimox\NBaseData\postgres18\data'
+```
+
+运行数据库测试：
+
+```powershell
+$pw = Get-Content 'C:\Users\mimox\NBaseData\postgres18\superuser.password' -Raw
+$env:NBASE_TEST_DATABASE_URL = "postgres://nbase_p2:$pw@127.0.0.1:54329/nbase_p2"
+npm run test:db --workspace @nbase/server
+```
+
+注意两点：Claude 桌面应用的命令环境会把写入 `AppData\Local` 的文件重定向到应用包缓存，因此目录放在 `NBaseData`；从该命令环境用 `pg_ctl` 启动时，后端进程会以 `0xC0000142` 退出，须在普通终端启动。这个实例不能代替 Docker 维护镜像里的备份恢复演练。

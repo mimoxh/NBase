@@ -1,5 +1,6 @@
 import { pageIdFromReferenceUrl, pageReferenceUrl, type PageDocument, type PageSummary } from '@nbase/contracts';
 import { exportAttachments, zipEntries, type ZipEntry } from './attachmentExport';
+import { attachmentPresentations, hasAttachmentPresentation, withCaptionParagraphs } from './attachmentPresentation';
 import { folderMarkdownLink, mapFolderDocument } from './folderLinks';
 import {
   folderAttachmentExtensions, folderBytesLimit, folderFileLimit, folderMarkdownLimit, subtreeManifestFormat, type SubtreeManifest,
@@ -74,7 +75,8 @@ export async function packageFolderSubtree(options: FolderExportOptions): Promis
       attachmentPaths.set(attachment.id, path);
       manifest.attachments.push({ path, fileName: attachment.fileName });
     }
-    const portable = mapFolderDocument(page.content, node => {
+    const presentations = attachmentPresentations(page.content);
+    const portable = mapFolderDocument(withCaptionParagraphs(page.content), node => {
       if (node.type === 'page-reference' && typeof node.targetPageId === 'string') {
         const destination = paths.get(node.targetPageId);
         if (destination) return folderMarkdownLink('./' + destination.slice('pages/'.length), String(node.label));
@@ -91,7 +93,7 @@ export async function packageFolderSubtree(options: FolderExportOptions): Promis
     const path = paths.get(page.id)!;
     add(path, encoder.encode(await options.formatMarkdown({ ...page, content: portable })));
     manifest.pages.push({ path, parentPath: page.id === options.rootPageId || !page.parentId ? null : paths.get(page.parentId) ?? null,
-      title: page.title });
+      title: page.title, ...(hasAttachmentPresentation(presentations) ? { presentations } : {}) });
   }
   add('manifest.json', encoder.encode(JSON.stringify(manifest, null, 2)));
   return zipEntries(entries);

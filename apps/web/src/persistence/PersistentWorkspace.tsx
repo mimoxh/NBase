@@ -5,6 +5,8 @@ import type { AuthSessionResponse, DailyNoteSettings, DailyNoteStatus, NoteTempl
 import { pageIdFromReferenceUrl } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { DocumentEditor } from '../editor/DocumentEditor';
+import { placePage, type PagePlacement } from '../shell/pageOrder';
+import { readingMenuItems, useReadingPrefs } from '../shell/readingPrefs';
 import { SourceEditorDialog } from '../editor/SourceEditorDialog';
 import { createContentFromMarkdown, markdownFromContent, parseMarkdownImport } from '../editor/markdown';
 import type { AttachmentPickKind, DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
@@ -57,6 +59,7 @@ export function PersistentWorkspace() {
   const [reauth, setReauth] = useState(false);
   const [showReauthForm, setShowReauthForm] = useState(false);
   const [pages, setPages] = useState<PageSummary[]>([]);
+  const [readingPrefs, setReadingPrefs] = useReadingPrefs();
   const [recentIds, setRecentIds] = useState<string[]>([]);
   const [favoriteIds, setFavoriteIds] = useState<string[]>([]);
   const [sidebarHidden, setSidebarHidden] = useState(() => { try { return localStorage.getItem('nbase.sidebar') === 'collapsed'; } catch { return false; } });
@@ -626,6 +629,19 @@ export function PersistentWorkspace() {
     } catch (error) { setNotice(message(error)); if (isAuthError(error)) setReauth(true); return false; }
   };
 
+  const placePageInTree = async (pageId: string, placement: PagePlacement) => {
+    if (!session || !workspace || !canWrite) return;
+    const page = pages.find(item => item.id === pageId);
+    if (!page) return;
+    if (page.parentId !== placement.parentId) {
+      if (!await updatePageMeta(pageId, { parentId: placement.parentId }, '页面已移动并保存。', '请先解决本页的保存问题，再移动页面。')) return;
+    }
+    try {
+      await pageClient.setPosition(workspace.id, pageId, placement.afterId, session.csrfToken);
+      setPages(previous => placePage(previous, pageId, placement));
+    } catch (error) { setNotice(message(error)); if (isAuthError(error)) setReauth(true); }
+  };
+
   const movePage = async () => {
     if (!activeId || !session || !workspace || !documentPage) return;
     if (moveTarget === activeId || pages.some(page => {
@@ -809,8 +825,11 @@ export function PersistentWorkspace() {
       });
     },
     onTrash: (id: string) => { void openPage(id).then(opened => { if (opened) setDialog('delete'); }); },
+    ...(canWrite ? { onPlace: (id: string, placement: PagePlacement) => { void placePageInTree(id, placement); } } : {}),
   };
   const pageMenuItems: (MenuItem | 'divider')[] = current ? [
+    ...readingMenuItems(readingPrefs, setReadingPrefs),
+    'divider',
     { key: 'mode', label: readOnly ? '切换为编辑' : '切换为阅读', icon: 'focus', disabled: !canWrite, onSelect: () => setReadOnly(!readOnly) },
     { key: 'attach', label: '添加图片或附件', icon: 'image', disabled: editorReadOnly, onSelect: () => pickAttachment('file') },
     { key: 'source', label: 'Markdown 源码', icon: 'code', onSelect: openSource },

@@ -8,7 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json",
     "test": "node --import tsx --test test/app.test.ts test/migrate.test.ts test/password.test.ts test/initialize-owner.test.ts test/session.test.ts test/auth-routes.test.ts test/page-validate.test.ts test/search-text.test.ts test/config.test.ts test/daily-content.test.ts test/mermaid-content.test.ts",
-    "test:db": "node --import tsx --test --test-concurrency=1 test/page-db.test.ts test/owner-db.test.ts test/tag-db.test.ts test/daily-db.test.ts test/templates-db.test.ts test/page-links-db.test.ts test/receipt-db.test.ts",
+    "test:db": "node --import tsx --test --test-concurrency=1 test/page-db.test.ts test/owner-db.test.ts test/tag-db.test.ts test/daily-db.test.ts test/templates-db.test.ts test/page-links-db.test.ts test/receipt-db.test.ts test/page-position-db.test.ts test/migrate-v12-db.test.ts",
     "migrate": "node dist/db/migrate-cli.js",
     "init-owner": "node dist/auth/init-owner-cli.js",
     "maintain-owner": "node dist/auth/maintain-owner-cli.js",

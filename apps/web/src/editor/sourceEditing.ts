@@ -1,7 +1,7 @@
 import { HEADING, LINK, type ElementTransformer, type TextMatchTransformer } from '@lexical/markdown';
 import { $createTextNode } from 'lexical';
 import {
-  isMarkdownFrontMatter, markdownFrontMatterKey, quickCaptureMarker,
+  attachmentPresentationOf, isMarkdownFrontMatter, markdownFrontMatterKey, quickCaptureMarker, type AttachmentPresentation,
 } from '@nbase/contracts';
 import { markdownFromContent, parseMarkdownImport, readMarkdownFrontMatter, isSafeLinkUrl, withMarkdownTransformers } from './markdown';
 import { markdownLines, maskMarkdownInlineLiterals, resolveMarkdownReferences } from './markdownReferences';
@@ -10,7 +10,7 @@ import { normalizeCodeBlockLanguage } from './codeLanguages';
 import type { DocumentContent } from './types';
 
 type JsonNode = Record<string, unknown> & { type: string; version: number; children?: JsonNode[]; $?: Record<string, unknown> };
-type Attachment = JsonNode & { attachmentId: string; fileName: string; mediaType: string; alt: string };
+type Attachment = JsonNode & AttachmentPresentation & { attachmentId: string; fileName: string; mediaType: string; alt: string };
 
 export interface SourceEditPreparation { source: string; diagnostics: string[]; canApply: boolean }
 export interface SourceEditResult { content: DocumentContent | null; diagnostics: string[] }
@@ -176,7 +176,7 @@ function context(original: DocumentContent) {
         return;
       }
       const alt = image && label !== (reference.alt || reference.fileName) ? label : reference.alt;
-      node.replace($createAttachmentNode(reference.attachmentId, alt, reference.fileName, reference.mediaType));
+      node.replace($createAttachmentNode(reference.attachmentId, alt, reference.fileName, reference.mediaType, attachmentPresentationOf(reference)));
     },
   };
   const captureHeading: ElementTransformer = { ...HEADING, export(node, ...args) {

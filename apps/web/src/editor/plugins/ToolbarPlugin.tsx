@@ -17,6 +17,7 @@ import { $applyBlockStyle } from '../blockStyles';
 import type { BlockStyle } from '../blockStyles';
 import { CODE_LANGUAGES } from '../codeLanguages';
 import { $changeListIndent, $selectedListItems } from '../listIndent';
+import { OPEN_LINK_FORM_COMMAND } from './FloatingToolbarPlugin';
 import { $calloutForNode, $isCalloutNode, $unwrapCallout, calloutLabels } from '../nodes/CalloutNode';
 
 type Props = { readOnly: boolean; onNotice?: ((message: string) => void) | undefined; findPanel?: ReactNode };
@@ -40,6 +41,7 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
   const [linkUrl, setLinkUrl] = useState('');
   const [linkError, setLinkError] = useState('');
   const savedSelection = useRef<BaseSelection | null>(null);
+  const openLinkForm = useRef(() => {});
   useEffect(() => {
     const update = () => {
       const selection = $getSelection();
@@ -71,6 +73,7 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
       editor.registerUpdateListener(({ editorState }) => editorState.read(update)),
       editor.registerCommand(CAN_UNDO_COMMAND, (value) => { setCanUndo(value); return false; }, COMMAND_PRIORITY_LOW),
       editor.registerCommand(CAN_REDO_COMMAND, (value) => { setCanRedo(value); return false; }, COMMAND_PRIORITY_LOW),
+      editor.registerCommand(OPEN_LINK_FORM_COMMAND, () => { openLinkForm.current(); return true; }, COMMAND_PRIORITY_LOW),
     );
   }, [editor]);
   const edit = (action: () => void) => {
@@ -99,6 +102,7 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
   };
   const button = (label: string, content: ReactNode, action: () => void, active = false, disabled = false) => <button type="button" title={label} aria-label={label} aria-pressed={active} disabled={readOnly || disabled} className={active ? 'is-active' : ''} onMouseDown={(event) => event.preventDefault()} onClick={action}>{content}</button>;
   const format = (type: TextFormatType) => edit(() => editor.dispatchCommand(FORMAT_TEXT_COMMAND, type));
+  openLinkForm.current = () => { setLinkUrl(state.link); setLinkError(''); setLinkOpen(true); };
   const callout = state.callout;
   const changeCalloutTitle = (input: HTMLInputElement) => {
     if (!callout || !editor.isEditable()) return;

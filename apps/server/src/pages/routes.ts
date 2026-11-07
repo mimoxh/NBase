@@ -6,7 +6,7 @@ import {
 } from '../auth/session.js';
 import { authorizeWorkspace, WorkspaceRouteError } from '../auth/workspace.js';
 import { ContentValidationError, PageFieldError, validateDocumentContent, validatePageCover, validatePageIcon } from './validate.js';
-import { decodePageCursor, isRevision, isUuid, PageError, PgPageRepository } from './repository.js';
+import { decodePageCursor, decodeSiblingCursor, isRevision, isUuid, PageError, PgPageRepository } from './repository.js';
 
 interface WorkspaceParams { workspaceId: string }
 interface PageParams extends WorkspaceParams { pageId: string }
@@ -109,7 +109,7 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
       const limit = rawLimit === undefined ? 50 : Number(rawLimit);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new RouteError(400, 'INVALID_REQUEST');
       const rawCursor = query.cursor;
-      const cursor = rawCursor === undefined ? null : typeof rawCursor === 'string' ? decodePageCursor(rawCursor) : null;
+      const cursor = rawCursor === undefined ? null : typeof rawCursor === 'string' ? decodeSiblingCursor(rawCursor) : null;
       if (rawCursor !== undefined && !cursor) throw new RouteError(400, 'INVALID_REQUEST');
       return reply.send(await pages.list(request.params.workspaceId, actorId, parent, limit, cursor));
     } catch (error) { return sendError(request, reply, error, secure); }
@@ -216,6 +216,20 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
     try {
       const actorId = await authorize(request, request.params.workspaceId, false);
       return reply.send(await pages.favorites(request.params.workspaceId, actorId));
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.put<{ Params: PageParams }>('/api/workspaces/:workspaceId/pages/:pageId/position', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const actorId = await authorize(request, request.params.workspaceId, true);
+      if (!isUuid(request.params.pageId)) throw new RouteError(404, 'NOT_FOUND');
+      const body: unknown = request.body;
+      if (!object(body) || !parentId(body.afterPageId) || body.afterPageId === request.params.pageId) {
+        throw new RouteError(400, 'INVALID_REQUEST');
+      }
+      await pages.setPosition(request.params.workspaceId, actorId, request.params.pageId, body.afterPageId);
+      return reply.code(204).send();
     } catch (error) { return sendError(request, reply, error, secure); }
   });
 

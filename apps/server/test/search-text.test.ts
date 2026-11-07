@@ -12,10 +12,10 @@ test('search text follows visible Chinese content across formatting without inde
       ] },
     ] },
     { type: 'paragraph', version: 1, children: [{ type: 'attachment', version: 1,
-      attachmentId: '11111111-1111-4111-8111-111111111111', fileName: '架构图.png', alt: '架构说明', mediaType: 'image/png' }] },
+      attachmentId: '11111111-1111-4111-8111-111111111111', fileName: '架构图.png', alt: '架构说明', mediaType: 'image/png', caption: '系统图注' }] },
   ] } } };
   const text = extractSearchText(content);
-  assert.equal(text, '项目计划 API 架构图.png 架构说明');
+  assert.equal(text, '项目计划 API 架构图.png 架构说明 系统图注');
   assert.equal(text.includes('private.example'), false);
   assert.equal(text.includes('attachmentId'), false);
 });

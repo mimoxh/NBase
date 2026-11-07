@@ -43,6 +43,7 @@ function inspectDocument(content: StoredDocumentContent, collectReferences: bool
     } else if (value.type === 'attachment') {
       if (typeof value.fileName === 'string') append(` ${value.fileName} `);
       if (typeof value.alt === 'string' && value.alt !== value.fileName) append(` ${value.alt} `);
+      if (typeof value.caption === 'string') append(` ${value.caption} `);
     } else if (typeof value.text === 'string') append(value.text);
     if (Array.isArray(value.children)) value.children.forEach(child => visit(child, depth + 1));
     if (separatingElements.has(String(value.type))) append(' ');

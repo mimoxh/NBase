@@ -2,6 +2,8 @@ import type { StoredDocumentContent } from '@nbase/contracts';
 import { readMarkdownFrontMatter } from '../editor/markdownFrontMatter';
 import { rewriteMarkdownProse } from '../editor/markdownReferences';
 
+import { attachmentPresentations, hasAttachmentPresentation } from './attachmentPresentation';
+
 export interface ExportAttachment {
   id: string;
   fileName: string;
@@ -114,7 +116,8 @@ export async function packagePage(markdown: string, content: StoredDocumentConte
     entries.push({ name: `attachments/${item.id.toLowerCase()}${extension}`,
       bytes: new Uint8Array(await blob.arrayBuffer()) });
   }
+  const presentations = attachmentPresentations(content);
   entries.push({ name: 'manifest.json', bytes: encoder.encode(JSON.stringify({ format: 'nbase-page-export-v1',
-    attachments }, null, 2)) });
+    attachments, ...(hasAttachmentPresentation(presentations) ? { presentations } : {}) }, null, 2)) });
   return zipEntries(entries);
 }

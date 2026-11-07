@@ -24,7 +24,7 @@ export class PageError extends Error {
     public readonly statusCode: number,
     public readonly code: 'NOT_FOUND' | 'FORBIDDEN' | 'REVISION_CONFLICT' | 'MUTATION_CONFLICT'
       | 'PAGE_TREE_INVALID' | 'PAGE_TREE_CHANGED' | 'CONTENT_VERSION_UNSUPPORTED' | 'ATTACHMENT_INVALID'
-      | 'FAVORITE_LIMIT' | 'TAG_INVALID' | 'TAG_NAME_CONFLICT' | 'PAGE_REFERENCE_INVALID',
+      | 'FAVORITE_LIMIT' | 'PAGE_POSITION_INVALID' | 'TAG_INVALID' | 'TAG_NAME_CONFLICT' | 'PAGE_REFERENCE_INVALID',
     public readonly currentRevision?: string,
   ) { super(code); }
 
@@ -132,6 +132,8 @@ function requestHash(operation: string, pageId: string | null, body: unknown): B
 const pageReceiptOperations = new Set(['create', 'update', 'trash', 'restore', 'restore-version', 'copy',
   'open-daily-note', 'quick-capture']);
 
+const sortPositionGap = 1024;
+
 const pageColumns = `id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, revision::text AS revision,
   created_at, updated_at`;
 const joinedPageColumns = `p.id, p.workspace_id, p.parent_id, p.title, p.icon, p.cover, p.content_json, p.content_schema_version,
@@ -235,20 +237,20 @@ export class PgPageRepository {
   }
 
   async list(workspaceId: string, actorId: string, parentId: string | null,
-    limit: number, cursor: { createdAt: string; id: string } | null): Promise<PageListResponse> {
-    const result = await this.pool.query<PageRow>(`
-      SELECT ${joinedPageColumns}, p.created_at::text AS cursor_created_at FROM pages p
+    limit: number, cursor: { position: string; id: string } | null): Promise<PageListResponse> {
+    const result = await this.pool.query<PageRow & { cursor_position: string }>(`
+      SELECT ${joinedPageColumns}, p.sort_position::text AS cursor_position FROM pages p
       JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
       WHERE p.workspace_id = $1 AND p.parent_id IS NOT DISTINCT FROM $3::uuid AND p.deleted_at IS NULL
-        AND ($4::timestamptz IS NULL OR (p.created_at, p.id) > ($4::timestamptz, $5::uuid))
-      ORDER BY p.created_at, p.id LIMIT $6
-    `, [workspaceId, actorId, parentId, cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1]);
+        AND ($4::bigint IS NULL OR (p.sort_position, p.id) > ($4::bigint, $5::uuid))
+      ORDER BY p.sort_position, p.id LIMIT $6
+    `, [workspaceId, actorId, parentId, cursor?.position ?? null, cursor?.id ?? null, limit + 1]);
     const visible = result.rows.slice(0, limit);
     const last = visible.at(-1);
     return {
       pages: visible.map(summaryFromRow),
       nextCursor: result.rows.length > limit && last
-        ? Buffer.from(JSON.stringify({ createdAt: last.cursor_created_at, id: last.id })).toString('base64url')
+        ? Buffer.from(JSON.stringify({ position: last.cursor_position, id: last.id })).toString('base64url')
         : null,
     };
   }
@@ -266,7 +268,7 @@ export class PgPageRepository {
       )
       SELECT ${joinedPageColumns} FROM pages p
       JOIN tree t ON t.id = p.id
-      ORDER BY p.created_at, p.id LIMIT $3
+      ORDER BY p.sort_position, p.id LIMIT $3
     `, [workspaceId, actorId, limit + 1]);
     return { pages: result.rows.slice(0, limit).map(summaryFromRow), truncated: result.rows.length > limit };
   }
@@ -509,6 +511,7 @@ export class PgPageRepository {
     const result = await client.query<PageRow>(`
       UPDATE pages SET title = $3, parent_id = $4, content_json = $5::jsonb,
         content_schema_version = 1, search_text = COALESCE($7, search_text), icon = $8, cover = $9,
+        sort_position = CASE WHEN parent_id IS DISTINCT FROM $4::uuid THEN nextval('pages_sort_position_seq') * 1024 ELSE sort_position END,
         revision = revision + 1, updated_at = now()
       WHERE workspace_id = $1 AND id = $2 AND revision = $6::bigint AND deleted_at IS NULL
       RETURNING ${pageColumns}
@@ -586,6 +589,8 @@ export class PgPageRepository {
         )
         UPDATE pages SET deleted_at = NULL, deletion_group_id = NULL,
           parent_id = CASE WHEN id = $2 THEN $4::uuid ELSE parent_id END,
+          sort_position = CASE WHEN id = $2 AND parent_id IS DISTINCT FROM $4::uuid
+            THEN nextval('pages_sort_position_seq') * 1024 ELSE sort_position END,
           revision = revision + 1, updated_at = now()
         WHERE workspace_id = $1 AND id IN (SELECT id FROM subtree)
         RETURNING ${pageColumns}
@@ -683,12 +688,69 @@ export class PgPageRepository {
     });
   }
 
+  /**
+   * Places a page right after a sibling, or first when `afterPageId` is null. The target
+   * position is absolute, so a retry after a lost response cannot move the page twice.
+   * Order is directory structure, not page content, so no revision or snapshot is written.
+   */
+  async setPosition(workspaceId: string, actorId: string, pageId: string, afterPageId: string | null): Promise<void> {
+    await this.workspaceLock(workspaceId, actorId, async (client) => {
+      const page = await client.query<{ parent_id: string | null }>(
+        'SELECT parent_id FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL', [workspaceId, pageId]);
+      const row = page.rows[0];
+      if (!row) throw new PageError(404, 'NOT_FOUND');
+      const others = await client.query<{ id: string; sort_position: string }>(`
+        SELECT id, sort_position::text AS sort_position FROM pages
+        WHERE workspace_id = $1 AND parent_id IS NOT DISTINCT FROM $2::uuid AND deleted_at IS NULL AND id <> $3
+        ORDER BY pages.sort_position, id
+      `, [workspaceId, row.parent_id, pageId]);
+      const siblings = others.rows;
+      const index = afterPageId === null ? -1 : siblings.findIndex(item => item.id === afterPageId);
+      if (afterPageId !== null && index < 0) throw new PageError(409, 'PAGE_POSITION_INVALID');
+      const before = siblings[index];
+      const after = siblings[index + 1];
+      if (!before && !after) return;
+      const step = BigInt(sortPositionGap);
+      const lower = before ? BigInt(before.sort_position) : BigInt(after!.sort_position) - 2n * step;
+      const upper = after ? BigInt(after.sort_position) : lower + 2n * step;
+      if (upper - lower >= 2n) {
+        await client.query('UPDATE pages SET sort_position = $3::bigint WHERE workspace_id = $1 AND id = $2',
+          [workspaceId, pageId, String((lower + upper) / 2n)]);
+        return;
+      }
+      // The gap is used up: renumber this sibling group once.
+      const ids = siblings.map(item => item.id);
+      ids.splice(index + 1, 0, pageId);
+      await client.query(`
+        UPDATE pages p SET sort_position = v.position * $3::bigint
+        FROM unnest($2::uuid[]) WITH ORDINALITY AS v(id, position)
+        WHERE p.workspace_id = $1 AND p.id = v.id
+      `, [workspaceId, ids, sortPositionGap]);
+    });
+  }
+
   async favoriteRemove(workspaceId: string, actorId: string, pageId: string): Promise<void> {
     await this.workspaceLock(workspaceId, actorId, async (client) => {
       await client.query(
         'DELETE FROM page_favorites WHERE workspace_id = $1 AND user_id = $2 AND page_id = $3',
         [workspaceId, actorId, pageId]);
     });
+  }
+}
+
+/** Cursor for sibling lists, which follow the manual page order. */
+export function decodeSiblingCursor(value: string): { position: string; id: string } | null {
+  if (!/^[A-Za-z0-9_-]{1,512}$/.test(value)) return null;
+  try {
+    const bytes = Buffer.from(value, 'base64url');
+    if (bytes.toString('base64url') !== value) return null;
+    const parsed: unknown = JSON.parse(bytes.toString('utf8'));
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const data = parsed as Record<string, unknown>;
+    if (typeof data.position !== 'string' || !/^-?\d{1,19}$/.test(data.position) || !isUuid(data.id)) return null;
+    return { position: data.position, id: data.id };
+  } catch {
+    return null;
   }
 }
 

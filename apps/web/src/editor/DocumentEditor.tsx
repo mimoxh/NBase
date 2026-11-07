@@ -31,6 +31,10 @@ import { PageReferencePlugin } from './plugins/PageReferencePlugin';
 import { MermaidPlugin } from './plugins/MermaidPlugin';
 import { ListIndentPlugin } from './plugins/ListIndentPlugin';
 import { LinkInteractionPlugin } from './plugins/LinkInteractionPlugin';
+import { FloatingToolbarPlugin } from './plugins/FloatingToolbarPlugin';
+import { BlockHandlePlugin } from './plugins/BlockHandlePlugin';
+import { WordCountPlugin } from './plugins/WordCountPlugin';
+import { ShortcutsPlugin } from './plugins/ShortcutsPlugin';
 import { FootnoteNavigationPlugin } from './nodes/FootnoteNodes';
 import { $insertAttachments, AttachmentWorkspaceContext } from './nodes/AttachmentNode';
 import 'katex/dist/katex.min.css';
@@ -211,6 +215,8 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <EquationPlugin /><SlashCommandPlugin onPickAttachment={props.onPickAttachment} /><CalloutPlugin /><PageReferencePlugin historyState={history} />
       <MermaidPlugin historyState={history} />
       <ListIndentPlugin /><LinkInteractionPlugin onNotice={props.onNotice} />
+      <FloatingToolbarPlugin /><BlockHandlePlugin onBeforeMove={element => folding.current?.expand(element)} />
+      <ShortcutsPlugin /><WordCountPlugin />
       <FootnoteNavigationPlugin reveal={element => folding.current?.reveal(element)} />
       <SafePastePlugin onNotice={props.onNotice} onUploadFiles={props.onUploadFiles} />
       <SectionFoldingPlugin ref={folding} />

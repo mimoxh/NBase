@@ -1,4 +1,4 @@
-import { isCalloutKind, isCalloutTitle, isFootnoteId, isMarkdownFrontMatter, isStoredMermaidSource, markdownFrontMatterKey, pageCoverIds, quickCaptureMarker, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
+import { attachmentPresentationOf, isAttachmentPresentation, isCalloutKind, isCalloutTitle, isFootnoteId, isMarkdownFrontMatter, isStoredMermaidSource, markdownFrontMatterKey, pageCoverIds, quickCaptureMarker, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
 import { isPageReference } from './search-text.js';
 
 export const maxContentBytes = 1024 * 1024;
@@ -77,7 +77,9 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
     if (node.type === 'attachment' && (!uuidPattern.test(String(node.attachmentId))
       || typeof node.alt !== 'string' || node.alt.length > 500
       || typeof node.fileName !== 'string' || node.fileName.length < 1 || node.fileName.length > 180
-      || typeof node.mediaType !== 'string' || node.mediaType.length > 100)) invalid();
+      || typeof node.mediaType !== 'string' || node.mediaType.length > 100
+      || !isAttachmentPresentation(node)
+      || (Object.keys(attachmentPresentationOf(node)).length > 0 && !node.mediaType.startsWith('image/')))) invalid();
 
     if (elementTypes.has(node.type)) {
       if (!Array.isArray(node.children)) invalid();

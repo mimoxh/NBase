@@ -1,5 +1,6 @@
 import type { PageCoverId } from '@nbase/contracts';
 import type { EditorSnapshot } from '../editor/types';
+import { placePage, type PagePlacement } from '../shell/pageOrder';
 
 export interface Page {
   id: string;
@@ -26,6 +27,7 @@ export type Action =
   | { type: 'icon'; id: string; icon: string | null }
   | { type: 'cover'; id: string; cover: PageCoverId | null }
   | { type: 'move'; id: string; parentId: string | null }
+  | { type: 'place'; id: string; placement: PagePlacement }
   | { type: 'delete' | 'restore'; id: string }
   | { type: 'snapshot'; id: string; snapshot: EditorSnapshot; dirty: boolean };
 
@@ -54,6 +56,8 @@ export function workspaceReducer(state: Workspace, action: Action): Workspace {
     case 'icon': return { ...state, pages: state.pages.map(p => p.id === action.id ? { ...p, icon: action.icon, dirty: true } : p) };
     case 'cover': return { ...state, pages: state.pages.map(p => p.id === action.id ? { ...p, cover: action.cover, dirty: true } : p) };
     case 'snapshot': return { ...state, pages: state.pages.map(p => p.id === action.id ? { ...p, snapshot: action.snapshot, dirty: p.dirty || action.dirty } : p) };
+    case 'place': return canMove(state.pages, action.id, action.placement.parentId)
+      ? { ...state, pages: placePage(state.pages, action.id, action.placement) } : state;
     case 'move': return canMove(state.pages, action.id, action.parentId) ? { ...state, pages: state.pages.map(p => p.id === action.id ? { ...p, parentId: action.parentId, dirty: true } : p) } : state;
     case 'delete': {
       const affected = descendants(state.pages, action.id);

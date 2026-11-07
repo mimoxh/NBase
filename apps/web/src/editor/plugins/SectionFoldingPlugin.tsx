@@ -7,6 +7,8 @@ import type { OutlineItem } from '../types';
 export interface SectionFoldingHandle {
   refresh: (outline: OutlineItem[]) => void;
   reveal: (element: HTMLElement) => void;
+  /** Opens this heading's own section; no effect on other blocks. */
+  expand: (element: HTMLElement) => void;
   jump: (id: string) => void;
 }
 
@@ -120,6 +122,12 @@ export const SectionFoldingPlugin = forwardRef<SectionFoldingHandle>(function Se
       else measure();
     },
     reveal,
+    expand(element) {
+      const heading = headings.current.find(item => item.element === element);
+      if (!heading || !collapsed.current.delete(heading.id)) return;
+      apply();
+      measure();
+    },
     jump(id) {
       const heading = headings.current.find(item => item.id === id);
       if (!heading) return;

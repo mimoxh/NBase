@@ -179,3 +179,19 @@ test('footnotes accept repeated references and root definitions but reject malfo
   malformed.editorState.root.children = [{ ...definition, children: undefined }] as never;
   reject(malformed, 'CONTENT_INVALID');
 });
+
+test('accepts image presentation settings and rejects them on files or out of range', () => {
+  const withAttachment = (fields: object, mediaType = 'image/png') => {
+    const value = content() as unknown as { editorState: { root: { children: { children: object[] }[] } } };
+    value.editorState.root.children[0]!.children = [{ type: 'attachment', version: 1, alt: '', fileName: 'a.png', mediaType,
+      attachmentId: '11111111-1111-4111-8111-111111111111', ...fields }];
+    return value;
+  };
+  assert.equal(validateDocumentContent(withAttachment({ width: 50, align: 'center', caption: '图注' })).schemaVersion, 1);
+  reject(withAttachment({ width: 5 }), 'CONTENT_INVALID');
+  reject(withAttachment({ width: 50.5 }), 'CONTENT_INVALID');
+  reject(withAttachment({ align: 'justify' }), 'CONTENT_INVALID');
+  reject(withAttachment({ caption: '换\n行' }), 'CONTENT_INVALID');
+  reject(withAttachment({ caption: 'x'.repeat(301) }), 'CONTENT_INVALID');
+  reject(withAttachment({ width: 50 }, 'application/pdf'), 'CONTENT_INVALID');
+});

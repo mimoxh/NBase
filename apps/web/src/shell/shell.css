@@ -169,6 +169,9 @@
 
 /* ── Document ── */
 .nb-scroll { flex: 1; overflow-y: auto; min-height: 0; position: relative; }
+.nb-tree-row.drop-before { box-shadow: inset 0 2px 0 var(--nb-accent-text, #647a45); }
+.nb-tree-row.drop-after { box-shadow: inset 0 -2px 0 var(--nb-accent-text, #647a45); }
+.nb-tree-row.drop-inside { background: var(--nb-accent-soft, #e8ede2); }
 .nb-doc-head { max-width: 720px; margin: 0 auto; padding: 0 40px; position: relative; }
 .nb-doc-title-row { display: flex; align-items: baseline; gap: 8px; position: relative; }
 .nb-doc-icon { border: 0; background: transparent; font-size: 40px; line-height: 1; padding: 0; cursor: pointer; border-radius: 8px; flex: 0 0 48px; width: 48px; height: 48px; display: inline-flex; align-items: center; justify-content: center; overflow: hidden; align-self: baseline; position: relative; top: 4px; }
@@ -360,4 +363,21 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .nb-app *, .nb-app *::before, .nb-app *::after { transition: none !important; animation: none !important; }
+}
+
+/* Reading preferences: view state set on <html>. */
+:root[data-nb-editor-size="small"] .nbase-editor-content { font-size: 14px; }
+:root[data-nb-editor-size="large"] .nbase-editor-content { font-size: 18px; }
+:root[data-nb-wide] .nb-doc-head, :root[data-nb-wide] .nb-doc-body { max-width: min(1200px, 100%); }
+:root[data-nb-focus] .nb-sidebar, :root[data-nb-focus] .nb-toc, :root[data-nb-focus] .nbase-editor-toolbar { display: none; }
+
+@media print {
+  .nb-sidebar, .nb-topbar, .nb-toc, .nb-notice, .nbase-editor-tools, .nbase-section-toggle, .nbase-block-handle,
+  .nbase-word-count, .nbase-attachment-download, .nbase-code-copy, .nbase-link-card, .nbase-floating-toolbar,
+  .nb-cover, .nb-toast { display: none !important; }
+  html, body, #root, .nb-app, .nb-main, .nb-scroll { display: block !important; height: auto !important; overflow: visible !important; background: #fff !important; }
+  .nb-doc-head, .nb-doc-body { max-width: none !important; padding-inline: 0 !important; }
+  .nbase-editor-content { min-height: 0; padding-bottom: 0; }
+  .nbase-attachment, .nbase-code-block, .nbase-table, .nbase-attachment-node { break-inside: avoid; }
+  .nbase-editor-content h1, .nbase-editor-content h2, .nbase-editor-content h3 { break-after: avoid; }
 }

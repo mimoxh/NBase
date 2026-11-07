@@ -56,3 +56,4 @@ export function isHealthResponse(value: unknown): value is HealthResponse {
     && (data.persistence === 'not-configured' || data.persistence === 'accounts-only' || data.persistence === 'page-api');
 }
 export { tagNameKey } from './tagNameKey.js';
+export * from './attachmentPresentation.js';

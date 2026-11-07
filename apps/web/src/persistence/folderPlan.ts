@@ -1,4 +1,5 @@
-import type { AttachmentMetadata, PageSummary, StoredDocumentContent } from '@nbase/contracts';
+import type { AttachmentMetadata, AttachmentPresentation, PageSummary, StoredDocumentContent } from '@nbase/contracts';
+import { readAttachmentPresentations, restoreAttachmentPresentations } from './attachmentPresentation';
 import {
   folderAttachment, folderBaseName, folderDestination, folderNodeLink, folderPageReference, folderParentPath,
   isFolderObject, keepExternalPageReference, keepFolderLinkLiteral, mapFolderDocument, normalizeFolderPath, trimUtf16,
@@ -42,6 +43,7 @@ export interface FolderPagePlan {
   tagNames: string[];
   pageDependencies: string[];
   attachmentPaths: string[];
+  presentations?: AttachmentPresentation[] | undefined;
 }
 
 export interface FolderAttachmentPlan {
@@ -63,11 +65,11 @@ export interface FolderImportPlan {
 
 export interface SubtreeManifest {
   format: typeof subtreeManifestFormat;
-  pages: { path: string; parentPath: string | null; title: string }[];
+  pages: { path: string; parentPath: string | null; title: string; presentations?: AttachmentPresentation[] }[];
   attachments: { path: string; fileName: string }[];
 }
 
-type PageSeed = Pick<FolderPagePlan, 'key' | 'path' | 'sourcePath' | 'parentKey' | 'title'>;
+type PageSeed = Pick<FolderPagePlan, 'key' | 'path' | 'sourcePath' | 'parentKey' | 'title' | 'presentations'>;
 
 export async function readFolderMarkdown(file: File): Promise<string> {
   if (file.size > documentBytesLimit) throw new Error('Markdown 文件超过 1 MiB。');
@@ -143,7 +145,7 @@ async function readManifest(sources: Map<string, File>, rootName: string): Promi
       }
     }
     return { pages: [{ key: 'file:document.md', path: 'document.md', sourcePath: 'document.md',
-      parentKey: null, title: rootName }], attachmentNames };
+      parentKey: null, title: rootName, presentations: readAttachmentPresentations(value.presentations) }], attachmentNames };
   }
   if (value.format !== subtreeManifestFormat) return null;
   if (!Array.isArray(value.pages) || !value.pages.length || value.pages.length > folderMarkdownLimit
@@ -153,7 +155,8 @@ async function readManifest(sources: Map<string, File>, rootName: string): Promi
     const path = manifestPath(entry.path);
     if (!markdownPath.test(path) || !sources.has(path)) throw new Error('NBase 子树清单缺少页面文件 ' + path);
     return { key: 'file:' + path, path, sourcePath: path, title: entry.title,
-      parentKey: entry.parentPath === null ? null : 'file:' + manifestPath(entry.parentPath) };
+      parentKey: entry.parentPath === null ? null : 'file:' + manifestPath(entry.parentPath),
+      presentations: readAttachmentPresentations(entry.presentations) };
   });
   for (const entry of value.attachments) {
     if (!isFolderObject(entry) || typeof entry.fileName !== 'string') throw new Error('NBase 子树清单包含无效附件。');
@@ -320,7 +323,7 @@ export function rebuildFolderContent(plan: FolderImportPlan, page: FolderPagePla
   const lookup = pageLookup(plan.pages);
   const known = new Set(plan.knownPageIds);
   const expectedAttachments = new Set(page.attachmentPaths);
-  return mapFolderDocument(content, node => {
+  return restoreAttachmentPresentations(mapFolderDocument(content, node => {
     if (node.type === 'page-reference' && typeof node.targetPageId === 'string' && !known.has(node.targetPageId)) {
       return keepExternalPageReference(node);
     }
@@ -338,5 +341,5 @@ export function rebuildFolderContent(plan: FolderImportPlan, page: FolderPagePla
       return keepFolderLinkLiteral(reference.url, reference.label);
     }
     return node;
-  });
+  }), page.presentations);
 }

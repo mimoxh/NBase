@@ -74,6 +74,8 @@ export const pageClient = {
   search: (workspaceId: string, phrase: string, signal?: AbortSignal, tagIds: string[] = []) =>
     request<SearchResponse>(`${workspacePath(workspaceId)}/search?q=${encodeURIComponent(phrase)}&limit=30${tagIds.length ? `&tagIds=${encodeURIComponent(tagIds.join(','))}` : ''}`,
       'GET', undefined, undefined, signal),
+  setPosition: (workspaceId: string, pageId: string, afterPageId: string | null, csrfToken: string) =>
+    request<void>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}/position`, 'PUT', { afterPageId }, csrfToken),
   favorites: (workspaceId: string, signal?: AbortSignal) =>
     request<FavoriteListResponse>(`${workspacePath(workspaceId)}/favorites`, 'GET', undefined, undefined, signal),
   addFavorite: (workspaceId: string, pageId: string, csrfToken: string) =>

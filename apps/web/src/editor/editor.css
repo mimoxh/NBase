@@ -20,7 +20,12 @@
 .nbase-link-form input { flex:1; min-width:150px; border:1px solid var(--editor-line); border-radius:5px; padding:8px; color:inherit; font:inherit; }
 .nbase-link-form>span { width:100%; color:var(--nb-danger,#9c4f37); }
 .nbase-editor-surface { position:relative; }
-.nbase-editor-content [data-nbase-folded] { display:none !important; }
+@media screen { .nbase-editor-content [data-nbase-folded] { display:none !important; } }
+.nbase-word-count { display:flex; justify-content:flex-end; flex-wrap:wrap; gap:12px; margin-top:-120px; padding:8px 2px; color:var(--nb-faint,#a0a496); font-size:12px; }
+.nbase-shortcut-list { display:grid; gap:6px; margin:0; font-size:13px; }
+.nbase-shortcut-list>div { display:flex; justify-content:space-between; gap:24px; }
+.nbase-shortcut-list dd { margin:0; color:var(--nb-muted,#656d76); }
+.nbase-shortcut-list kbd { font:12px Consolas,monospace; }
 .nbase-section-toggle { position:absolute; transform:translateX(-100%); display:grid; place-items:center; width:24px; height:28px; padding:0; border:0; border-radius:4px; background:transparent; color:var(--nb-muted,#65705e); cursor:pointer; }
 .nbase-section-toggle:hover,.nbase-section-toggle:focus-visible { background:var(--nb-code-bg,#f7f8f4); color:var(--nb-text,#30332e); }
 .nbase-editor-content { outline:none; min-height:440px; padding:0 2px 150px; font-family:'Noto Sans SC','Microsoft YaHei UI','Microsoft YaHei',sans-serif; font-size:16px; line-height:1.8; overflow-wrap:anywhere; tab-size:2; caret-color:var(--nb-accent,#687d50); }
@@ -65,6 +70,28 @@
 .nbase-attachment { display:inline-flex; flex-direction:column; align-items:flex-start; gap:5px; max-width:100%; margin:8px 3px; padding:9px; border:1px solid var(--nb-line,#e2e5dc); border-radius:7px; background:var(--nb-sidebar,#fafbf8); font-size:12px; line-height:1.5; }
 .nbase-attachment.is-image img { display:block; max-width:min(100%, 720px); max-height:520px; width:auto; height:auto; object-fit:contain; border-radius:4px; }
 .nbase-attachment.is-file { flex-direction:row; align-items:center; flex-wrap:wrap; }
+.nbase-attachment-node[data-sized],.nbase-attachment-node[data-align] { display:block; }
+.nbase-attachment-node[data-align='center'] { margin-inline:auto; text-align:center; }
+.nbase-attachment-node[data-align='right'] { margin-left:auto; text-align:right; }
+.nbase-attachment-node[data-sized] .nbase-attachment { display:flex; width:100%; box-sizing:border-box; margin-inline:0; }
+.nbase-attachment-node[data-sized] .nbase-image-frame,.nbase-attachment-node[data-sized] .nbase-attachment.is-image img { width:100%; max-width:100%; max-height:none; }
+.nbase-attachment-node[data-align='center'] .nbase-attachment { align-items:center; }
+.nbase-attachment-node[data-align='right'] .nbase-attachment { align-items:flex-end; }
+.nbase-image-frame { position:relative; display:inline-block; max-width:100%; }
+.nbase-attachment.is-image img { cursor:zoom-in; }
+.document-editor:not([data-readonly='true']) .nbase-attachment.is-image img { cursor:pointer; }
+.nbase-attachment.is-active { outline:2px solid var(--nb-accent,#a0b389); outline-offset:1px; }
+.nbase-attachment-caption { color:var(--nb-muted,#6b7280); font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
+.nbase-image-resize { position:absolute; right:-4px; bottom:-4px; width:12px; height:12px; border-radius:3px; background:var(--nb-accent-text,#647a45); border:2px solid var(--nb-bg,#fff); cursor:nwse-resize; touch-action:none; }
+.nbase-image-controls { display:flex; flex-wrap:wrap; align-items:center; gap:6px; font-size:12px; }
+.nbase-image-choice { display:inline-flex; gap:1px; }
+.nbase-image-controls button { border:0; border-radius:5px; padding:3px 7px; background:transparent; color:var(--nb-text,#30332e); font:inherit; cursor:pointer; }
+.nbase-image-controls button:hover { background:var(--nb-hover,#f3f4f0); }
+.nbase-image-controls button.is-active { background:var(--nb-accent-soft,#e8ede2); color:var(--nb-accent-text,#4c6736); }
+.nbase-image-controls input { flex:1; min-width:140px; border:1px solid var(--editor-line); border-radius:5px; padding:4px 7px; background:transparent; color:inherit; font:inherit; }
+.nbase-image-lightbox { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:24px; background:rgba(0,0,0,.82); }
+.nbase-image-lightbox img { max-width:100%; max-height:100%; object-fit:contain; cursor:default; }
+.nbase-image-lightbox button { position:absolute; top:12px; right:16px; width:36px; height:36px; border:0; border-radius:8px; background:rgba(255,255,255,.14); color:#fff; font-size:22px; line-height:1; cursor:pointer; }
 .nbase-attachment-name { color:var(--nb-text,#4a5341); overflow-wrap:anywhere; }
 .nbase-attachment-loading { color:var(--nb-faint,#8a9182); }
 .nbase-attachment-error { color:var(--nb-danger,#a44e38); }

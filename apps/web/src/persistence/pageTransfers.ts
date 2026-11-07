@@ -3,6 +3,7 @@ import type { AttachmentMetadata, AuthSessionResponse, PageDocument, StoredDocum
 import { addMarkdownFrontMatter, markdownFromContent, parseMarkdownImport } from '../editor/markdown';
 import type { DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
 import { exportAttachments, packagePage } from './attachmentExport';
+import { withCaptionParagraphs } from './attachmentPresentation';
 import { ApiError, attachmentClient, loadPageTree, pageClient, tagClient } from './client';
 import type { LocalPageDraft } from './drafts';
 import { download, downloadBlob } from './fileDownload';
@@ -57,7 +58,9 @@ export function createPageTransfers({ session, workspace, workspaceScope, liveSc
   const tagNamesFor = (ids: string[] | undefined) => tags.filter(tag => ids?.includes(tag.id)).map(tag => tag.name);
   const downloadPage = async (name: string, markdown: string, content: StoredDocumentContent, documentTitle: string, tagNames: string[]) => {
     try {
-      const portable = addMarkdownFrontMatter(markdown, content, documentTitle, tagNames);
+      const captioned = withCaptionParagraphs(content);
+      const body = captioned === content ? markdown : markdownFromContent(captioned as Parameters<typeof markdownFromContent>[0]);
+      const portable = addMarkdownFrontMatter(body, content, documentTitle, tagNames);
       const attachments = exportAttachments(content);
       if (!attachments.length) { download(name, portable); return; }
       if (!workspace) { setNotice('当前工作区不可用，无法导出附件。'); return; }

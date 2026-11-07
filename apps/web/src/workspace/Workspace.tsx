@@ -17,6 +17,8 @@ import { Toast } from '../shell/Toast';
 import { NoticeBar } from '../shell/NoticeBar';
 import type { MenuItem } from '../shell/Menu';
 import type { TreeRowActions } from '../shell/PageTree';
+import type { PagePlacement } from '../shell/pageOrder';
+import { readingMenuItems, useReadingPrefs } from '../shell/readingPrefs';
 import '../shell/shell.css';
 
 const toSummary = (page: Page): PageSummary => ({
@@ -168,6 +170,7 @@ export function WorkspaceApp() {
   const [importAccepted, setImportAccepted] = useState(false);
   const editorRef = useRef<DocumentEditorHandle>(null); const fileRef = useRef<HTMLInputElement>(null); const mainRef = useRef<HTMLElement>(null);
   const stateRef = useRef(state); stateRef.current = state;
+  const [readingPrefs, setReadingPrefs] = useReadingPrefs();
   const current = state.pages.find(page => page.id === state.currentId && !page.deleted);
   const isDocument = state.view === 'document' && !!current;
   const notice = useCallback((message: string) => setToast(message), []);
@@ -241,9 +244,12 @@ export function WorkspaceApp() {
     onFavorite: (id: string) => dispatch({ type: 'star', id }),
     onMove: (id: string) => { const page = state.pages.find(p => p.id === id); setMoveTarget(page?.parentId ?? ''); setDialogFor(id); setDialog('move'); },
     onTrash: (id: string) => { setDialogFor(id); setDialog('delete'); },
+    onPlace: (id: string, placement: PagePlacement) => dispatch({ type: 'place', id, placement }),
   }), [openPage, state.pages]);
   const target = dialogFor ? state.pages.find(p => p.id === dialogFor) : undefined;
   const pageMenuItems: (MenuItem | 'divider')[] = current ? [
+    ...readingMenuItems(readingPrefs, setReadingPrefs),
+    'divider',
     { key: 'mode', label: readOnly ? '切换到编辑' : '切换到阅读', icon: 'page', onSelect: () => { flush(); setReadOnly(!readOnly); } },
     { key: 'source', label: 'Markdown 源码', icon: 'code', onSelect: () => {
       const snapshot = flush();

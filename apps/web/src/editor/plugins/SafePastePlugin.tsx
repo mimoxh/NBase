@@ -14,7 +14,7 @@ import { mergeRegister } from '@lexical/utils';
 import { isSafeLinkUrl } from '../markdown';
 import { $pasteUrl } from '../autoLink';
 import { $insertAttachments } from '../nodes/AttachmentNode';
-import { calloutTitleMaxLength, isCalloutKind, isCalloutTitle, isFootnoteId, isStoredMermaidSource, pageIdFromReferenceUrl, quickCaptureMarker, type AttachmentMetadata } from '@nbase/contracts';
+import { isAttachmentPresentation, calloutTitleMaxLength, isCalloutKind, isCalloutTitle, isFootnoteId, isStoredMermaidSource, pageIdFromReferenceUrl, quickCaptureMarker, type AttachmentMetadata } from '@nbase/contracts';
 import { isPageReferenceLabel } from '../nodes/PageReferenceNode';
 import { Modal } from '../../components/Modal';
 import { $applyTablePaste, $isCurrentTablePaste, $previewTablePaste, $tablePasteTarget, parseTsv } from '../tableEditing';
@@ -43,7 +43,7 @@ function safeInternalNodes(nodes: unknown, insideTable = false, depth = 0, insid
     if (value.type === 'attachment' && (typeof value.attachmentId !== 'string'
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.attachmentId)
       || typeof value.fileName !== 'string' || value.fileName.length > 180
-      || typeof value.mediaType !== 'string' || typeof value.alt !== 'string')) return false;
+      || typeof value.mediaType !== 'string' || typeof value.alt !== 'string' || !isAttachmentPresentation(value))) return false;
     return value.children === undefined || safeInternalNodes(value.children, insideTable || value.type === 'table', depth + 1,
       insideLinkOrCode || value.type === 'link' || value.type === 'autolink' || value.type === 'code');
   });
