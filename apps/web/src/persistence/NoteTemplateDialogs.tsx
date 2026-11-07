@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { NoteTemplate, PageSummary, StoredDocumentContent, TemplatePreview } from '@nbase/contracts';
+import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { DocumentEditor } from '../editor/DocumentEditor';
 import { createContentFromMarkdown } from '../editor/markdown';
@@ -59,6 +60,9 @@ export function NewNoteDialog({ workspaceId, csrfToken, busy, error, onCreate, o
   const previewKey = templateId + ':' + titleValue;
   const [previewFor, setPreviewFor] = useState('');
   const confirmedPreview = previewFor === previewKey ? preview : null;
+  const titleInput = useRef<HTMLInputElement>(null);
+  // Modal's showModal() runs after this child's effects and focuses the close button; take focus back on the next frame.
+  useEffect(() => { const frame = requestAnimationFrame(() => titleInput.current?.focus()); return () => cancelAnimationFrame(frame); }, []);
 
   useEffect(() => {
     if (!templateId) return;
@@ -82,37 +86,64 @@ export function NewNoteDialog({ workspaceId, csrfToken, busy, error, onCreate, o
     else if (confirmedPreview) onCreate(titleValue, confirmedPreview.content);
   }
 
+  const builtinTemplates = templates.filter(template => template.builtin);
+  const personalTemplates = templates.filter(template => !template.builtin);
+  const choose = (next: string) => {
+    if (busy || next === templateId) return;
+    setPreviewFor(''); setPreviewError(''); setTemplateId(next);
+  };
+  const option = (value: string, name: string) => <button key={value || 'blank'} type="button" role="radio"
+    aria-checked={templateId === value} disabled={busy} onClick={() => choose(value)}
+    className={'nb-newnote-option' + (templateId === value ? ' selected' : '')}>
+    <span className="nb-newnote-option-icon"><Icon name="page" size={16} /></span>
+    <span className="nb-newnote-option-name">{name}</span>
+    {templateId === value && <span className="nb-newnote-check"><Icon name="check" size={15} /></span>}
+  </button>;
+
   return <Modal title="新建笔记" wide onClose={() => { if (!busy) onClose(); }}>
-    <label className="field-label" htmlFor={id + '-title'}>页面标题</label>
-    <input id={id + '-title'} type="text" value={title} maxLength={255} placeholder={untitled}
-      disabled={busy} onChange={event => {
-        const next = event.currentTarget.value;
-        if ((next.trim() || untitled) !== titleValue) { setPreviewFor(''); setPreviewError(''); }
-        setTitle(next);
-      }} />
-    <label className="field-label" htmlFor={id + '-template'}>笔记模板</label>
-    <select id={id + '-template'} className="select-field" value={templateId} disabled={busy}
-      onChange={event => { setPreviewFor(''); setPreviewError(''); setTemplateId(event.currentTarget.value); }}>
-      <option value="">空白页</option>
-      {templates.map(template => <option key={template.id} value={template.id}>
-        {template.name}{template.builtin ? '' : ' · 个人'}
-      </option>)}
-    </select>
-    {loading && <p className="dialog-description" role="status">正在读取模板…</p>}
-    {loadError && <p role="alert">{loadError} <button type="button" className="nb-btn" onClick={retry}>重新读取</button></p>}
-    {templateId && !confirmedPreview && !previewError && <p className="dialog-description" role="status">正在生成预览…</p>}
-    {templateId && previewError && <p role="alert">{previewError} <button type="button" className="nb-btn"
-      onClick={() => setAttempt(current => current + 1)}>重试预览</button></p>}
-    {confirmedPreview && <div className="nbase-history-preview">
-      <h3>模板预览</h3>
-      {confirmedPreview.missingAttachments.length > 0 && <p role="status">
-        以下附件不可用，将保留文字说明：{confirmedPreview.missingAttachments.join('、')}
-      </p>}
-      <DocumentEditor key={previewKey} documentId={'template-preview:' + previewKey} initialContent={confirmedPreview.content as DocumentContent}
-        workspaceId={workspaceId} readOnly onChange={ignoreChange} />
-    </div>}
-    {error && <p role="alert">{error}</p>}
-    <div className="dialog-actions">
+    <div className="nb-newnote">
+      <label className="field-label" htmlFor={id + '-title'}>页面标题</label>
+      <input ref={titleInput} id={id + '-title'} type="text" value={title} maxLength={255} placeholder={untitled}
+        disabled={busy} onChange={event => {
+          const next = event.currentTarget.value;
+          if ((next.trim() || untitled) !== titleValue) { setPreviewFor(''); setPreviewError(''); }
+          setTitle(next);
+        }} onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) create(); }} />
+      <div className="nb-newnote-body">
+        <div className="nb-newnote-side" role="radiogroup" aria-label="笔记模板">
+          <div className="nb-newnote-group">基础</div>
+          {option('', '空白页')}
+          {builtinTemplates.length > 0 && <div className="nb-newnote-group">内置模板</div>}
+          {builtinTemplates.map(template => option(template.id, template.name))}
+          {personalTemplates.length > 0 && <div className="nb-newnote-group">个人模板</div>}
+          {personalTemplates.map(template => option(template.id, template.name))}
+          {loading && <p className="nb-newnote-msg" role="status">正在读取模板…</p>}
+          {loadError && <p className="nb-newnote-msg nb-newnote-error" role="alert">{loadError}
+            <button type="button" className="nb-newnote-link" onClick={retry}>重新读取</button></p>}
+        </div>
+        <section className="nb-newnote-preview" aria-label="模板预览">
+          <div className="nb-newnote-preview-label">预览</div>
+          <div className="nb-newnote-preview-scroll">
+            <h3 className="nb-newnote-preview-title">{titleValue}</h3>
+            {!templateId && <p className="nb-newnote-msg">空白页面，从这里开始写作。</p>}
+            {templateId && !confirmedPreview && !previewError && <p className="nb-newnote-msg" role="status">正在生成预览…</p>}
+            {templateId && previewError && <p className="nb-newnote-msg nb-newnote-error" role="alert">{previewError}
+              <button type="button" className="nb-newnote-link" onClick={() => setAttempt(current => current + 1)}>重试预览</button></p>}
+            {confirmedPreview && <>
+              {confirmedPreview.missingAttachments.length > 0 && <p className="nb-newnote-warn" role="status">
+                以下附件不可用，将保留文字说明：{confirmedPreview.missingAttachments.join('、')}
+              </p>}
+              <div className="nbase-history-preview">
+                <DocumentEditor key={previewKey} documentId={'template-preview:' + previewKey} initialContent={confirmedPreview.content as DocumentContent}
+                  workspaceId={workspaceId} readOnly onChange={ignoreChange} />
+              </div>
+            </>}
+          </div>
+        </section>
+      </div>
+      {error && <p className="nb-newnote-alert" role="alert">{error}</p>}
+    </div>
+    <div className="dialog-actions nb-newnote-actions">
       <button type="button" className="nb-btn" disabled={busy} onClick={onClose}>取消</button>
       <button type="button" className="nb-btn nb-btn-primary" disabled={busy || Boolean(templateId && !confirmedPreview)} onClick={create}>
         {busy ? '正在创建…' : '创建笔记'}
