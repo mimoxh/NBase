@@ -1,0 +1,8 @@
+.nbase-link-card { position:fixed; z-index:30; display:flex; align-items:center; gap:2px; max-width:min(420px,calc(100vw - 16px)); padding:4px 4px 4px 10px; background:var(--nb-bg,#fff); color:var(--nb-text,#2e3229); border:1px solid var(--editor-line); border-radius:8px; box-shadow:var(--nb-shadow-sm,0 3px 12px rgba(60,64,55,.14)); font-size:12px; }
+.nbase-link-card-url { flex:1; min-width:0; max-width:200px; margin-right:6px; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; color:var(--nb-muted,#656d76); }
+.nbase-link-card button { flex:none; border:0; border-radius:5px; padding:4px 7px; background:transparent; color:inherit; font:inherit; cursor:pointer; }
+.nbase-link-card button:hover { background:var(--nb-hover,#f3f4f0); }
+.nbase-link-card button:focus-visible,.nbase-link-card input:focus-visible { outline:2px solid var(--nb-accent-text,#647a45); outline-offset:1px; }
+.nbase-link-card form { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+.nbase-link-card input { flex:1; min-width:180px; border:1px solid var(--editor-line); border-radius:5px; padding:5px 7px; background:transparent; color:inherit; font:inherit; }
+.nbase-link-card form>span { width:100%; color:var(--nb-danger,#9c4f37); }

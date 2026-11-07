@@ -16,12 +16,13 @@ import { isSafeLinkUrl } from '../markdown';
 import { $applyBlockStyle } from '../blockStyles';
 import type { BlockStyle } from '../blockStyles';
 import { CODE_LANGUAGES } from '../codeLanguages';
+import { $changeListIndent, $selectedListItems } from '../listIndent';
 import { $calloutForNode, $isCalloutNode, $unwrapCallout, calloutLabels } from '../nodes/CalloutNode';
 
 type Props = { readOnly: boolean; onNotice?: ((message: string) => void) | undefined; findPanel?: ReactNode };
 type CalloutState = { key: string; kind: CalloutKind; title: string };
-type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; highlight: boolean; code: boolean; link: string; table: boolean; codeKey: string; codeLanguage: string; callout: CalloutState | null };
-const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, highlight: false, code: false, link: '', table: false, codeKey: '', codeLanguage: '', callout: null };
+type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; highlight: boolean; code: boolean; link: string; table: boolean; listItem: boolean; codeKey: string; codeLanguage: string; callout: CalloutState | null };
+const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, highlight: false, code: false, link: '', table: false, listItem: false, codeKey: '', codeLanguage: '', callout: null };
 
 function $enclosingCodeBlock(node: LexicalNode): LexicalNode | null {
   for (let current: LexicalNode | null = node; current; current = current.getParent()) {
@@ -58,10 +59,11 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
         const codeBlock = $enclosingCodeBlock(node);
         const callout = $calloutForNode(node);
         setState({ block, bold: selection.hasFormat('bold'), italic: selection.hasFormat('italic'), strikethrough: selection.hasFormat('strikethrough'), highlight: selection.hasFormat('highlight'), code: selection.hasFormat('code'), link, table: Boolean($getTableCellNodeFromLexicalNode(node)),
+          listItem: $selectedListItems() !== null,
           codeKey: codeBlock?.getKey() ?? '', codeLanguage: $isCodeNode(codeBlock) ? codeBlock.getLanguage() ?? '' : '',
           callout: callout ? { key: callout.getKey(), kind: callout.getKind(), title: callout.getTitle() } : null });
       } else if ($isTableSelection(selection)) {
-        setState((previous) => ({ ...previous, table: true, codeKey: '', codeLanguage: '', callout: null }));
+        setState((previous) => ({ ...previous, table: true, listItem: false, codeKey: '', codeLanguage: '', callout: null }));
       }
     };
     editor.read('latest', update);
@@ -135,6 +137,8 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
         <select aria-label="段落样式" value={state.block in { paragraph: 1, h1: 1, h2: 1, h3: 1, bullet: 1, number: 1, check: 1, quote: 1, code: 1 } ? state.block : 'paragraph'} disabled={readOnly} onChange={(event) => blockChange(event.target.value)}>
           <option value="paragraph">正文</option><option value="h1">标题 1</option><option value="h2">标题 2</option><option value="h3">标题 3</option><option value="bullet">项目列表</option><option value="number">编号列表</option><option value="check">待办列表</option><option value="quote">引用</option><option value="code">代码块</option>
         </select>
+        {button('减少缩进 Shift+Tab', '⇤', () => edit(() => { $changeListIndent(editor, -1); }), false, !state.listItem)}
+        {button('增加缩进 Tab', '⇥', () => edit(() => { $changeListIndent(editor, 1); }), false, !state.listItem)}
       </div>
       <div className="nbase-tool-group">
         {button('粗体 Ctrl+B', <b>B</b>, () => format('bold'), state.bold)}

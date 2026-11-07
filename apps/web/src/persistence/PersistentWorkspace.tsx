@@ -7,7 +7,7 @@ import { Icon } from '../components/Icon';
 import { DocumentEditor } from '../editor/DocumentEditor';
 import { SourceEditorDialog } from '../editor/SourceEditorDialog';
 import { createContentFromMarkdown, markdownFromContent, parseMarkdownImport } from '../editor/markdown';
-import type { DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
+import type { AttachmentPickKind, DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
 import { ApiError, attachmentClient, loadPageTree, pageClient, tagClient } from './client';
 import { draftKey, draftVersion, localDrafts, sameDraftVersion,
   type LocalPageDraft, type LocalPendingAction, type LocalPendingCreate, type LocalPendingNoteWrite } from './drafts';
@@ -43,6 +43,11 @@ import { Toast } from '../shell/Toast';
 import { type MenuItem } from '../shell/Menu';
 import '../shell/shell.css';
 import './persistent.css';
+
+const attachmentAccept: Record<AttachmentPickKind, string> = {
+  image: '.png,.jpg,.jpeg,.gif,.webp',
+  file: '.png,.jpg,.jpeg,.gif,.webp,.pdf,.zip,.txt,.md',
+};
 
 export function PersistentWorkspace() {
   const [session, setSession] = useState<AuthSessionResponse | null>(null);
@@ -776,6 +781,12 @@ export function PersistentWorkspace() {
   const recentPages = recentIds.flatMap(id => pages.filter(page => page.id === id)).slice(0, 5);
   const homePages = [...pages].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 10);
   const editorReadOnly = readOnly || currentLocked || !canWrite;
+  const pickAttachment = (kind: AttachmentPickKind) => {
+    const input = attachmentInputRef.current;
+    if (!input) return;
+    input.accept = attachmentAccept[kind];
+    input.click();
+  };
   const openNewNote = (parentId: string | null) => {
     if (!canWrite || createBusyRef.current) return;
     setNewParent(parentId); setNoteDialogError(''); setDialog('new');
@@ -801,7 +812,7 @@ export function PersistentWorkspace() {
   };
   const pageMenuItems: (MenuItem | 'divider')[] = current ? [
     { key: 'mode', label: readOnly ? '切换为编辑' : '切换为阅读', icon: 'focus', disabled: !canWrite, onSelect: () => setReadOnly(!readOnly) },
-    { key: 'attach', label: '添加图片或附件', icon: 'image', disabled: editorReadOnly, onSelect: () => attachmentInputRef.current?.click() },
+    { key: 'attach', label: '添加图片或附件', icon: 'image', disabled: editorReadOnly, onSelect: () => pickAttachment('file') },
     { key: 'source', label: 'Markdown 源码', icon: 'code', onSelect: openSource },
     { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
     { key: 'folder-zip', label: '导出已保存的页面与子页面 ZIP', icon: 'download', disabled: folderExporting, onSelect: () => void exportFolder() },
@@ -875,7 +886,7 @@ export function PersistentWorkspace() {
                   if (pendingSearchRef.current?.pageId === id) requestAnimationFrame(() => locatePendingSearch(id));
                   if (pendingBacklinkRef.current?.link.sourcePageId === id) requestAnimationFrame(() => locatePendingBacklink(id));
                 }} onNotice={setNotice}
-                workspaceId={workspace?.id} onUploadFiles={uploadFiles} />
+                workspaceId={workspace?.id} onUploadFiles={uploadFiles} onPickAttachment={pickAttachment} />
                 : <div role="alert" className="nbase-unsupported"><h2>暂不能打开此格式版本</h2>
                   <p>原始数据仍保留在服务端。请先下载副本，等待兼容升级。</p>
                   <button className="nb-btn" onClick={exportCurrent}>下载原始 JSON</button></div>}
@@ -892,7 +903,7 @@ export function PersistentWorkspace() {
     </section>
     <input ref={fileRef} type="file" accept=".md,text/markdown" className="visually-hidden" aria-label="选择 Markdown 文件"
       onChange={event => { void importFile(event.target.files?.[0]); event.target.value = ''; }} />
-    <input ref={attachmentInputRef} type="file" accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.zip,.txt,.md" multiple
+    <input ref={attachmentInputRef} type="file" accept={attachmentAccept.file} multiple
       className="visually-hidden" aria-label="选择图片或附件"
       onChange={event => { const files = Array.from(event.target.files ?? []); event.target.value = '';
         void uploadFiles(files).then(uploaded => editorRef.current?.insertAttachments(uploaded)); }} />

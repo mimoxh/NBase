@@ -26,6 +26,8 @@ export interface EditorPageReferences {
   open: (pageId: string) => void;
 }
 
+export type AttachmentPickKind = 'image' | 'file';
+
 export interface DocumentEditorProps {
   documentId: string;
   title?: string | undefined;
@@ -39,6 +41,8 @@ export interface DocumentEditorProps {
   onNotice?: ((message: string) => void) | undefined;
   workspaceId?: string | undefined;
   onUploadFiles?: ((files: File[]) => Promise<AttachmentMetadata[]>) | undefined;
+  /** Opens the workspace file picker; without it the slash menu offers no upload commands. */
+  onPickAttachment?: ((kind: AttachmentPickKind) => void) | undefined;
 }
 
 export interface DocumentEditorHandle {

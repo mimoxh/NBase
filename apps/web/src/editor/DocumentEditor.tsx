@@ -29,6 +29,8 @@ import { SectionFoldingPlugin, type SectionFoldingHandle } from './plugins/Secti
 import { PageReferencesProvider } from './nodes/PageReferenceNode';
 import { PageReferencePlugin } from './plugins/PageReferencePlugin';
 import { MermaidPlugin } from './plugins/MermaidPlugin';
+import { ListIndentPlugin } from './plugins/ListIndentPlugin';
+import { LinkInteractionPlugin } from './plugins/LinkInteractionPlugin';
 import { FootnoteNavigationPlugin } from './nodes/FootnoteNodes';
 import { $insertAttachments, AttachmentWorkspaceContext } from './nodes/AttachmentNode';
 import 'katex/dist/katex.min.css';
@@ -206,8 +208,9 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <TablePlugin hasTabHandler hasHorizontalScroll hasNestedTables={false} />
       <HorizontalRulePlugin /><MarkdownShortcutPlugin transformers={MARKDOWN_TRANSFORMERS} />
       <CodeHighlightPlugin /><CodeCopyPlugin onNotice={props.onNotice} />
-      <EquationPlugin /><SlashCommandPlugin /><CalloutPlugin /><PageReferencePlugin historyState={history} />
+      <EquationPlugin /><SlashCommandPlugin onPickAttachment={props.onPickAttachment} /><CalloutPlugin /><PageReferencePlugin historyState={history} />
       <MermaidPlugin historyState={history} />
+      <ListIndentPlugin /><LinkInteractionPlugin onNotice={props.onNotice} />
       <FootnoteNavigationPlugin reveal={element => folding.current?.reveal(element)} />
       <SafePastePlugin onNotice={props.onNotice} onUploadFiles={props.onUploadFiles} />
       <SectionFoldingPlugin ref={folding} />

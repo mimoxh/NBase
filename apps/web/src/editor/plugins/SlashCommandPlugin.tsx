@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
 import { LexicalTypeaheadMenuPlugin, MenuOption } from '@lexical/react/LexicalTypeaheadMenuPlugin';
@@ -14,12 +14,14 @@ import { $createEquationNode, $insertEquationNode, $requestEquationEdit } from '
 import { $applyCallout, calloutLabels } from '../nodes/CalloutNode';
 import { INSERT_MERMAID_COMMAND } from '../nodes/MermaidNode';
 import { calloutKinds, type CalloutKind } from '@nbase/contracts';
+import type { AttachmentPickKind } from '../types';
 
 type SlashAction =
   | { kind: 'block'; value: BlockStyle }
   | { kind: 'hr' }
   | { kind: 'table' }
   | { kind: 'mermaid' }
+  | { kind: 'attachment'; value: AttachmentPickKind }
   | { kind: 'callout'; value: CalloutKind }
   | { kind: 'equation'; inline: boolean };
 
@@ -40,6 +42,8 @@ const COMMANDS: SlashCommand[] = [
   { key: 'hr', label: '分割线', hint: '--- 水平线', keywords: ['hr', 'divider', 'line', '分割线', '分隔线'], action: { kind: 'hr' } },
   { key: 'table', label: '表格', hint: '3 × 3 表格', keywords: ['table', '表格'], action: { kind: 'table' }, hideInTable: true },
   { key: 'mermaid', label: '图表', hint: 'Mermaid 流程图或时序图', keywords: ['mermaid', 'diagram', '图表', '流程图', '时序图'], action: { kind: 'mermaid' }, hideInTable: true },
+  { key: 'image', label: '图片', hint: '上传图片', keywords: ['image', 'img', 'picture', 'photo', '图片', '图像', '照片'], action: { kind: 'attachment', value: 'image' } },
+  { key: 'attachment', label: '附件', hint: '上传文件', keywords: ['file', 'attachment', 'upload', '附件', '文件', '上传'], action: { kind: 'attachment', value: 'file' } },
   ...calloutKinds.map((kind): SlashCommand => ({
     key: 'callout-' + kind, label: '提示 · ' + calloutLabels[kind], hint: '提示块',
     keywords: ['提示', 'callout', kind], action: { kind: 'callout', value: kind }, hideInTable: true,
@@ -71,11 +75,12 @@ function rank(command: SlashCommand, query: string): number {
   return Number.POSITIVE_INFINITY;
 }
 
-export function filterSlashCommands(query: string, inTable: boolean): SlashCommand[] {
+export function filterSlashCommands(query: string, inTable: boolean, canUpload = false): SlashCommand[] {
   const q = query.trim().toLowerCase();
   return COMMANDS
     .map((command, index) => ({ command, index, order: rank(command, q) }))
-    .filter(item => item.order < Infinity && !(inTable && item.command.hideInTable))
+    .filter(item => item.order < Infinity && !(inTable && item.command.hideInTable)
+      && (canUpload || item.command.action.kind !== 'attachment'))
     .sort((a, b) => a.order - b.order || a.index - b.index)
     .map(item => item.command);
 }
@@ -128,12 +133,15 @@ const menuRender: MenuRenderFn<SlashOption> = (anchorElementRef, itemProps) => {
 };
 
 /** `/` or `、` opens a block-style command menu; queries match labels and aliases. */
-export function SlashCommandPlugin() {
+export function SlashCommandPlugin({ onPickAttachment }: { onPickAttachment?: ((kind: AttachmentPickKind) => void) | undefined }) {
   const [editor] = useLexicalComposerContext();
   const [query, setQuery] = useState<string | null>(null);
+  const pickAttachment = useRef(onPickAttachment);
+  pickAttachment.current = onPickAttachment;
+  const canUpload = Boolean(onPickAttachment);
   const options = useMemo(
-    () => filterSlashCommands(query ?? '', selectionInTable(editor)).map(command => new SlashOption(command)),
-    [editor, query]);
+    () => filterSlashCommands(query ?? '', selectionInTable(editor), canUpload).map(command => new SlashOption(command)),
+    [canUpload, editor, query]);
 
   const selectOption = useCallback((option: SlashOption, nodeToRemove: TextNode | null, closeMenu: () => void) => {
     editor.update(() => {
@@ -160,9 +168,12 @@ export function SlashCommandPlugin() {
       }
       else if (action.kind === 'mermaid') editor.dispatchCommand(INSERT_MERMAID_COMMAND, undefined);
       else if (action.kind === 'callout') $applyCallout(action.value);
+      else if (action.kind === 'attachment') { /* The file picker opens after this update. */ }
       else $requestEquationEdit($insertEquationNode('', false));
       closeMenu();
     });
+    // Still inside the key or click activation that browsers require for a file picker.
+    if (option.command.action.kind === 'attachment') pickAttachment.current?.(option.command.action.value);
   }, [editor]);
 
   useEffect(() => editor.registerCommand(KEY_ENTER_COMMAND, event => {

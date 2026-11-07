@@ -6,6 +6,7 @@
 | --- | --- |
 | [product/requirements.md](product/requirements.md) | 用户确认的场景、约束、长期目标、未决事项和历史取舍 |
 | [product/v1-documents.md](product/v1-documents.md) | 第一版文档功能边界、验收和不做项 |
+| [product/editing-gaps-roadmap.md](product/editing-gaps-roadmap.md) | 编辑体验补齐计划 N16～N27（待确认提案） |
 | [architecture/decisions.md](architecture/decisions.md) | 技术选型、Web-first、数据与扩展边界、官方资料 |
 | [architecture/p2-api.md](architecture/p2-api.md) | P2 最小账号与后续文档 API 契约 |
 | [architecture/local-postgres.md](architecture/local-postgres.md) | 本机隔离 PostgreSQL 测试库的启动、凭据位置与边界 |

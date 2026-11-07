@@ -12,6 +12,7 @@ import { LinkNode } from '@lexical/link';
 import { $getTableCellNodeFromLexicalNode, $isTableSelection } from '@lexical/table';
 import { mergeRegister } from '@lexical/utils';
 import { isSafeLinkUrl } from '../markdown';
+import { $pasteUrl } from '../autoLink';
 import { $insertAttachments } from '../nodes/AttachmentNode';
 import { calloutTitleMaxLength, isCalloutKind, isCalloutTitle, isFootnoteId, isStoredMermaidSource, pageIdFromReferenceUrl, quickCaptureMarker, type AttachmentMetadata } from '@nbase/contracts';
 import { isPageReferenceLabel } from '../nodes/PageReferenceNode';
@@ -202,6 +203,10 @@ export function SafePastePlugin({ onNotice, onUploadFiles }: Props) {
       const internal = clipboard.getData('application/x-lexical-editor');
       const files = Array.from(clipboard.files);
       const text = clipboard.getData('text/plain');
+      if (!html && !internal && files.length === 0 && $pasteUrl(editor, text)) {
+        event.preventDefault();
+        return true;
+      }
       const selection = $getSelection();
       const target = $tablePasteTarget(selection);
       const clipboardTable = !internal && files.length === 0 && target && /<table[\s>]/i.test(html)
