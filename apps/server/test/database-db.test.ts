@@ -9,6 +9,7 @@ import { hashPassword } from '../src/auth/password.js';
 import { PgAuthRepository } from '../src/auth/repository.js';
 import { runMigrations } from '../src/db/migrate.js';
 import { migrations } from '../src/db/migrations.js';
+import { runSearchBatch } from '../src/databases/worker.js';
 import { PgPageRepository } from '../src/pages/repository.js';
 
 const sourceUrl = process.env.NBASE_TEST_DATABASE_URL;
@@ -128,6 +129,17 @@ test('databases keep schema, rows, history and trash consistent', {
     const reindexed = await inject({ method: 'GET', url: `${base}/search?q=${encodeURIComponent('已读')}`, headers: read });
     assert.equal(reindexed.json().results.length, 1);
 
+    // A large database is reindexed in the background: batches resume from the cursor and keep row revisions.
+    await pool.query(`UPDATE pages SET search_text = 'stale' WHERE id = $1`, [row.id]);
+    await pool.query(`UPDATE databases SET search_generation = search_generation + 1 WHERE page_id = $1`, [db.page.id]);
+    assert.equal(await runSearchBatch(pool, 1), true);
+    while (await runSearchBatch(pool, 1)) { /* drain */ }
+    const swept = await pool.query<{ search_text: string; revision: string; indexed: string }>(`SELECT p.search_text, p.revision::text AS revision,
+      (d.search_generation - d.search_indexed_generation)::text AS indexed FROM pages p JOIN databases d ON d.page_id = p.parent_id WHERE p.id = $1`, [row.id]);
+    assert.match(swept.rows[0]!.search_text, /已读/);
+    assert.equal(swept.rows[0]!.revision, patched.json().revision);
+    assert.equal(swept.rows[0]!.indexed, '0');
+
     // History restores the earlier values.
     const restored = await inject({ method: 'POST', url: `${base}/pages/${row.id}/restore-version`, headers: write, payload: {
       clientMutationId: randomUUID(), expectedRevision: patched.json().revision, sourceRevision: row.revision } });
@@ -151,6 +163,10 @@ test('databases keep schema, rows, history and trash consistent', {
     assert.equal(trashed.statusCode, 200, trashed.body);
     assert.equal((await inject({ method: 'GET', url: `${base}/databases/${db.page.id}`, headers: read })).statusCode, 404);
     const trashedRow = await inject({ method: 'GET', url: `${base}/trash/${row.id}`, headers: read });
+    // Rows that leave with their database keep their revision, take no snapshot and stay out of the trash list.
+    assert.equal(trashedRow.json().revision, restored.json().revision);
+    const trashList = await inject({ method: 'GET', url: `${base}/trash`, headers: read });
+    assert.deepEqual(trashList.json().pages.map((p: { id: string }) => p.id), [db.page.id]);
     const lonely = await inject({ method: 'POST', url: `${base}/pages/${row.id}/restore`, headers: write,
       payload: { clientMutationId: randomUUID(), expectedRevision: trashedRow.json().revision } });
     assert.equal(lonely.statusCode, 409);

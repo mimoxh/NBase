@@ -188,6 +188,7 @@ export class PgPageRepository {
       p.deletion_group_id, p.deleted_at::text AS cursor_deleted_at FROM pages p
       JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
       WHERE p.workspace_id = $1 AND p.deleted_at IS NOT NULL
+        AND NOT (p.kind = 'row' AND p.deletion_group_id <> p.id)
         AND ($3::timestamptz IS NULL OR (p.deleted_at, p.id) < ($3::timestamptz, $4::uuid))
       ORDER BY p.deleted_at DESC, p.id DESC LIMIT $5`,
     [workspaceId, actorId, cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1]);
@@ -597,16 +598,17 @@ export class PgPageRepository {
       if (body.expectedSubtreeIds) {
         // Clients see the page tree, which lists databases but not their rows; rows go along with them.
         const actual = await client.query<{ id: string }>(`WITH RECURSIVE subtree AS (
-          SELECT id, kind FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-          UNION ALL SELECT child.id, child.kind FROM pages child JOIN subtree parent ON child.parent_id = parent.id
-          WHERE child.workspace_id = $1 AND child.deleted_at IS NULL
-        ) SELECT id FROM subtree WHERE id = $2 OR kind <> 'row'`, [workspaceId, pageId]);
+          SELECT id FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+          UNION ALL SELECT child.id FROM pages child JOIN subtree parent ON child.parent_id = parent.id
+          WHERE child.workspace_id = $1 AND child.deleted_at IS NULL AND child.kind <> 'row'
+        ) SELECT id FROM subtree`, [workspaceId, pageId]);
         const expected = body.expectedSubtreeIds.map(id => id.toLowerCase()).sort();
         if (JSON.stringify(actual.rows.map(item => item.id).sort()) !== JSON.stringify(expected)) {
           throw new PageError(409, 'PAGE_TREE_CHANGED');
         }
       }
-      const deleted = await client.query<PageRow>(`
+      // Rows leaving with their database keep revision and body untouched, so they need no snapshot of their own.
+      const deleted = await client.query<{ id: string; kind: string }>(`
         WITH RECURSIVE subtree AS (
           SELECT id FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
           UNION ALL
@@ -614,14 +616,16 @@ export class PgPageRepository {
           WHERE child.workspace_id = $1 AND child.deleted_at IS NULL
         )
         UPDATE pages p SET deleted_at = now(), deletion_group_id = $2,
-          revision = revision + 1, updated_at = now()
+          revision = CASE WHEN p.kind = 'row' AND p.id <> $2 THEN p.revision ELSE p.revision + 1 END,
+          updated_at = CASE WHEN p.kind = 'row' AND p.id <> $2 THEN p.updated_at ELSE now() END
         WHERE p.workspace_id = $1 AND p.id IN (SELECT id FROM subtree)
-        RETURNING ${pageColumns}
+        RETURNING p.id, p.kind
       `, [workspaceId, pageId]);
-      const root = deleted.rows.find(item => item.id === pageId);
-      if (!root) throw new PageError(404, 'NOT_FOUND');
-      await this.snapshot(client, workspaceId, deleted.rows.map(item => item.id), actorId, 'trash');
-      return { statusCode: 200, body: pageFromRow({ ...root, tag_ids: row.tag_ids ?? [] }) };
+      const root = await client.query<PageRow>(`SELECT ${pageColumns} FROM pages WHERE workspace_id = $1 AND id = $2`, [workspaceId, pageId]);
+      if (!root.rows[0]) throw new PageError(404, 'NOT_FOUND');
+      await this.snapshot(client, workspaceId, deleted.rows.filter(item => item.kind !== 'row' || item.id === pageId).map(item => item.id),
+        actorId, 'trash');
+      return { statusCode: 200, body: pageFromRow({ ...root.rows[0], tag_ids: row.tag_ids ?? [] }) };
     });
   }
 
@@ -645,7 +649,7 @@ export class PgPageRepository {
           parentId = null;
         }
       }
-      const restored = await client.query<PageRow>(`
+      const restored = await client.query<{ id: string; kind: string }>(`
         WITH RECURSIVE subtree AS (
           SELECT id FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NOT NULL
           UNION ALL
@@ -656,14 +660,16 @@ export class PgPageRepository {
           parent_id = CASE WHEN id = $2 THEN $4::uuid ELSE parent_id END,
           sort_position = CASE WHEN id = $2 AND parent_id IS DISTINCT FROM $4::uuid
             THEN nextval('pages_sort_position_seq') * 1024 ELSE sort_position END,
-          revision = revision + 1, updated_at = now()
+          revision = CASE WHEN kind = 'row' AND id <> $2 THEN revision ELSE revision + 1 END,
+          updated_at = CASE WHEN kind = 'row' AND id <> $2 THEN updated_at ELSE now() END
         WHERE workspace_id = $1 AND id IN (SELECT id FROM subtree)
-        RETURNING ${pageColumns}
+        RETURNING id, kind
       `, [workspaceId, pageId, row.deletion_group_id, parentId]);
-      const root = restored.rows.find(item => item.id === pageId);
-      if (!root) throw new PageError(404, 'NOT_FOUND');
-      await this.snapshot(client, workspaceId, restored.rows.map(item => item.id), actorId, 'restore');
-      return { statusCode: 200, body: pageFromRow({ ...root, tag_ids: row.tag_ids ?? [] }) };
+      const root = await client.query<PageRow>(`SELECT ${pageColumns} FROM pages WHERE workspace_id = $1 AND id = $2`, [workspaceId, pageId]);
+      if (!root.rows[0]) throw new PageError(404, 'NOT_FOUND');
+      await this.snapshot(client, workspaceId, restored.rows.filter(item => item.kind !== 'row' || item.id === pageId).map(item => item.id),
+        actorId, 'restore');
+      return { statusCode: 200, body: pageFromRow({ ...root.rows[0], tag_ids: row.tag_ids ?? [] }) };
     });
   }
 
@@ -776,33 +782,50 @@ export class PgPageRepository {
         'SELECT parent_id FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL', [workspaceId, pageId]);
       const row = page.rows[0];
       if (!row) throw new PageError(404, 'NOT_FOUND');
-      const others = await client.query<{ id: string; sort_position: string }>(`
-        SELECT id, sort_position::text AS sort_position FROM pages
-        WHERE workspace_id = $1 AND parent_id IS NOT DISTINCT FROM $2::uuid AND deleted_at IS NULL AND id <> $3
-        ORDER BY pages.sort_position, id
-      `, [workspaceId, row.parent_id, pageId]);
-      const siblings = others.rows;
-      const index = afterPageId === null ? -1 : siblings.findIndex(item => item.id === afterPageId);
-      if (afterPageId !== null && index < 0) throw new PageError(409, 'PAGE_POSITION_INVALID');
-      const before = siblings[index];
-      const after = siblings[index + 1];
-      if (!before && !after) return;
+      // Sibling groups can hold tens of thousands of rows, so only the neighbours are read.
+      type Sibling = { id: string; sort_position: string };
+      const siblingFilter = `workspace_id = $1 AND parent_id IS NOT DISTINCT FROM $2::uuid AND deleted_at IS NULL AND id <> $3`;
+      let anchor: Sibling | undefined;
+      if (afterPageId !== null) {
+        const found = await client.query<Sibling>(`SELECT id, sort_position::text AS sort_position FROM pages
+          WHERE ${siblingFilter} AND id = $4`, [workspaceId, row.parent_id, pageId, afterPageId]);
+        anchor = found.rows[0];
+        if (!anchor) throw new PageError(409, 'PAGE_POSITION_INVALID');
+      }
+      const toward = (direction: 'before' | 'after', limit: number) => client.query<Sibling>(`
+        SELECT id, sort_position::text AS sort_position FROM pages WHERE ${siblingFilter}
+          AND ($4::bigint IS NULL OR (sort_position, id) ${direction === 'after' ? '>' : '<='} ($4::bigint, $5::uuid))
+        ORDER BY pages.sort_position ${direction === 'after' ? 'ASC' : 'DESC'}, id ${direction === 'after' ? 'ASC' : 'DESC'} LIMIT $6
+      `, [workspaceId, row.parent_id, pageId, anchor?.sort_position ?? null, anchor?.id ?? null, limit]).then(result => result.rows);
+      const next = (await toward('after', 1))[0];
+      if (!anchor && !next) return;
       const step = BigInt(sortPositionGap);
-      const lower = before ? BigInt(before.sort_position) : BigInt(after!.sort_position) - 2n * step;
-      const upper = after ? BigInt(after.sort_position) : lower + 2n * step;
+      const lower = anchor ? BigInt(anchor.sort_position) : BigInt(next!.sort_position) - 2n * step;
+      const upper = next ? BigInt(next.sort_position) : lower + 2n * step;
       if (upper - lower >= 2n) {
         await client.query('UPDATE pages SET sort_position = $3::bigint WHERE workspace_id = $1 AND id = $2',
           [workspaceId, pageId, String((lower + upper) / 2n)]);
         return;
       }
-      // The gap is used up: renumber this sibling group once.
-      const ids = siblings.map(item => item.id);
-      ids.splice(index + 1, 0, pageId);
-      await client.query(`
-        UPDATE pages p SET sort_position = v.position * $3::bigint
-        FROM unnest($2::uuid[]) WITH ORDINALITY AS v(id, position)
-        WHERE p.workspace_id = $1 AND p.id = v.id
-      `, [workspaceId, ids, sortPositionGap]);
+      // The gap is used up: spread out a run around the spot, widening it only until there is room.
+      for (let size = 64; ; size *= 4) {
+        const low = anchor ? await toward('before', size + 1) : [];
+        const high = await toward('after', size + 1);
+        const lowOpen = low.length <= size;
+        const highOpen = high.length <= size;
+        const ids = [...low.slice(0, size).reverse().map(item => item.id), pageId, ...high.slice(0, size).map(item => item.id)];
+        const room = BigInt(ids.length + 1) * step;
+        const floor = lowOpen ? BigInt((low.at(-1) ?? high[0]!).sort_position) - room : BigInt(low[size]!.sort_position);
+        const ceiling = highOpen ? BigInt((high.at(-1) ?? low[0]!).sort_position) + room : BigInt(high[size]!.sort_position);
+        const spacing = (ceiling - floor) / BigInt(ids.length + 1);
+        if (spacing < 64n && !(lowOpen && highOpen)) continue;
+        await client.query(`
+          UPDATE pages p SET sort_position = $3::bigint + v.position * $4::bigint
+          FROM unnest($2::uuid[]) WITH ORDINALITY AS v(id, position)
+          WHERE p.workspace_id = $1 AND p.id = v.id
+        `, [workspaceId, ids, String(floor), String(spacing)]);
+        return;
+      }
     });
   }
 

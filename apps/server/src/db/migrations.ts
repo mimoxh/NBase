@@ -328,4 +328,13 @@ CREATE TABLE databases (
 );
 `,
   },
+  {
+    version: 14,
+    name: 'database_background_reindex',
+    sql: `
+ALTER TABLE databases ADD COLUMN search_generation bigint NOT NULL DEFAULT 0;
+ALTER TABLE databases ADD COLUMN search_indexed_generation bigint NOT NULL DEFAULT 0;
+ALTER TABLE databases ADD COLUMN search_cursor uuid;
+`,
+  },
 ];

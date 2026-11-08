@@ -30,6 +30,15 @@ export function mergeRowProperties(properties: PropertyDefinition[], current: Ro
   return applyRowPatch(current, patch);
 }
 
+/** The part of a schema that row search text depends on; colors, order and other fields do not matter. */
+export function searchProjection(properties: PropertyDefinition[]): string {
+  const searchable = properties
+    .filter(p => !p.deletedAt && (p.type === 'text' || p.type === 'url' || p.type === 'select' || p.type === 'multi_select'))
+    .map(p => ({ id: p.id, type: p.type, options: (p.options ?? []).map(o => `${o.id}:${o.name}`).sort() }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return JSON.stringify(searchable);
+}
+
 /** Search text for a row: body text first, then searchable property values. */
 export function rowIndexText(bodyText: string, properties: PropertyDefinition[], values: RowProperties): string {
   const extra = rowSearchText(properties, values).replace(/\s+/gu, ' ').trim();

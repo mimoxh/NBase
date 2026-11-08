@@ -9,9 +9,9 @@ import { publicOriginConfig } from '../auth/session.js';
 import { authorizeWorkspace, WorkspaceRouteError } from '../auth/workspace.js';
 import { isRevision, isUuid, PageError, type PgPageRepository } from '../pages/repository.js';
 import { sendError } from '../pages/routes.js';
-import { extractDocumentIndex } from '../pages/search-text.js';
 import { validatePageIcon } from '../pages/validate.js';
-import { loadDatabaseSchema, rowIndexText } from './schema.js';
+import { loadDatabaseSchema, searchProjection } from './schema.js';
+import { DatabaseWorker, selectRowsForIndex, writeRowSearchText } from './worker.js';
 
 interface WorkspaceParams { workspaceId: string }
 interface DatabaseParams extends WorkspaceParams { pageId: string }
@@ -39,14 +39,6 @@ function updateBody(value: unknown): UpdateDatabaseSchemaRequest {
   if (databaseSchemaProblem(value.properties, value.views)) throw new PageError(422, 'DATABASE_SCHEMA_INVALID');
   return { clientMutationId: value.clientMutationId, expectedRevision: value.expectedRevision,
     properties: value.properties as PropertyDefinition[], views: value.views as DatabaseView[] };
-}
-
-/** Stable JSON for comparing schemas regardless of key order. */
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (object(value)) return `{${Object.keys(value).filter(key => value[key] !== undefined).sort()
-    .map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
-  return JSON.stringify(value);
 }
 
 interface DatabasePageRow {
@@ -92,26 +84,33 @@ async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorI
     schemaRevision: head.schema_revision, rows: rows.rows.map(databaseRow) };
 }
 
-/** Option names and property removal change what row search text should contain. */
-async function reindexRows(client: PoolClient, workspaceId: string, pageId: string,
-  properties: PropertyDefinition[]): Promise<void> {
-  const rows = await client.query<{ id: string; content_json: Parameters<typeof extractDocumentIndex>[0];
-    row_properties: RowProperties | null }>(`SELECT id, content_json, row_properties FROM pages
-    WHERE workspace_id = $1 AND parent_id = $2 AND kind = 'row'`, [workspaceId, pageId]);
-  if (!rows.rows.length) return;
-  const ids: string[] = [];
-  const texts: string[] = [];
-  for (const row of rows.rows) {
-    ids.push(row.id);
-    texts.push(rowIndexText(extractDocumentIndex(row.content_json).searchText, properties, row.row_properties ?? {}));
+/** Up to this many rows are reindexed in the schema transaction; larger databases go to the background worker. */
+const inlineReindexLimit = 500;
+
+/**
+ * Option names and property removal change what row search text should contain. Reports whether
+ * the background worker has work, since the workspace lock must not be held across a large database.
+ */
+async function reindexRows(client: PoolClient, workspaceId: string, pageId: string, properties: PropertyDefinition[]): Promise<boolean> {
+  const rows = await selectRowsForIndex(client, workspaceId, pageId, null, inlineReindexLimit + 1);
+  if (rows.length <= inlineReindexLimit) {
+    await writeRowSearchText(client, workspaceId, rows, properties);
+    // A sweep already under way would only redo the same text.
+    await client.query(`UPDATE databases SET search_indexed_generation = search_generation, search_cursor = NULL
+      WHERE workspace_id = $1 AND page_id = $2`, [workspaceId, pageId]);
+    return false;
   }
-  await client.query(`UPDATE pages p SET search_text = v.text
-    FROM unnest($2::uuid[], $3::text[]) AS v(id, text) WHERE p.workspace_id = $1 AND p.id = v.id`, [workspaceId, ids, texts]);
+  await client.query(`UPDATE databases SET search_generation = search_generation + 1, search_cursor = NULL
+    WHERE workspace_id = $1 AND page_id = $2`, [workspaceId, pageId]);
+  return true;
 }
 
 export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: PgPageRepository,
   auth: AuthRepository, publicOrigin: string): void {
   const { origin, secure } = publicOriginConfig(publicOrigin);
+  const worker = new DatabaseWorker(pool, error => app.log.error({ err: error }, 'database worker failed'));
+  worker.start();
+  app.addHook('onClose', () => worker.close());
   const authorize = (request: FastifyRequest, workspaceId: string, write: boolean) =>
     authorizeWorkspace(request, auth, origin, secure, workspaceId, write, write ? 'application/json' : undefined);
   const base = '/api/workspaces/:workspaceId/databases';
@@ -162,6 +161,7 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
       if (!isUuid(request.params.pageId)) throw new PageError(404, 'NOT_FOUND');
       const pageId = request.params.pageId.toLowerCase();
       const body = updateBody(request.body);
+      let backgroundWork = false;
       const result = await pages.mutate<DatabaseSchemaResponse>(workspaceId, actorId, body.clientMutationId,
         'database-update', pageId, body, async client => {
           const active = await client.query('SELECT 1 FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL',
@@ -181,12 +181,12 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
             views_json = $4::jsonb, revision = revision + 1, updated_at = now()
             WHERE workspace_id = $1 AND page_id = $2 RETURNING revision::text AS revision`,
           [workspaceId, pageId, JSON.stringify(body.properties), JSON.stringify(body.views)]);
-          if (canonical(current.properties_json) !== canonical(body.properties)) {
-            await reindexRows(client, workspaceId, pageId, body.properties);
-          }
+          if (searchProjection(current.properties_json) !== searchProjection(body.properties)
+            && await reindexRows(client, workspaceId, pageId, body.properties)) backgroundWork = true;
           return { statusCode: 200, body: { pageId, properties: body.properties, views: body.views,
             schemaRevision: updated.rows[0]!.revision } };
         }, response => response.pageId);
+      if (backgroundWork) worker.nudge();
       return reply.code(result.statusCode).send(result.body);
     } catch (error) { return sendError(request, reply, error, secure); }
   });

@@ -84,6 +84,20 @@ test('manual page order survives retries, parent moves and an exhausted gap with
     assert.equal((await titles()).length, 3);
     assert.equal((await titles())[0], '甲');
 
+    // Crowding one spot in a long list renumbers a run, keeps every page in order and leaves distant pages alone.
+    const crowdParent = await create('长列表');
+    const crowd: PageDocument[] = [];
+    for (let index = 0; index < 90; index += 1) crowd.push(await create(`项${index}`, crowdParent.id));
+    const positions = async () => new Map((await pool.query<{ id: string; sort_position: string }>(
+      'SELECT id, sort_position::text AS sort_position FROM pages WHERE parent_id = $1', [crowdParent.id])).rows.map(row => [row.id, row.sort_position]));
+    const lastPosition = (await positions()).get(crowd[89]!.id);
+    for (let round = 0; round < 24; round += 1) {
+      assert.equal((await place(round % 2 ? crowd[2]!.id : crowd[3]!.id, crowd[0]!.id)).statusCode, 204);    }
+    const rest = Array.from({ length: 86 }, (_, index) => `项${index + 4}`);
+    assert.deepEqual(await titles(crowdParent.id), ['项0', '项2', '项3', '项1', ...rest]);
+    assert.equal(new Set(await positions().then(map => [...map.values()])).size, 90);
+    assert.equal((await positions()).get(crowd[89]!.id), lastPosition);
+
     const moved = await app.inject({ method: 'PATCH', url: `${base}/pages/${b.id}`, headers: write,
       payload: { clientMutationId: randomUUID(), expectedRevision: b.revision, parentId: a.id } });
     assert.equal(moved.statusCode, 200, moved.body);

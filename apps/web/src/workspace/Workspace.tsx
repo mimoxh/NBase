@@ -124,7 +124,8 @@ function DemoSearch({ pages, recentIds, onOpen, onCommand, onClose }: {
 }
 
 function DemoTrash({ pages, onRestore, onClose }: { pages: Page[]; onRestore: (id: string) => void; onClose: () => void }) {
-  const trashed = pages.filter(p => p.deleted);
+  // Rows that left with their database come back with it, as on the server.
+  const trashed = pages.filter(p => p.deleted && !(p.kind === 'row' && p.deletionRoot !== p.id));
   const [filter, setFilter] = useState(''); const [selected, setSelected] = useState<string | null>(trashed[0]?.id ?? null);
   const visible = trashed.filter(p => (p.title || '未命名页面').toLocaleLowerCase().includes(filter.trim().toLocaleLowerCase()));
   const page = trashed.find(p => p.id === selected) ?? null;
