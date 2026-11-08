@@ -1,0 +1,108 @@
+import { useState } from 'react';
+import { type DatabaseRow, type DatabaseView as View, type PropertyDefinition, type PropertyType, type PropertyValue } from '@nbase/contracts';
+import { Icon } from '../../components/Icon';
+import { Popover } from '../../components/Popover';
+import { EditableCell } from '../cells';
+import { HeaderMenu } from '../HeaderMenu';
+import { creatableTypes, typeGlyphs, typeLabels } from '../labels';
+import type { Panel } from '../panel';
+import type { DatabaseDataSource, DatabaseState } from '../source';
+import { useColumnResize } from './useColumnResize';
+
+export function TableView({ source, state, view, columns, rows, allRowCount, matchingRowCount, canAddProperty, panel, setPanel,
+  onUpdateView, onSave, onAddProperty, onCell, onCreateOption }: {
+  source: DatabaseDataSource; state: DatabaseState; view: View; columns: PropertyDefinition[]; rows: DatabaseRow[];
+  allRowCount: number; matchingRowCount: number; canAddProperty: boolean; panel: Panel; setPanel: (panel: Panel) => void;
+  onUpdateView: (patch: Partial<View>) => void;
+  onSave: (properties: PropertyDefinition[], views?: View[]) => void;
+  onAddProperty: (type: PropertyType) => void;
+  onCell: (row: DatabaseRow, def: PropertyDefinition, value: PropertyValue | null) => void;
+  onCreateOption: (def: PropertyDefinition) => (name: string) => Promise<string | null>;
+}) {
+  const doc = state.doc!;
+  const canWrite = source.canWrite;
+  const [dragRow, setDragRow] = useState<string | null>(null);
+  const [dropRow, setDropRow] = useState<string | null>(null);
+  const { widthOf, startResize } = useColumnResize(view, canWrite, widths => onUpdateView({ widths }));
+  const manualOrder = view.sorts.length === 0 && canWrite;
+  return <div className="nb-db-scroll">
+    <table className="nb-db-table" style={{ width: columns.reduce((sum, def) => sum + widthOf(def), 0) + (canWrite ? 76 : 36) }}>
+      <colgroup>
+        <col style={{ width: 36 }} />
+        {columns.map(def => <col key={def.id} style={{ width: widthOf(def) }} />)}
+        {canWrite && <col style={{ width: 40 }} />}
+      </colgroup>
+      <thead><tr>
+        <th className="nb-db-gutter" aria-label="行操作" />
+        {columns.map(def => <th key={def.id} scope="col">
+          <span className="nb-db-anchor nb-db-th">
+            <button className="nb-db-th-button" disabled={!canWrite} onClick={() => setPanel({ kind: 'header', id: def.id })}>
+              <span className="nb-db-glyph">{typeGlyphs[def.type]}</span><span className="nb-db-th-name">{def.name}</span>
+              {view.sorts.some(s => s.propertyId === def.id) && <span className="nb-db-sorted">
+                {view.sorts.find(s => s.propertyId === def.id)!.direction === 'asc' ? '↑' : '↓'}</span>}
+            </button>
+            {panel?.kind === 'header' && panel.id === def.id && <HeaderMenu def={def} view={view} state={state}
+              onClose={() => setPanel(null)} onSaveProperties={onSave} />}
+          </span>
+          {canWrite && <span className="nb-db-resize" role="separator" aria-orientation="vertical" aria-label={`调整「${def.name}」列宽`}
+            onPointerDown={event => startResize(event, def)} />}
+        </th>)}
+        {canWrite && <th className="nb-db-add-col">
+          <span className="nb-db-anchor">
+            <button className="nb-db-tool" aria-label="添加字段" disabled={!canAddProperty}
+              onClick={() => setPanel({ kind: 'add-property' })}><Icon name="plus" size={14} /></button>
+            {panel?.kind === 'add-property' && <Popover label="添加字段" className="nb-db-pop" portal width={200} onClose={() => setPanel(null)}>
+              <div className="nb-db-menu">{creatableTypes.map(type => <button key={type} onClick={() => onAddProperty(type)}>
+                <span className="nb-db-glyph">{typeGlyphs[type]}</span>{typeLabels[type]}</button>)}</div>
+            </Popover>}
+          </span>
+        </th>}
+      </tr></thead>
+      <tbody>
+        {rows.map((row, index) => <tr key={row.id}
+          className={`${dropRow === row.id ? 'nb-db-drop' : ''} ${dragRow === row.id ? 'nb-db-dragging' : ''}`}
+          onDragOver={event => { if (!dragRow || dragRow === row.id) return; event.preventDefault(); setDropRow(row.id); }}
+          onDragLeave={() => setDropRow(previous => previous === row.id ? null : previous)}
+          onDrop={event => {
+            event.preventDefault();
+            const moving = dragRow;
+            setDragRow(null); setDropRow(null);
+            if (!moving || moving === row.id) return;
+            // Dropping on a row below puts the moved row after it; on a row above, before it.
+            const order = doc.rows.map(item => item.id);
+            const from = order.indexOf(moving);
+            const to = order.indexOf(row.id);
+            void state.moveRow(moving, from < to ? row.id : order[to - 1] ?? null);
+          }}>
+          <td className="nb-db-gutter">
+            <span className="nb-db-row-actions">
+              {manualOrder && <span className="nb-db-handle" draggable aria-label="拖动调整行顺序" title="拖动调整顺序"
+                onDragStart={event => { setDragRow(row.id); event.dataTransfer.effectAllowed = 'move';
+                  event.dataTransfer.setData('application/x-nbase-row', row.id); }}
+                onDragEnd={() => { setDragRow(null); setDropRow(null); }}>⋮⋮</span>}
+              {!manualOrder && <span className="nb-db-index">{index + 1}</span>}
+            </span>
+          </td>
+          {columns.map(def => {
+            const pendingKey = `${row.id}:${def.type === 'title' ? 'title' : def.id}`;
+            return <td key={def.id} className={`nb-db-cell nb-db-type-${def.type} ${state.pending.has(pendingKey) ? 'pending' : ''}`}>
+              <span className="nb-db-anchor nb-db-cell-inner">
+                <EditableCell row={row} def={def} editable={canWrite}
+                  onChange={value => onCell(row, def, value)}
+                  onTitle={title => void state.updateRow(row.id, { title: title.slice(0, 255) })}
+                  onCreateOption={canWrite ? onCreateOption(def) : undefined} />
+                {def.type === 'title' && <button className="nb-db-open" onClick={() => source.openRow(row.id)}>打开</button>}
+              </span>
+            </td>;
+          })}
+          {canWrite && <td className="nb-db-row-end">
+            <button className="nb-db-tool nb-db-row-delete" aria-label={`删除「${row.title || '未命名'}」`} title="移入回收站"
+              onClick={() => void state.trashRow(row.id)}><Icon name="trash" size={13} /></button>
+          </td>}
+        </tr>)}
+      </tbody>
+    </table>
+    {!matchingRowCount && <p className="nb-db-empty-note nb-db-empty-rows">
+      {allRowCount ? '没有符合筛选条件的行。' : canWrite ? '还没有内容，点击「新建」添加第一行。' : '还没有内容。'}</p>}
+  </div>;
+}
