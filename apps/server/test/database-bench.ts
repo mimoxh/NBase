@@ -100,6 +100,15 @@ try {
 
   report.idleWrite = { ms: await probeWrite(), blockedWriteMs: 0, status: 201 };
   await measure('readDatabase', () => instance.inject({ method: 'GET', url: `${base}/databases/${db.page.id}`, headers: read }));
+  const query = (filters: unknown[], sorts: unknown[]) => instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/query`, headers: write,
+    payload: { filters, sorts, context: { timeZone: 'Asia/Shanghai' } } });
+  await measure('queryAll', () => query([], []));
+  await measure('querySortText', () => query([], [{ propertyId: fields.text.id, direction: 'asc' }]));
+  await measure('querySortNumber', () => query([], [{ propertyId: fields.number.id, direction: 'desc' }]));
+  await measure('queryFilterSort', () => query([{ propertyId: fields.select.id, operator: 'equals', value: options[1]!.id },
+    { propertyId: fields.text.id, operator: 'contains', value: '99' }], [{ propertyId: fields.date.id, direction: 'desc' }]));
+  await measure('queryOrFilter', () => query([{ any: [{ propertyId: fields.number.id, operator: 'gt', value: 5000 },
+    { propertyId: fields.done.id, operator: 'is_checked' }] }], [{ propertyId: fields.select.id, direction: 'asc' }]));
   const recolored = properties.map(p => p.id === fields.select.id
     ? { ...p, options: options.map((o, i) => i === 0 ? { ...o, color: 'red' as const } : o) } : p);
   const recolor = await measure('recolorOption', () => instance.inject({ method: 'PATCH', url: `${base}/databases/${db.page.id}`, headers: write,

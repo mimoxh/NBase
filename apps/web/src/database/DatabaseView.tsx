@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { activeProperties, databasePropertyLimit, databaseViewLimit, evaluateView, operatorNeedsValue, type DatabaseRow,
+import { activeProperties, databasePropertyLimit, databaseViewLimit, evaluateView, isFilterGroup, operatorNeedsValue, type DatabaseRow,
   type DatabaseView as View, type PropertyDefinition, type PropertyType, type PropertyValue, type RowProperties } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { OptionTag } from './cells';
@@ -22,6 +22,7 @@ function uniqueName(base: string, taken: string[]): string {
 function defaultsFromFilters(view: View, properties: PropertyDefinition[]): RowProperties {
   const values: RowProperties = {};
   for (const filter of view.filters) {
+    if (isFilterGroup(filter)) continue;
     const def = properties.find(p => p.id === filter.propertyId && !p.deletedAt);
     if (!def || values[def.id] !== undefined) continue;
     if (filter.operator === 'is_checked' && def.type === 'checkbox') values[def.id] = true;
@@ -105,6 +106,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
   };
 
   const filterChips = view.filters.map((filter, index) => {
+    if (isFilterGroup(filter)) return null;
     const def = active.find(p => p.id === filter.propertyId);
     if (!def) return null;
     const optionName = def.options?.find(o => o.id === filter.value)?.name;

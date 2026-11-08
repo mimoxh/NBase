@@ -26,15 +26,7 @@ export type {
   TrashPageRequest,
   UpdatePageRequest,
 } from './pages.js';
-export { activeProperties, applyRowPatch, cellText, cellValue, databaseColumnWidth, databaseConditionLimit,
-  databaseMultiSelectLimit, databaseNameLimit, databaseOptionLimit, databasePropertyLimit, databaseRowLimit,
-  databaseSchemaProblem, databaseTextValueLimit, databaseUrlValueLimit, databaseViewLimit, defaultDatabaseSchema,
-  evaluateView, filterOperators, filterOperatorsFor, isDatabaseId, isDatabaseView, isDateValue, isPropertyDefinition,
-  isPropertyValue, isSelectOption, isSerializedDatabaseView, isStoredPropertyType, isUrlValue, operatorNeedsValue, optionColors, pageKinds,
-  propertyTypes, rowSearchText, rowValueProblem, storedPropertyTypes, viewColumns } from './databases.js';
-export type { CreateDatabaseRequest, DatabaseDocument, DatabaseRow, DatabaseSchemaResponse, DatabaseView,
-  EvaluatedView, FilterOperator, OptionColor, PageKind, PropertyDefinition, PropertyType, PropertyValue,
-  RowProperties, SelectOption, SerializedDatabaseView, StoredPropertyType, UpdateDatabaseSchemaRequest, ViewFilter, ViewSort } from './databases.js';
+export * from './databases.js';
 export type { FavoriteListResponse } from './favorites.js';
 export { pageBacklinkLimit, pageIdFromReferenceUrl, pageReferenceLabelLimit, pageReferenceUrl } from './pageReferences.js';
 export type { PageBacklink, PageBacklinksResponse, SerializedPageReference } from './pageReferences.js';

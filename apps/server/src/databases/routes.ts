@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { databaseRowLimit, databaseSchemaProblem, defaultDatabaseSchema, type CreateDatabaseRequest, type DatabaseDocument,
-  type DatabaseRow, type DatabaseSchemaResponse, type DatabaseView, type PageSummary, type PropertyDefinition,
-  type RowProperties, type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
+import { databaseQueryWindow, databaseRowLimit, databaseSchemaProblem, defaultDatabaseSchema, isDatabaseQueryRequest, type CreateDatabaseRequest,
+  type DatabaseDocument, type DatabaseSchemaResponse, type DatabaseView, type PageSummary, type PropertyDefinition,
+  type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import type { AuthRepository } from '../auth/repository.js';
@@ -10,7 +10,8 @@ import { authorizeWorkspace, WorkspaceRouteError } from '../auth/workspace.js';
 import { isRevision, isUuid, PageError, type PgPageRepository } from '../pages/repository.js';
 import { sendError } from '../pages/routes.js';
 import { validatePageIcon } from '../pages/validate.js';
-import { loadDatabaseSchema, searchProjection } from './schema.js';
+import { readDatabaseRows, runDatabaseQuery } from './query.js';
+import { databaseRow, loadDatabaseSchema, searchProjection, type RowRecord } from './schema.js';
 import { DatabaseWorker, selectRowsForIndex, writeRowSearchText } from './worker.js';
 
 interface WorkspaceParams { workspaceId: string }
@@ -46,20 +47,10 @@ interface DatabasePageRow {
   cover: PageSummary['cover']; revision: string; created_at: Date; updated_at: Date;
 }
 
-interface RowRecord {
-  id: string; title: string; icon: string | null; row_properties: RowProperties | null; revision: string;
-  created_at: Date; updated_at: Date;
-}
-
 function pageSummary(row: DatabasePageRow): PageSummary {
   return { id: row.id, workspaceId: row.workspace_id, parentId: row.parent_id, title: row.title, icon: row.icon ?? null,
     cover: row.cover ?? null, kind: 'database', revision: row.revision, createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString() };
-}
-
-function databaseRow(row: RowRecord): DatabaseRow {
-  return { id: row.id, title: row.title, icon: row.icon ?? null, properties: row.row_properties ?? {}, revision: row.revision,
-    createdAt: row.created_at.toISOString(), updatedAt: row.updated_at.toISOString() };
 }
 
 async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorId: string,
@@ -111,9 +102,36 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
   const worker = new DatabaseWorker(pool, error => app.log.error({ err: error }, 'database worker failed'));
   worker.start();
   app.addHook('onClose', () => worker.close());
-  const authorize = (request: FastifyRequest, workspaceId: string, write: boolean) =>
+  const authorize = (request: FastifyRequest, workspaceId: string, write: boolean | 'post-read') =>
     authorizeWorkspace(request, auth, origin, secure, workspaceId, write, write ? 'application/json' : undefined);
   const base = '/api/workspaces/:workspaceId/databases';
+
+  app.post<{ Params: DatabaseParams }>(`${base}/:pageId/query`, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId, pageId } = request.params;
+      const actorId = await authorize(request, workspaceId, 'post-read');
+      if (!isUuid(pageId)) throw new PageError(404, 'NOT_FOUND');
+      if (!isDatabaseQueryRequest(request.body)) requestError();
+      const result = await runDatabaseQuery(pool, workspaceId, actorId, pageId.toLowerCase(), request.body);
+      if (!result) throw new PageError(404, 'NOT_FOUND');
+      return reply.send(result);
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.post<{ Params: DatabaseParams }>(`${base}/:pageId/rows/read`, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId, pageId } = request.params;
+      const actorId = await authorize(request, workspaceId, 'post-read');
+      if (!isUuid(pageId)) throw new PageError(404, 'NOT_FOUND');
+      const body = request.body;
+      if (!object(body) || !Array.isArray(body.ids) || body.ids.length > databaseQueryWindow || !body.ids.every(isUuid)) requestError();
+      const rows = await readDatabaseRows(pool, workspaceId, actorId, pageId.toLowerCase(), (body.ids as string[]).map(id => id.toLowerCase()));
+      if (!rows) throw new PageError(404, 'NOT_FOUND');
+      return reply.send({ rows });
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
 
   app.get<{ Params: DatabaseParams }>(`${base}/:pageId`, async (request, reply) => {
     reply.header('Cache-Control', 'no-store');

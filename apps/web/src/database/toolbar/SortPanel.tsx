@@ -1,4 +1,4 @@
-import { databaseConditionLimit, type DatabaseView as View, type PropertyDefinition } from '@nbase/contracts';
+import { databaseConditionLimit, flatFilters, type DatabaseView as View, type PropertyDefinition } from '@nbase/contracts';
 import { Icon } from '../../components/Icon';
 import { Popover } from '../../components/Popover';
 
@@ -6,7 +6,7 @@ export function SortPanel({ view, active, canWrite, open, onOpen, onClose, onUpd
   view: View; active: PropertyDefinition[]; canWrite: boolean; open: boolean; onOpen: () => void; onClose: () => void;
   onUpdate: (patch: Partial<View>) => void;
 }) {
-  const conditions = view.filters.length + view.sorts.length;
+  const conditions = flatFilters(view.filters).length + view.sorts.length;
   return <span className="nb-db-anchor">
     <button className={`nb-db-tool ${view.sorts.length ? 'on' : ''}`} onClick={onOpen}>
       <Icon name="sort" size={14} />排序{view.sorts.length ? ` ${view.sorts.length}` : ''}</button>

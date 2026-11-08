@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { cellText, databaseSchemaProblem, defaultDatabaseSchema, evaluateView, isSerializedDatabaseView, rowSearchText,
-  rowValueProblem, type DatabaseRow, type DatabaseView, type PropertyDefinition } from '@nbase/contracts';
+import { cellText, databaseSchemaProblem, defaultDatabaseSchema, evaluateView, isSerializedDatabaseView, resolveRelativeDate, retainFilters,
+  rowSearchText, rowValueProblem, type DatabaseRow, type DatabaseView, type PropertyDefinition } from '@nbase/contracts';
 import { mergeRowProperties, rowIndexText } from '../src/databases/schema.js';
 import { validateDocumentContent } from '../src/pages/validate.js';
 
@@ -132,6 +132,32 @@ test('time filters compare the local day shown in the cell', () => {
   } finally {
     if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous;
   }
+});
+
+test('relative dates resolve to inclusive days around today', () => {
+  const today = '2026-11-11'; // A Wednesday.
+  assert.deepEqual(resolveRelativeDate('this_week', today, 1), { from: '2026-11-09', to: '2026-11-15' });
+  assert.deepEqual(resolveRelativeDate('this_week', today, 0), { from: '2026-11-08', to: '2026-11-14' });
+  assert.deepEqual(resolveRelativeDate('last_week', today, 1), { from: '2026-11-02', to: '2026-11-08' });
+  assert.deepEqual(resolveRelativeDate('this_month', '2028-02-10'), { from: '2028-02-01', to: '2028-02-29' });
+  assert.deepEqual(resolveRelativeDate('last_month', '2026-01-15'), { from: '2025-12-01', to: '2025-12-31' });
+  assert.deepEqual(resolveRelativeDate('last_7_days', today), { from: '2026-11-05', to: today });
+  assert.equal(resolveRelativeDate('someday', today), null);
+  const onDate = (value: string, operator: 'equals' | 'gt' | 'lte') => evaluateView(rows, properties,
+    view({ filters: [{ propertyId: ids.date, operator, value }] }), { today: '2026-11-04', weekStart: 1 }).rows.map(r => r.title);
+  assert.deepEqual(onDate('@this_week', 'equals'), ['苹果']);
+  assert.deepEqual(onDate('@last_week', 'lte'), ['樱桃']);
+  assert.deepEqual(onDate('@last_week', 'gt'), ['苹果']);
+});
+
+test('or groups need one match and ignore conditions still being typed', () => {
+  const cheapOrDone = view({ filters: [{ any: [{ propertyId: ids.number, operator: 'lt', value: 3 }, { propertyId: ids.done, operator: 'is_checked' }] }] });
+  assert.equal(databaseSchemaProblem(properties, [cheapOrDone]), null);
+  assert.deepEqual(evaluateView(rows, properties, cheapOrDone).rows.map(r => r.title), ['苹果', '香蕉']);
+  const halfTyped = view({ filters: [{ any: [{ propertyId: ids.text, operator: 'contains' }, { propertyId: ids.number, operator: 'lt', value: 3 }] }] });
+  assert.deepEqual(evaluateView(rows, properties, halfTyped).rows.map(r => r.title), ['香蕉']);
+  assert.equal(databaseSchemaProblem(properties, [view({ filters: [{ any: [] }] })]), 'view-invalid');
+  assert.deepEqual(retainFilters([{ any: [{ propertyId: ids.text, operator: 'is_empty' }] }], () => false), []);
 });
 
 test('row search text contains text, url and option names', () => {

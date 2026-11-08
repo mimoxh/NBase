@@ -337,4 +337,12 @@ ALTER TABLE databases ADD COLUMN search_indexed_generation bigint NOT NULL DEFAU
 ALTER TABLE databases ADD COLUMN search_cursor uuid;
 `,
   },
+  {
+    version: 15,
+    name: 'database_text_collation',
+    sql: `
+-- Natural, case-insensitive ordering for text columns, matching Intl.Collator('zh-Hans-CN', { numeric, base }).
+CREATE COLLATION nbase_zh (provider = icu, locale = 'zh-Hans-CN-u-kn-true-ks-level1', deterministic = false);
+`,
+  },
 ];

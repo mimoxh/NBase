@@ -11,8 +11,9 @@ export class WorkspaceRouteError extends Error {
     public readonly clearCookie = false) { super(code); }
 }
 
+/** `post-read` is a read carried by POST: it gets the write checks on origin and CSRF, but viewers may use it. */
 export async function authorizeWorkspace(request: FastifyRequest, auth: AuthRepository,
-  origin: string, secure: boolean, workspaceId: string, write: boolean,
+  origin: string, secure: boolean, workspaceId: string, write: boolean | 'post-read',
   contentType?: string): Promise<string> {
   if (!uuidPattern.test(workspaceId)) throw new WorkspaceRouteError(404, 'NOT_FOUND');
   if (write && request.headers.origin !== origin) throw new WorkspaceRouteError(403, 'ORIGIN_INVALID');
@@ -28,7 +29,7 @@ export async function authorizeWorkspace(request: FastifyRequest, auth: AuthRepo
   const membership = (await auth.workspacesForUser(session.userId)).find((item) => item.id === workspaceId);
   if (!membership) throw new WorkspaceRouteError(404, 'NOT_FOUND');
   if (write) {
-    if (membership.role === 'viewer') throw new WorkspaceRouteError(403, 'FORBIDDEN');
+    if (write === true && membership.role === 'viewer') throw new WorkspaceRouteError(403, 'FORBIDDEN');
     const csrf = request.headers['x-csrf-token'];
     if (typeof csrf !== 'string' || !verifyCsrf(session.csrfHash, csrf)) {
       throw new WorkspaceRouteError(403, 'CSRF_INVALID');

@@ -58,6 +58,44 @@ export interface ViewFilter {
   value?: string | number | null;
 }
 
+/** Conditions of which at least one must hold. A view's entries must all hold. */
+export interface ViewFilterGroup {
+  any: ViewFilter[];
+}
+
+export type ViewFilterEntry = ViewFilter | ViewFilterGroup;
+
+export function isFilterGroup(entry: ViewFilterEntry): entry is ViewFilterGroup {
+  return 'any' in entry;
+}
+
+/** Every condition of a view, wherever it is grouped. */
+export function flatFilters(entries: readonly ViewFilterEntry[]): ViewFilter[] {
+  return entries.flatMap(entry => isFilterGroup(entry) ? entry.any : [entry]);
+}
+
+/** Removes conditions; a group left empty goes too. */
+export function retainFilters(entries: readonly ViewFilterEntry[], keep: (filter: ViewFilter) => boolean): ViewFilterEntry[] {
+  return entries.flatMap((entry): ViewFilterEntry[] => {
+    if (!isFilterGroup(entry)) return keep(entry) ? [entry] : [];
+    const any = entry.any.filter(keep);
+    return any.length ? [{ any }] : [];
+  });
+}
+
+/** Filter values on date properties may be one of these, written with a leading `@`. */
+export const relativeDateTokens = ['today', 'yesterday', 'tomorrow', 'this_week', 'last_week', 'next_week', 'this_month',
+  'last_month', 'next_month', 'last_7_days', 'last_30_days', 'next_7_days', 'next_30_days'] as const;
+export type RelativeDateToken = typeof relativeDateTokens[number];
+
+/** What "today" and a day of a timestamp mean for a reader. Missing fields fall back to the runtime's local time. */
+export interface QueryContext {
+  timeZone?: string;
+  today?: string;
+  /** 0 is Sunday, 1 is Monday. */
+  weekStart?: 0 | 1;
+}
+
 export interface ViewSort {
   propertyId: string;
   direction: 'asc' | 'desc';
@@ -67,7 +105,7 @@ export interface DatabaseView {
   id: string;
   name: string;
   type: 'table';
-  filters: ViewFilter[];
+  filters: ViewFilterEntry[];
   sorts: ViewSort[];
   hiddenPropertyIds: string[];
   /** Column order after the pinned title column; unknown or missing ids fall back to definition order. */
@@ -220,6 +258,12 @@ function isFilter(value: unknown): value is ViewFilter {
     || (typeof v === 'number' && Number.isFinite(v));
 }
 
+function isFilterEntry(value: unknown): value is ViewFilterEntry {
+  if (isFilter(value)) return true;
+  return isRecord(value) && hasOnly(value, ['any']) && Array.isArray(value.any) && value.any.length > 0
+    && value.any.length <= databaseConditionLimit && value.any.every(isFilter);
+}
+
 function isSort(value: unknown): value is ViewSort {
   return isRecord(value) && hasOnly(value, ['propertyId', 'direction']) && isDatabaseId(value.propertyId)
     && (value.direction === 'asc' || value.direction === 'desc');
@@ -234,8 +278,8 @@ export function isDatabaseView(value: unknown): value is DatabaseView {
   if (!isRecord(value) || !hasOnly(value, ['id', 'name', 'type', 'filters', 'sorts', 'hiddenPropertyIds', 'propertyOrder', 'widths'])) return false;
   if (!isDatabaseId(value.id) || !isName(value.name) || value.type !== 'table') return false;
   if (!Array.isArray(value.filters) || !Array.isArray(value.sorts)) return false;
-  if (value.filters.length + value.sorts.length > databaseConditionLimit) return false;
-  if (!value.filters.every(isFilter) || !value.sorts.every(isSort)) return false;
+  if (!value.filters.every(isFilterEntry) || !value.sorts.every(isSort)) return false;
+  if (flatFilters(value.filters).length + value.sorts.length > databaseConditionLimit) return false;
   if (!isIdList(value.hiddenPropertyIds) || !isIdList(value.propertyOrder) || !isRecord(value.widths)) return false;
   const widths = Object.entries(value.widths);
   return widths.length <= databasePropertyLimit && widths.every(([key, width]) => isDatabaseId(key)
@@ -260,7 +304,7 @@ export function databaseSchemaProblem(properties: unknown, views: unknown): stri
   if (new Set(list.map(v => v.id)).size !== list.length) return 'view-duplicate';
   const active = new Map(defs.filter(p => !p.deletedAt).map(p => [p.id, p]));
   for (const view of list) {
-    for (const filter of view.filters) {
+    for (const filter of flatFilters(view.filters)) {
       const def = active.get(filter.propertyId);
       if (!def || !operatorsByType[def.type].includes(filter.operator)) return 'view-filter';
     }
@@ -337,13 +381,67 @@ export function cellText(row: DatabaseRow, def: PropertyDefinition): string {
 
 const collator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
 
+const pad2 = (n: number) => String(n).padStart(2, '0');
+const dayFormatters = new Map<string, Intl.DateTimeFormat>();
+
+/** The calendar day of an instant for a reader; without a zone, in the runtime's local time. */
+export function localDay(time: Date, timeZone?: string): string {
+  if (!timeZone) return `${time.getFullYear()}-${pad2(time.getMonth() + 1)}-${pad2(time.getDate())}`;
+  let formatter = dayFormatters.get(timeZone);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    dayFormatters.set(timeZone, formatter);
+  }
+  return formatter.format(time);
+}
+
 /** Calendar day to compare. Page times are UTC instants, shown and filtered as the reader's local day. */
-function datePart(def: PropertyDefinition, value: PropertyValue): string {
+function datePart(def: PropertyDefinition, value: PropertyValue, timeZone?: string): string {
   if (def.type === 'date') return String(value);
   const time = new Date(String(value));
   if (Number.isNaN(time.getTime())) return String(value).slice(0, 10);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())}`;
+  return localDay(time, timeZone);
+}
+
+function shiftDay(day: string, days: number): string {
+  const time = new Date(`${day}T00:00:00Z`);
+  time.setUTCDate(time.getUTCDate() + days);
+  return time.toISOString().slice(0, 10);
+}
+
+function monthRange(day: string, months: number): DayRange {
+  const [year, month] = day.split('-').map(Number) as [number, number];
+  const from = new Date(Date.UTC(year, month - 1 + months, 1));
+  const to = new Date(Date.UTC(year, month + months, 0));
+  return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
+}
+
+export interface DayRange { from: string; to: string }
+
+/** The inclusive days a relative token covers, or null for an unknown token. */
+export function resolveRelativeDate(token: string, today: string, weekStart: 0 | 1 = 1): DayRange | null {
+  const single = (offset: number): DayRange => { const day = shiftDay(today, offset); return { from: day, to: day }; };
+  const week = (offset: number): DayRange => {
+    const weekday = new Date(`${today}T00:00:00Z`).getUTCDay();
+    const start = shiftDay(today, -((weekday - weekStart + 7) % 7) + offset * 7);
+    return { from: start, to: shiftDay(start, 6) };
+  };
+  switch (token as RelativeDateToken) {
+    case 'today': return single(0);
+    case 'yesterday': return single(-1);
+    case 'tomorrow': return single(1);
+    case 'this_week': return week(0);
+    case 'last_week': return week(-1);
+    case 'next_week': return week(1);
+    case 'this_month': return monthRange(today, 0);
+    case 'last_month': return monthRange(today, -1);
+    case 'next_month': return monthRange(today, 1);
+    case 'last_7_days': return { from: shiftDay(today, -6), to: today };
+    case 'last_30_days': return { from: shiftDay(today, -29), to: today };
+    case 'next_7_days': return { from: today, to: shiftDay(today, 6) };
+    case 'next_30_days': return { from: today, to: shiftDay(today, 29) };
+    default: return null;
+  }
 }
 
 function isEmpty(row: DatabaseRow, def: PropertyDefinition): boolean {
@@ -356,15 +454,53 @@ function isEmpty(row: DatabaseRow, def: PropertyDefinition): boolean {
   return false;
 }
 
-function matches(row: DatabaseRow, def: PropertyDefinition, filter: ViewFilter): boolean {
-  const op = filter.operator;
+/** A condition ready to run: its property is known, its operator fits and its value is complete. */
+export interface ResolvedCondition {
+  def: PropertyDefinition;
+  operator: FilterOperator;
+  /** Absent for operators without a value. */
+  target?: string | number;
+  /** Date conditions compare against these inclusive days. */
+  days?: DayRange;
+}
+
+/**
+ * Turns a view's filters into runnable conditions: the outer list must all hold and each inner list
+ * needs one match. Incomplete conditions drop out first, so a half-typed one cannot widen an "or".
+ */
+export function resolveFilters(entries: readonly ViewFilterEntry[], properties: PropertyDefinition[], context: QueryContext = {}): ResolvedCondition[][] {
+  const active = new Map(activeProperties(properties).map(p => [p.id, p]));
+  const today = context.today ?? localDay(new Date(), context.timeZone);
+  const resolve = (filter: ViewFilter): ResolvedCondition | null => {
+    const def = active.get(filter.propertyId);
+    if (!def || !operatorsByType[def.type].includes(filter.operator)) return null;
+    if (!operatorNeedsValue(filter.operator)) return { def, operator: filter.operator };
+    const value = filter.value;
+    if (value === undefined || value === null || value === '') return null;
+    if (def.type === 'number') {
+      const target = Number(value);
+      return Number.isFinite(target) ? { def, operator: filter.operator, target } : null;
+    }
+    if (def.type === 'date' || def.type === 'created_time' || def.type === 'updated_time') {
+      const text = String(value);
+      if (!text.startsWith('@')) return { def, operator: filter.operator, target: text, days: { from: text, to: text } };
+      const days = resolveRelativeDate(text.slice(1), today, context.weekStart);
+      return days ? { def, operator: filter.operator, target: text, days } : null;
+    }
+    return { def, operator: filter.operator, target: String(value) };
+  };
+  return entries.flatMap(entry => {
+    const group = (isFilterGroup(entry) ? entry.any : [entry]).map(resolve).filter((item): item is ResolvedCondition => item !== null);
+    return group.length ? [group] : [];
+  });
+}
+
+function matches(row: DatabaseRow, condition: ResolvedCondition, context: QueryContext): boolean {
+  const { def, operator: op, target, days } = condition;
   if (op === 'is_empty') return isEmpty(row, def);
   if (op === 'is_not_empty') return !isEmpty(row, def);
   if (op === 'is_checked') return cellValue(row, def) === true;
   if (op === 'is_not_checked') return cellValue(row, def) !== true;
-  const target = filter.value;
-  // An incomplete condition does not hide rows; the toolbar shows it as unfinished.
-  if (target === undefined || target === null || target === '') return true;
   const value = cellValue(row, def);
   switch (def.type) {
     case 'title': case 'text': case 'url': {
@@ -379,8 +515,7 @@ function matches(row: DatabaseRow, def: PropertyDefinition, filter: ViewFilter):
     case 'number': {
       if (value === undefined) return op === 'not_equals';
       const n = value as number;
-      const t = Number(target);
-      if (!Number.isFinite(t)) return true;
+      const t = target as number;
       return op === 'equals' ? n === t : op === 'not_equals' ? n !== t : op === 'gt' ? n > t
         : op === 'gte' ? n >= t : op === 'lt' ? n < t : op === 'lte' ? n <= t : true;
     }
@@ -394,10 +529,10 @@ function matches(row: DatabaseRow, def: PropertyDefinition, filter: ViewFilter):
     }
     case 'date': case 'created_time': case 'updated_time': {
       if (value === undefined) return false;
-      const day = datePart(def, value);
-      const t = String(target);
-      return op === 'equals' ? day === t : op === 'gt' ? day > t : op === 'gte' ? day >= t
-        : op === 'lt' ? day < t : op === 'lte' ? day <= t : true;
+      const day = datePart(def, value, context.timeZone);
+      const { from, to } = days!;
+      return op === 'equals' ? day >= from && day <= to : op === 'gt' ? day > to : op === 'gte' ? day >= from
+        : op === 'lt' ? day < from : op === 'lte' ? day <= to : true;
     }
     default: return true;
   }
@@ -435,18 +570,16 @@ export interface EvaluatedView {
  * Filters (all conditions must match) and sorts rows for a table view. Rows keep their
  * manual order when no sort applies; empty values sort last in both directions.
  */
-export function evaluateView(rows: DatabaseRow[], properties: PropertyDefinition[], view: DatabaseView): EvaluatedView {
+export function evaluateView(rows: DatabaseRow[], properties: PropertyDefinition[], view: DatabaseView,
+  context: QueryContext = {}): EvaluatedView {
   const active = new Map(activeProperties(properties).map(p => [p.id, p]));
-  const filters = view.filters.flatMap(filter => {
-    const def = active.get(filter.propertyId);
-    return def && operatorsByType[def.type].includes(filter.operator) ? [{ filter, def }] : [];
-  });
+  const groups = resolveFilters(view.filters, properties, context);
   const sorts = view.sorts.flatMap(sort => {
     const def = active.get(sort.propertyId);
     return def ? [{ sort, def }] : [];
   });
   const kept = rows.map((row, index) => ({ row, index }))
-    .filter(({ row }) => filters.every(({ filter, def }) => matches(row, def, filter)));
+    .filter(({ row }) => groups.every(group => group.some(condition => matches(row, condition, context))));
   if (sorts.length) {
     kept.sort((x, y) => {
       for (const { sort, def } of sorts) {
@@ -460,6 +593,40 @@ export function evaluateView(rows: DatabaseRow[], properties: PropertyDefinition
     });
   }
   return { columns: viewColumns(properties, view), rows: kept.map(({ row }) => row) };
+}
+
+export const databaseQueryWindow = 200;
+
+/** A view's conditions, evaluated by the server over the whole database. */
+export interface DatabaseQueryRequest {
+  filters: ViewFilterEntry[];
+  sorts: ViewSort[];
+  context?: Pick<QueryContext, 'timeZone' | 'weekStart'>;
+}
+
+export interface DatabaseQueryResponse {
+  /** Every matching row id, in view order. */
+  order: string[];
+  total: number;
+  /** The first window of `order`. */
+  rows: DatabaseRow[];
+  schemaRevision: string;
+}
+
+export interface DatabaseRowsRequest { ids: string[] }
+export interface DatabaseRowsResponse { rows: DatabaseRow[] }
+
+/** Checks a query body; conditions naming unknown properties are ignored when run, like saved views. */
+export function isDatabaseQueryRequest(value: unknown): value is DatabaseQueryRequest {
+  if (!isRecord(value) || !hasOnly(value, ['filters', 'sorts', 'context'])) return false;
+  if (!Array.isArray(value.filters) || !Array.isArray(value.sorts)) return false;
+  if (!value.filters.every(isFilterEntry) || !value.sorts.every(isSort)) return false;
+  if (flatFilters(value.filters).length + value.sorts.length > databaseConditionLimit) return false;
+  if (value.context === undefined) return true;
+  if (!isRecord(value.context) || !hasOnly(value.context, ['timeZone', 'weekStart'])) return false;
+  const { timeZone, weekStart } = value.context;
+  return (timeZone === undefined || (typeof timeZone === 'string' && timeZone.length <= 64))
+    && (weekStart === undefined || weekStart === 0 || weekStart === 1);
 }
 
 /** Plain text of a row's stored properties, for the page search index. */

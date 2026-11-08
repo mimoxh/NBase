@@ -1,6 +1,16 @@
-import { rowSearchText, rowValueProblem, applyRowPatch, type PropertyDefinition, type PropertyValue,
+import { rowSearchText, rowValueProblem, applyRowPatch, type DatabaseRow, type PropertyDefinition, type PropertyValue,
   type RowProperties } from '@nbase/contracts';
 import type { PoolClient } from 'pg';
+
+export interface RowRecord {
+  id: string; title: string; icon: string | null; row_properties: RowProperties | null; revision: string;
+  created_at: Date; updated_at: Date;
+}
+
+export function databaseRow(row: RowRecord): DatabaseRow {
+  return { id: row.id, title: row.title, icon: row.icon ?? null, properties: row.row_properties ?? {}, revision: row.revision,
+    createdAt: row.created_at.toISOString(), updatedAt: row.updated_at.toISOString() };
+}
 
 export interface DatabaseSchemaRow {
   properties_json: PropertyDefinition[];

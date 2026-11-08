@@ -1,4 +1,4 @@
-import { databaseConditionLimit, filterOperatorsFor, operatorNeedsValue, type DatabaseView as View, type FilterOperator,
+import { databaseConditionLimit, filterOperatorsFor, flatFilters, isFilterGroup, operatorNeedsValue, type DatabaseView as View, type FilterOperator,
   type PropertyDefinition, type ViewFilter } from '@nbase/contracts';
 import { Icon } from '../../components/Icon';
 import { Popover } from '../../components/Popover';
@@ -23,13 +23,14 @@ export function FilterPanel({ view, active, canWrite, open, onOpen, onClose, onU
   view: View; active: PropertyDefinition[]; canWrite: boolean; open: boolean; onOpen: () => void; onClose: () => void;
   onUpdate: (patch: Partial<View>) => void;
 }) {
-  const conditions = view.filters.length + view.sorts.length;
+  const conditions = flatFilters(view.filters).length + view.sorts.length;
   return <span className="nb-db-anchor">
     <button className={`nb-db-tool ${view.filters.length ? 'on' : ''}`} onClick={onOpen}>
       <Icon name="filter" size={14} />筛选{view.filters.length ? ` ${view.filters.length}` : ''}</button>
     {open && <Popover label="筛选" className="nb-db-pop nb-db-wide-pop" onClose={onClose}>
       {view.filters.length === 0 && <p className="nb-db-empty-note">还没有筛选条件。所有条件需同时满足。</p>}
       {view.filters.map((filter, index) => {
+        if (isFilterGroup(filter)) return null;
         const def = active.find(p => p.id === filter.propertyId);
         if (!def) return null;
         const replace = (next: ViewFilter | null) => onUpdate({ filters: next

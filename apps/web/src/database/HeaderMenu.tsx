@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { databaseConditionLimit, evaluateView, filterOperatorsFor, operatorNeedsValue, type DatabaseView as View,
+import { databaseConditionLimit, evaluateView, filterOperatorsFor, flatFilters, operatorNeedsValue, retainFilters, type DatabaseView as View,
   type PropertyDefinition, type PropertyType, type ViewFilter } from '@nbase/contracts';
 import { Popover } from '../components/Popover';
 import { creatableTypes, typeLabels } from './labels';
@@ -35,18 +35,18 @@ export function HeaderMenu({ def, view, state, onClose, onSaveProperties }: {
     const fits = (f: ViewFilter) => filterOperatorsFor(type).includes(f.operator)
       && (usesOptions(def.type) === usesOptions(type) || !operatorNeedsValue(f.operator));
     const views = doc.views.map(item => ({ ...item,
-      filters: item.filters.filter(f => f.propertyId !== def.id || fits(f)) }));
+      filters: retainFilters(item.filters, f => f.propertyId !== def.id || fits(f)) }));
     onSaveProperties(doc.properties.map(p => p.id === def.id ? next : p), views);
   };
   const remove = () => {
-    const views = doc.views.map(item => ({ ...item, filters: item.filters.filter(f => f.propertyId !== def.id),
+    const views = doc.views.map(item => ({ ...item, filters: retainFilters(item.filters, f => f.propertyId !== def.id),
       sorts: item.sorts.filter(s => s.propertyId !== def.id) }));
     onSaveProperties(doc.properties.map(p => p.id === def.id ? { ...p, deletedAt: new Date().toISOString() } : p), views);
     onClose();
   };
   const sort = (direction: 'asc' | 'desc') => {
     updateView({ sorts: [{ propertyId: def.id, direction }, ...view.sorts.filter(s => s.propertyId !== def.id)]
-      .slice(0, Math.max(1, databaseConditionLimit - view.filters.length)) });
+      .slice(0, Math.max(1, databaseConditionLimit - flatFilters(view.filters).length)) });
     onClose();
   };
   return <Popover label={`字段「${def.name}」`} className="nb-db-pop nb-db-header-pop" portal width={240}
