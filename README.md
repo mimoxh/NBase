@@ -2,6 +2,28 @@
 
 自部署的文档工作台。浏览器访问本机 Fastify 服务，文档正文和账号保存在 PostgreSQL，附件文件保存在独立目录。项目范围、实施进度与验证结论分别见 [V1 文档需求](docs/product/v1-documents.md)、[计划](docs/plan.md)和[验证记录](docs/validation.md)。
 
+## 项目演示
+
+截图来自 NBase 的内置演示工作台。
+
+### 文档编辑
+
+通过左侧页面树组织文档，使用富文本工具栏编辑，或用右侧大纲跳转到各节。
+
+![NBase 文档编辑器、页面树与大纲](docs/demo/document-editor.png)
+
+### 多维表格
+
+阅读清单展示状态、评分、分类和日期等字段，可切换视图、筛选和排序。
+
+![NBase 阅读清单多维表格](docs/demo/database-table.png)
+
+### 行页面
+
+表格中的每条记录都可以打开为页面，在结构化属性下方写正文。
+
+![NBase 深色模式下的阅读清单行页面](docs/demo/database-row.png)
+
 ## 本地开发
 
 需要 Node.js 24.x、npm 11.x。默认只监听回环地址。
