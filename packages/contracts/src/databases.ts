@@ -39,7 +39,7 @@ export interface PropertyDefinition {
   id: string;
   name: string;
   type: PropertyType;
-  /** Only for select and multi_select. Order is the display and sort order. */
+  /** Used by select and multi_select; kept under other types so changing back restores them. Order is the display and sort order. */
   options?: SelectOption[];
   /** Soft delete keeps row values so the property can be restored. */
   deletedAt?: string | null;
@@ -169,9 +169,8 @@ export function isPropertyDefinition(value: unknown): value is PropertyDefinitio
   if (!isRecord(value) || !hasOnly(value, ['id', 'name', 'type', 'options', 'deletedAt'])) return false;
   if (!isDatabaseId(value.id) || !isName(value.name) || !(propertyTypes as readonly unknown[]).includes(value.type)) return false;
   if (value.deletedAt !== undefined && value.deletedAt !== null && !isIsoTime(value.deletedAt)) return false;
-  const selectable = value.type === 'select' || value.type === 'multi_select';
   if (value.options === undefined) return true;
-  if (!selectable || !Array.isArray(value.options) || value.options.length > databaseOptionLimit) return false;
+  if (!Array.isArray(value.options) || value.options.length > databaseOptionLimit) return false;
   if (!value.options.every(isSelectOption)) return false;
   return new Set(value.options.map(option => (option as SelectOption).id)).size === value.options.length;
 }
@@ -319,6 +318,8 @@ export function cellValue(row: DatabaseRow, def: PropertyDefinition): PropertyVa
   if (def.type === 'updated_time') return row.updatedAt;
   const value = row.properties[def.id];
   // A value written under an earlier type of this property reads as empty until it is replaced.
+  // An option id is a valid string, so a former select needs its options checked as well.
+  if (def.type === 'text' && def.options?.some(option => option.id === value)) return undefined;
   return value !== undefined && isPropertyValue(def.type, value) ? value : undefined;
 }
 
@@ -336,11 +337,18 @@ export function cellText(row: DatabaseRow, def: PropertyDefinition): string {
 
 const collator = new Intl.Collator('zh-Hans-CN', { numeric: true, sensitivity: 'base' });
 
+/** Calendar day to compare. Page times are UTC instants, shown and filtered as the reader's local day. */
 function datePart(def: PropertyDefinition, value: PropertyValue): string {
-  return def.type === 'date' ? String(value) : String(value).slice(0, 10);
+  if (def.type === 'date') return String(value);
+  const time = new Date(String(value));
+  if (Number.isNaN(time.getTime())) return String(value).slice(0, 10);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${time.getFullYear()}-${pad(time.getMonth() + 1)}-${pad(time.getDate())}`;
 }
 
 function isEmpty(row: DatabaseRow, def: PropertyDefinition): boolean {
+  // Unchecked is a value of its own, so it follows the sort direction.
+  if (def.type === 'checkbox') return false;
   const value = cellValue(row, def);
   if (value === undefined) return true;
   if (def.type === 'select') return !def.options?.some(option => option.id === value);
@@ -403,7 +411,7 @@ function compare(a: DatabaseRow, b: DatabaseRow, def: PropertyDefinition): numbe
   if (aEmpty || bEmpty) return aEmpty === bEmpty ? 0 : aEmpty ? 1 : -1;
   switch (def.type) {
     case 'number': return (av as number) - (bv as number);
-    case 'checkbox': return 0;
+    case 'checkbox': return Number(av === true) - Number(bv === true);
     case 'select': case 'multi_select': {
       const rank = (value: PropertyValue | undefined) => {
         const first = Array.isArray(value) ? value[0] : value;

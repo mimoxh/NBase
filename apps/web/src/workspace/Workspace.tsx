@@ -10,7 +10,7 @@ import type { DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../e
 import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { initialWorkspace } from './fixtures';
-import { ancestors, canMove, descendants, workspaceReducer, type Page } from './model';
+import { ancestors, canMove, descendants, workspaceReducer, type Action, type Page } from './model';
 import { useTheme } from '../shell/theme';
 import { Sidebar } from '../shell/Sidebar';
 import { Topbar } from '../shell/Topbar';
@@ -207,6 +207,16 @@ export function WorkspaceApp() {
   };
   const demoSource = useMemo(() => createDemoSource({ state: stateRef, dispatch,
     openPage: id => openPageRef.current(id), notice }), [notice]);
+  const restorePage = (id: string) => {
+    const action: Action = { type: 'restore', id };
+    // The ref moves first so an open table reloading right away reads the restored rows.
+    stateRef.current = workspaceReducer(stateRef.current, action);
+    dispatch(action);
+    const page = stateRef.current.pages.find(p => p.id === id);
+    announceDatabaseChange(id);
+    if (page?.parentId) announceDatabaseChange(page.parentId);
+    notice('已在当前会话恢复页面及本次删除的子页面。');
+  };
   const databaseChoices = useMemo(() => state.pages.filter(p => p.kind === 'database' && !p.deleted)
     .map(p => ({ id: p.id, title: p.title, icon: p.icon })), [state.pages]);
   const databaseEmbedding = useMemo(() => ({
@@ -388,7 +398,7 @@ export function WorkspaceApp() {
     <input ref={fileRef} type="file" accept=".md,text/markdown" className="visually-hidden" aria-label="选择 Markdown 文件" onChange={event => { void importFile(event); }} />
     {toast && <Toast text={toast} onClose={() => setToast('')} />}
     {dialog === 'search' && <DemoSearch pages={state.pages} recentIds={state.recent} onOpen={openPage} onCommand={onCommand} onClose={() => setDialog(null)} />}
-    {dialog === 'trash' && <DemoTrash pages={state.pages} onRestore={id => { dispatch({ type: 'restore', id }); notice('已在当前会话恢复页面及本次删除的子页面。'); }} onClose={() => setDialog(null)} />}
+    {dialog === 'trash' && <DemoTrash pages={state.pages} onRestore={restorePage} onClose={() => setDialog(null)} />}
     {dialog === 'source' && sourceSession && <SourceEditorDialog key={sourceSession.instanceId}
       scope={{ userId: 'demo', workspaceId: 'demo', pageId: sourceSession.pageId, instanceId: sourceSession.instanceId, baseRevision: 'session' }}
       initialContent={sourceSession.content} readOnly={readOnly} onClose={() => setDialog(null)}

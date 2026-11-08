@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { databaseSchemaProblem, defaultDatabaseSchema, evaluateView, isSerializedDatabaseView, rowSearchText,
+import { cellText, databaseSchemaProblem, defaultDatabaseSchema, evaluateView, isSerializedDatabaseView, rowSearchText,
   rowValueProblem, type DatabaseRow, type DatabaseView, type PropertyDefinition } from '@nbase/contracts';
 import { mergeRowProperties, rowIndexText } from '../src/databases/schema.js';
 import { validateDocumentContent } from '../src/pages/validate.js';
@@ -98,6 +98,40 @@ test('values written under another type read as empty', () => {
   const retyped = properties.map(p => p.id === ids.number ? { ...p, type: 'text' as const } : p);
   const result = evaluateView(rows, retyped, view({ filters: [{ propertyId: ids.number, operator: 'is_empty' }] }));
   assert.equal(result.rows.length, rows.length);
+});
+
+test('a retyped option property keeps its options and never shows option ids as text', () => {
+  const retyped = properties.map(p => p.id === ids.status ? { ...p, type: 'text' as const } : p);
+  assert.equal(databaseSchemaProblem(retyped, [view()]), null);
+  const def = retyped.find(p => p.id === ids.status)!;
+  const typed = row('手写', { [ids.status]: '自己输入的文字' });
+  assert.equal(cellText(rows[0]!, def), '');
+  assert.equal(cellText(typed, def), '自己输入的文字');
+  assert.equal(rowSearchText(retyped, { [ids.status]: ids.doing }), '');
+  const empty = evaluateView(rows, retyped, view({ filters: [{ propertyId: ids.status, operator: 'is_empty' }] }));
+  assert.equal(empty.rows.length, rows.length);
+});
+
+test('checkbox sorting follows the chosen direction', () => {
+  const sorted = (direction: 'asc' | 'desc') => evaluateView(rows, properties,
+    view({ sorts: [{ propertyId: ids.done, direction }] })).rows.map(r => r.title);
+  assert.deepEqual(sorted('asc'), ['香蕉', '', '樱桃', '苹果']);
+  assert.deepEqual(sorted('desc'), ['苹果', '香蕉', '', '樱桃']);
+});
+
+test('time filters compare the local day shown in the cell', () => {
+  const previous = process.env.TZ;
+  process.env.TZ = 'Asia/Shanghai';
+  try {
+    const created: PropertyDefinition = { id: randomUUID(), name: '创建时间', type: 'created_time' };
+    const late = [row('晚上', {}, '2026-11-07T20:00:00.000Z')];
+    const on = (value: string) => evaluateView(late, [properties[0]!, created],
+      view({ filters: [{ propertyId: created.id, operator: 'equals', value }] })).rows.length;
+    assert.equal(on('2026-11-08'), 1);
+    assert.equal(on('2026-11-07'), 0);
+  } finally {
+    if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous;
+  }
 });
 
 test('row search text contains text, url and option names', () => {

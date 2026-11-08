@@ -1,5 +1,6 @@
 import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from 'react';
 import type { AuthSessionResponse, PageDocument, PageSummary } from '@nbase/contracts';
+import { announceDatabaseChange } from '../database/source';
 import type { DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
 import { ApiError, loadPageTree, pageClient } from './client';
 import { localDrafts, type LocalPageDraft, type LocalPendingAction, type LocalPendingCreate } from './drafts';
@@ -97,6 +98,9 @@ export function createPageActions({ session, workspace, actionsLoaded, pages, pe
           : saved.parentId === null ? '页面已恢复到个人空间根目录。' : '页面已恢复，ID 与子页面关系保留。');
       }
       await reloadTree(session);
+      // An open database table or inline block must pick up a row or database that came back or left.
+      announceDatabaseChange(saved.id);
+      if (saved.parentId) announceDatabaseChange(saved.parentId);
       if (pending.operation !== 'restore-version') void refreshTags().catch(() => undefined);
     } catch (error) {
       setDialog(null);

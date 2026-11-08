@@ -74,11 +74,15 @@ function HeaderMenu({ def, view, state, onClose, onSaveProperties }: {
   };
   const setType = (type: PropertyType) => {
     if (type === def.type) return;
+    // Options stay on the definition so changing the type back brings them and their row values back.
+    const usesOptions = (t: PropertyType) => t === 'select' || t === 'multi_select';
     const next: PropertyDefinition = { id: def.id, name: def.name, type,
-      ...(type === 'select' || type === 'multi_select' ? { options: def.options ?? [] } : {}) };
-    // Conditions written for the old type may not fit the new one.
+      ...(def.options || usesOptions(type) ? { options: def.options ?? [] } : {}) };
+    // Conditions written for the old type may not fit the new one; a compared value is an option id only under option types.
+    const fits = (f: ViewFilter) => filterOperatorsFor(type).includes(f.operator)
+      && (usesOptions(def.type) === usesOptions(type) || !operatorNeedsValue(f.operator));
     const views = doc.views.map(item => ({ ...item,
-      filters: item.filters.filter(f => f.propertyId !== def.id || filterOperatorsFor(type).includes(f.operator)) }));
+      filters: item.filters.filter(f => f.propertyId !== def.id || fits(f)) }));
     onSaveProperties(doc.properties.map(p => p.id === def.id ? next : p), views);
   };
   const remove = () => {
