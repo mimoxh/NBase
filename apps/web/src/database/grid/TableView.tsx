@@ -1,30 +1,37 @@
-import { useState } from 'react';
-import { type DatabaseRow, type DatabaseView as View, type PropertyDefinition, type PropertyType, type PropertyValue } from '@nbase/contracts';
+import { useEffect, useState } from 'react';
+import type { DatabaseRow, DatabaseView as View, PropertyDefinition, PropertyType, PropertyValue } from '@nbase/contracts';
 import { Icon } from '../../components/Icon';
 import { Popover } from '../../components/Popover';
 import { EditableCell } from '../cells';
 import { HeaderMenu } from '../HeaderMenu';
 import { creatableTypes, typeGlyphs, typeLabels } from '../labels';
 import type { Panel } from '../panel';
+import type { RowStore } from '../rowStore';
 import type { DatabaseDataSource, DatabaseState } from '../source';
 import { useColumnResize } from './useColumnResize';
+import { rowHeight, useWindowedRows } from './useWindowedRows';
 
-export function TableView({ source, state, view, columns, rows, allRowCount, matchingRowCount, canAddProperty, panel, setPanel,
+export function TableView({ source, state, store, view, columns, rowCount, windowed, canAddProperty, panel, setPanel,
   onUpdateView, onSave, onAddProperty, onCell, onCreateOption }: {
-  source: DatabaseDataSource; state: DatabaseState; view: View; columns: PropertyDefinition[]; rows: DatabaseRow[];
-  allRowCount: number; matchingRowCount: number; canAddProperty: boolean; panel: Panel; setPanel: (panel: Panel) => void;
+  source: DatabaseDataSource; state: DatabaseState; store: RowStore; view: View; columns: PropertyDefinition[];
+  /** How many rows of the view to show. */
+  rowCount: number; windowed: boolean; canAddProperty: boolean; panel: Panel; setPanel: (panel: Panel) => void;
   onUpdateView: (patch: Partial<View>) => void;
   onSave: (properties: PropertyDefinition[], views?: View[]) => void;
   onAddProperty: (type: PropertyType) => void;
   onCell: (row: DatabaseRow, def: PropertyDefinition, value: PropertyValue | null) => void;
   onCreateOption: (def: PropertyDefinition) => (name: string) => Promise<string | null>;
 }) {
-  const doc = state.doc!;
   const canWrite = source.canWrite;
   const [dragRow, setDragRow] = useState<string | null>(null);
   const [dropRow, setDropRow] = useState<string | null>(null);
   const { widthOf, startResize } = useColumnResize(view, canWrite, widths => onUpdateView({ widths }));
+  const { anchor, start, end } = useWindowedRows(rowCount, windowed);
+  useEffect(() => { store.ensure(start, end); }, [store, start, end, store.order]);
   const manualOrder = view.sorts.length === 0 && canWrite;
+  const columnCount = columns.length + (canWrite ? 2 : 1);
+  const spacer = (height: number) => height > 0 && <tr aria-hidden="true" className="nb-db-spacer" style={{ height }}><td colSpan={columnCount} /></tr>;
+  const visible = store.order.slice(start, end).map((id, offset) => ({ id, index: start + offset, row: store.rowAt(start + offset) }));
   return <div className="nb-db-scroll">
     <table className="nb-db-table" style={{ width: columns.reduce((sum, def) => sum + widthOf(def), 0) + (canWrite ? 76 : 36) }}>
       <colgroup>
@@ -58,8 +65,11 @@ export function TableView({ source, state, view, columns, rows, allRowCount, mat
           </span>
         </th>}
       </tr></thead>
-      <tbody>
-        {rows.map((row, index) => <tr key={row.id}
+      <tbody ref={anchor}>
+        {spacer(start * rowHeight)}
+        {visible.map(({ id, index, row }) => !row
+          ? <tr key={id} className="nb-db-row-loading" aria-busy="true" style={{ height: rowHeight }}><td colSpan={columnCount} /></tr>
+          : <tr key={id}
           className={`${dropRow === row.id ? 'nb-db-drop' : ''} ${dragRow === row.id ? 'nb-db-dragging' : ''}`}
           onDragOver={event => { if (!dragRow || dragRow === row.id) return; event.preventDefault(); setDropRow(row.id); }}
           onDragLeave={() => setDropRow(previous => previous === row.id ? null : previous)}
@@ -69,10 +79,10 @@ export function TableView({ source, state, view, columns, rows, allRowCount, mat
             setDragRow(null); setDropRow(null);
             if (!moving || moving === row.id) return;
             // Dropping on a row below puts the moved row after it; on a row above, before it.
-            const order = doc.rows.map(item => item.id);
+            const order = store.order;
             const from = order.indexOf(moving);
             const to = order.indexOf(row.id);
-            void state.moveRow(moving, from < to ? row.id : order[to - 1] ?? null);
+            void store.moveRow(moving, from < to ? row.id : order[to - 1] ?? null);
           }}>
           <td className="nb-db-gutter">
             <span className="nb-db-row-actions">
@@ -85,11 +95,11 @@ export function TableView({ source, state, view, columns, rows, allRowCount, mat
           </td>
           {columns.map(def => {
             const pendingKey = `${row.id}:${def.type === 'title' ? 'title' : def.id}`;
-            return <td key={def.id} className={`nb-db-cell nb-db-type-${def.type} ${state.pending.has(pendingKey) ? 'pending' : ''}`}>
+            return <td key={def.id} className={`nb-db-cell nb-db-type-${def.type} ${store.pending.has(pendingKey) ? 'pending' : ''}`}>
               <span className="nb-db-anchor nb-db-cell-inner">
                 <EditableCell row={row} def={def} editable={canWrite}
                   onChange={value => onCell(row, def, value)}
-                  onTitle={title => void state.updateRow(row.id, { title: title.slice(0, 255) })}
+                  onTitle={title => void store.updateRow(row.id, { title: title.slice(0, 255) })}
                   onCreateOption={canWrite ? onCreateOption(def) : undefined} />
                 {def.type === 'title' && <button className="nb-db-open" onClick={() => source.openRow(row.id)}>打开</button>}
               </span>
@@ -97,12 +107,13 @@ export function TableView({ source, state, view, columns, rows, allRowCount, mat
           })}
           {canWrite && <td className="nb-db-row-end">
             <button className="nb-db-tool nb-db-row-delete" aria-label={`删除「${row.title || '未命名'}」`} title="移入回收站"
-              onClick={() => void state.trashRow(row.id)}><Icon name="trash" size={13} /></button>
+              onClick={() => void store.trashRow(row.id)}><Icon name="trash" size={13} /></button>
           </td>}
         </tr>)}
+        {spacer((rowCount - end) * rowHeight)}
       </tbody>
     </table>
-    {!matchingRowCount && <p className="nb-db-empty-note nb-db-empty-rows">
-      {allRowCount ? '没有符合筛选条件的行。' : canWrite ? '还没有内容，点击「新建」添加第一行。' : '还没有内容。'}</p>}
+    {!store.total && !store.loading && <p className="nb-db-empty-note nb-db-empty-rows">
+      {store.allRows ? '没有符合筛选条件的行。' : canWrite ? '还没有内容，点击「新建」添加第一行。' : '还没有内容。'}</p>}
   </div>;
 }

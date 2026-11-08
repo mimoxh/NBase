@@ -101,6 +101,11 @@
 .nb-db-table tbody tr:hover { background: var(--nb-hover); }
 .nb-db-table tbody tr.nb-db-drop { box-shadow: inset 0 2px 0 var(--nb-accent); }
 .nb-db-table tbody tr.nb-db-dragging { opacity: .5; }
+.nb-db-table tbody tr.nb-db-spacer, .nb-db-table tbody tr.nb-db-spacer:hover { background: transparent; }
+.nb-db-table tbody tr.nb-db-spacer td { border: 0; height: auto; }
+.nb-db-table tbody tr.nb-db-row-loading td { border-right: 0; background: var(--nb-hover); opacity: .45; }
+.nb-db-table .nb-db-cell-inner { overflow: hidden; }
+.nb-db-table .nb-db-tags { flex-wrap: nowrap; overflow: hidden; }
 .nb-db-row-end { text-align: center; }
 .nb-db-row-delete { opacity: 0; }
 

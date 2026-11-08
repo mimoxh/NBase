@@ -54,7 +54,7 @@ function pageSummary(row: DatabasePageRow): PageSummary {
 }
 
 async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorId: string,
-  pageId: string): Promise<DatabaseDocument | null> {
+  pageId: string, withRows: boolean): Promise<DatabaseDocument | null> {
   const page = await db.query<DatabasePageRow & { properties_json: PropertyDefinition[]; views_json: DatabaseView[];
     schema_revision: string }>(`
     SELECT p.id, p.workspace_id, p.parent_id, p.title, p.icon, p.cover, p.revision::text AS revision, p.created_at, p.updated_at,
@@ -66,6 +66,8 @@ async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorI
   `, [workspaceId, actorId, pageId]);
   const head = page.rows[0];
   if (!head) return null;
+  if (!withRows) return { page: pageSummary(head), properties: head.properties_json, views: head.views_json,
+    schemaRevision: head.schema_revision, rows: [] };
   const rows = await db.query<RowRecord>(`
     SELECT id, title, icon, row_properties, revision::text AS revision, created_at, updated_at FROM pages
     WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL AND kind = 'row'
@@ -133,13 +135,13 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
     } catch (error) { return sendError(request, reply, error, secure); }
   });
 
-  app.get<{ Params: DatabaseParams }>(`${base}/:pageId`, async (request, reply) => {
+  app.get<{ Params: DatabaseParams; Querystring: { rows?: string } }>(`${base}/:pageId`, async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     try {
       const { workspaceId, pageId } = request.params;
       const actorId = await authorize(request, workspaceId, false);
       if (!isUuid(pageId)) throw new PageError(404, 'NOT_FOUND');
-      const database = await readDatabase(pool, workspaceId, actorId, pageId.toLowerCase());
+      const database = await readDatabase(pool, workspaceId, actorId, pageId.toLowerCase(), request.query.rows !== 'none');
       if (!database) throw new PageError(404, 'NOT_FOUND');
       return reply.send(database);
     } catch (error) { return sendError(request, reply, error, secure); }

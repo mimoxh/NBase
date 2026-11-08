@@ -1,17 +1,20 @@
 import { useMemo, useState, type ReactNode } from 'react';
-import { activeProperties, databasePropertyLimit, databaseViewLimit, evaluateView, isFilterGroup, operatorNeedsValue, type DatabaseRow,
-  type DatabaseView as View, type PropertyDefinition, type PropertyType, type PropertyValue, type RowProperties } from '@nbase/contracts';
+import { activeProperties, databasePropertyLimit, databaseViewLimit, isFilterGroup, operatorNeedsValue, viewColumns, type DatabaseQueryRequest, type DatabaseRow,
+  type DatabaseView as View, type PropertyDefinition, type PropertyType, type PropertyValue, type QueryContext, type RowProperties } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { OptionTag } from './cells';
 import { TableView } from './grid/TableView';
 import { nextOptionColor, operatorLabel, typeLabels } from './labels';
 import type { Panel } from './panel';
+import { useRowStore } from './rowStore';
 import { useDatabase, type DatabaseDataSource } from './source';
 import { FieldsPanel } from './toolbar/FieldsPanel';
 import { FilterPanel } from './toolbar/FilterPanel';
 import { SortPanel } from './toolbar/SortPanel';
 import { ViewTabs } from './toolbar/ViewTabs';
 import './database.css';
+
+const readerContext: Pick<QueryContext, 'timeZone' | 'weekStart'> = { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, weekStart: 1 };
 
 function uniqueName(base: string, taken: string[]): string {
   if (!taken.includes(base)) return base;
@@ -57,11 +60,15 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
   const canWrite = source.canWrite;
 
   const view = doc ? doc.views.find(item => item.id === (localViewId ?? viewId)) ?? doc.views[0] : undefined;
-  const evaluated = useMemo(() => doc && view ? evaluateView(doc.rows, doc.properties, view) : null, [doc, view]);
+  const request = useMemo<DatabaseQueryRequest | null>(() => view
+    ? { filters: view.filters, sorts: view.sorts, context: readerContext } : null, [view?.filters, view?.sorts]); // eslint-disable-line react-hooks/exhaustive-deps
+  const titlePropertyId = doc?.properties.find(p => p.type === 'title')?.id ?? null;
+  const store = useRowStore(source, databaseId, request, titlePropertyId);
 
   if (state.loading && !doc) return <div className="nb-db nb-db-status" role="status">正在读取数据库…</div>;
-  if (!doc || !view || !evaluated) return <div className="nb-db nb-db-status" role="alert">{state.error || '数据库暂时无法读取。'}
+  if (!doc || !view) return <div className="nb-db nb-db-status" role="alert">{state.error || '数据库暂时无法读取。'}
     <button className="nb-btn nb-btn-quiet" onClick={() => void state.reload()}>重试</button></div>;
+  const columns = viewColumns(doc.properties, view);
 
   const properties = doc.properties;
   const active = activeProperties(properties);
@@ -76,7 +83,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
     const def: PropertyDefinition = { id: crypto.randomUUID(), name: uniqueName(typeLabels[type], active.map(p => p.name)), type,
       ...(type === 'select' || type === 'multi_select' ? { options: [] } : {}) };
     void save([...properties, def], doc.views.map(item => item.id === view.id
-      ? { ...item, propertyOrder: [...evaluated.columns.filter(p => p.type !== 'title').map(p => p.id), def.id] } : item));
+      ? { ...item, propertyOrder: [...columns.filter(p => p.type !== 'title').map(p => p.id), def.id] } : item));
     setPanel({ kind: 'header', id: def.id });
   };
   const createOption = (def: PropertyDefinition) => async (name: string) => {
@@ -87,10 +94,10 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
     return await state.saveSchema({ properties: next, views: state.doc?.views ?? doc.views }) ? option.id : null;
   };
   const setCell = (row: DatabaseRow, def: PropertyDefinition, value: PropertyValue | null) =>
-    void state.updateRow(row.id, { properties: { [def.id]: value } });
+    void store.updateRow(row.id, { properties: { [def.id]: value } });
   const addRow = async () => {
-    const row = await state.createRow('', defaultsFromFilters(view, properties));
-    if (row && evaluated.rows.length >= limit) setLimit(value => value + 1);
+    const row = await store.createRow('', defaultsFromFilters(view, properties));
+    if (row && store.total > limit) setLimit(value => value + 1);
   };
   const addView = () => {
     if (doc.views.length >= databaseViewLimit) return;
@@ -134,16 +141,19 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
       </div>
     </div>
     {filterChips.some(Boolean) && <div className="nb-db-chips">{filterChips}</div>}
-    <TableView source={source} state={state} view={view} columns={evaluated.columns} rows={evaluated.rows.slice(0, limit)}
-      allRowCount={doc.rows.length} matchingRowCount={evaluated.rows.length} canAddProperty={active.length < databasePropertyLimit}
+    {store.error && <div className="nb-db-status" role="alert">{store.error}
+      <button className="nb-btn nb-btn-quiet" onClick={() => void store.refresh()}>重试</button></div>}
+    <TableView source={source} state={state} store={store} view={view} columns={columns}
+      rowCount={compact ? Math.min(limit, store.total) : store.total} windowed={!compact} canAddProperty={active.length < databasePropertyLimit}
       panel={panel} setPanel={setPanel} onUpdateView={patch => void updateView(patch)}
       onSave={(next, views) => void save(next, views)} onAddProperty={addProperty} onCell={setCell} onCreateOption={createOption} />
     <div className="nb-db-foot">
       {canWrite && <button className="nb-db-add-row" onClick={() => void addRow()}><Icon name="plus" size={14} />新建一行</button>}
-      <span className="nb-db-count">{evaluated.rows.length === doc.rows.length ? `共 ${doc.rows.length} 行`
-        : `显示 ${evaluated.rows.length} / ${doc.rows.length} 行`}</span>
-      {evaluated.rows.length > limit && <button className="nb-btn nb-btn-quiet" onClick={() => setLimit(value => value + 200)}>
-        再显示 {Math.min(200, evaluated.rows.length - limit)} 行</button>}
+      <span className="nb-db-count">{store.loading ? '正在读取…' : store.total === store.allRows ? `共 ${store.allRows} 行`
+        : `显示 ${store.total} / ${store.allRows} 行`}</span>
+      {store.orderStale && <button className="nb-btn nb-btn-quiet" onClick={() => void store.refresh()}>结果可能已变化，刷新</button>}
+      {compact && store.total > limit && <button className="nb-btn nb-btn-quiet" onClick={() => setLimit(value => value + 200)}>
+        再显示 {Math.min(200, store.total - limit)} 行</button>}
       {compact && <button className="nb-btn nb-btn-quiet" onClick={() => source.openDatabase(databaseId)}>打开完整数据库</button>}
     </div>
   </div>;

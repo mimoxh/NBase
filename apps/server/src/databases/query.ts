@@ -239,7 +239,9 @@ export function runDatabaseQuery(pool: Pool, workspaceId: string, actorId: strin
     const { where, order } = compile(sql, head.properties_json, request, context, timeZone);
     const ordered = await client.query<{ id: string }>(`SELECT p.id FROM pages p WHERE ${scope} ${where} ORDER BY ${order}`, sql.values);
     const ids = ordered.rows.map(row => row.id);
-    return { order: ids, total: ids.length, rows: await rowsById(client, workspaceId, databaseId, ids.slice(0, databaseQueryWindow)),
+    const allRows = where ? (await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM pages
+      WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL AND kind = 'row'`, [workspaceId, databaseId])).rows[0]!.n : ids.length;
+    return { order: ids, total: ids.length, allRows, rows: await rowsById(client, workspaceId, databaseId, ids.slice(0, databaseQueryWindow)),
       schemaRevision: head.schema_revision };
   }));
 }

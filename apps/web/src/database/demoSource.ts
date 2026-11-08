@@ -1,4 +1,5 @@
-import { databaseSchemaProblem, rowValueProblem, type DatabaseDocument, type DatabaseRow } from '@nbase/contracts';
+import { databaseQueryWindow, databaseSchemaProblem, evaluateView, rowValueProblem, type DatabaseDocument, type DatabaseRow,
+  type DatabaseView } from '@nbase/contracts';
 import { workspaceReducer, type Action, type Page, type Workspace } from '../workspace/model';
 import { DatabaseSourceError, type DatabaseDataSource } from './source';
 
@@ -33,11 +34,25 @@ export function createDemoSource(options: {
     if (!page?.parentId) throw new DatabaseSourceError('NOT_FOUND', '这一行已不存在。');
     return page;
   };
+  const rowsOf = (id: string) => options.state.current.pages.filter(p => p.parentId === id && !p.deleted && p.kind === 'row').map(rowOf);
   return {
     canWrite: true,
+    query: async (id, request) => {
+      const { schema } = database(id);
+      const all = rowsOf(id);
+      const view: DatabaseView = { id: 'query', name: 'query', type: 'table', filters: request.filters, sorts: request.sorts,
+        hiddenPropertyIds: [], propertyOrder: [], widths: {} };
+      const matching = evaluateView(all, schema.properties, view, request.context ?? {}).rows;
+      return structuredClone({ order: matching.map(row => row.id), total: matching.length, allRows: all.length,
+        rows: matching.slice(0, databaseQueryWindow), schemaRevision: String(schema.revision) });
+    },
+    readRows: async (id, ids) => {
+      const byId = new Map(rowsOf(id).map(row => [row.id, row]));
+      return structuredClone(ids.flatMap(rowId => { const row = byId.get(rowId); return row ? [row] : []; }));
+    },
     load: async id => {
       const { page, schema } = database(id);
-      const rows = options.state.current.pages.filter(p => p.parentId === id && !p.deleted && p.kind === 'row').map(rowOf);
+      const rows = rowsOf(id);
       const document: DatabaseDocument = {
         page: { id: page.id, workspaceId: 'demo', parentId: page.parentId, title: page.title, icon: page.icon, cover: page.cover,
           kind: 'database', revision: '1', createdAt: page.createdAt ?? epoch, updatedAt: page.updatedAt ?? epoch },

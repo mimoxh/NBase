@@ -608,6 +608,8 @@ export interface DatabaseQueryResponse {
   /** Every matching row id, in view order. */
   order: string[];
   total: number;
+  /** Rows in the database, whether or not they match. */
+  allRows: number;
   /** The first window of `order`. */
   rows: DatabaseRow[];
   schemaRevision: string;

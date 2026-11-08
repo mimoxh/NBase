@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { applyRowPatch, type DatabaseDocument, type DatabaseRow, type DatabaseSchemaResponse, type DatabaseView,
-  type PropertyDefinition, type PropertyValue, type RowProperties } from '@nbase/contracts';
+import type { DatabaseDocument, DatabaseQueryRequest, DatabaseQueryResponse, DatabaseRow, DatabaseSchemaResponse, DatabaseView,
+  PropertyDefinition, PropertyValue, RowProperties } from '@nbase/contracts';
 
 export interface RowPatch {
   title?: string;
@@ -18,7 +18,10 @@ export interface DatabaseSchema {
  */
 export interface DatabaseDataSource {
   readonly canWrite: boolean;
+  /** Schema and views; rows come from `query`. */
   load(databaseId: string, signal?: AbortSignal): Promise<DatabaseDocument>;
+  query(databaseId: string, request: DatabaseQueryRequest): Promise<DatabaseQueryResponse>;
+  readRows(databaseId: string, ids: string[]): Promise<DatabaseRow[]>;
   saveSchema(databaseId: string, schema: DatabaseSchema, expectedRevision: string): Promise<DatabaseSchemaResponse>;
   createRow(databaseId: string, title: string, properties: RowProperties): Promise<DatabaseRow>;
   updateRow(rowId: string, expectedRevision: string, patch: RowPatch): Promise<DatabaseRow>;
@@ -41,7 +44,7 @@ export function announceDatabaseChange(databaseId: string, origin: symbol = Symb
   for (const listener of listeners.get(databaseId) ?? []) listener(origin);
 }
 
-function subscribe(databaseId: string, listener: Listener): () => void {
+export function subscribeDatabase(databaseId: string, listener: Listener): () => void {
   const set = listeners.get(databaseId) ?? new Set<Listener>();
   set.add(listener);
   listeners.set(databaseId, set);
@@ -50,11 +53,11 @@ function subscribe(databaseId: string, listener: Listener): () => void {
 
 const conflictCodes = new Set(['REVISION_CONFLICT', 'MUTATION_CONFLICT']);
 
-function errorCode(error: unknown): string {
+export function errorCode(error: unknown): string {
   return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : '';
 }
 
-function failureText(error: unknown, fallback: string): string {
+export function failureText(error: unknown, fallback: string): string {
   const code = errorCode(error);
   if (conflictCodes.has(code)) return '数据已在别处修改，已重新载入最新内容。';
   if (code === 'PROPERTY_INVALID') return '这个值不符合字段设置，未保存。';
@@ -69,31 +72,20 @@ export interface DatabaseState {
   doc: DatabaseDocument | null;
   loading: boolean;
   error: string;
-  /** Cells whose new value waits for the server: `${rowId}:${propertyId}` or `${rowId}:title`. */
-  pending: ReadonlySet<string>;
   reload: () => Promise<void>;
   saveSchema: (schema: DatabaseSchema) => Promise<boolean>;
-  updateRow: (rowId: string, patch: RowPatch) => Promise<boolean>;
-  createRow: (title?: string, properties?: RowProperties) => Promise<DatabaseRow | null>;
-  moveRow: (rowId: string, afterRowId: string | null) => Promise<void>;
-  trashRow: (rowId: string) => Promise<void>;
 }
 
-/**
- * Loads one database and serializes its writes: schema saves go one at a time with the latest
- * revision, and each row has its own queue so a second edit waits for the first revision.
- */
+/** Loads one database's schema and serializes its saves, always with the latest revision. Rows live in `RowStore`. */
 export function useDatabase(source: DatabaseDataSource, databaseId: string): DatabaseState {
   const [doc, setDocState] = useState<DatabaseDocument | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
   const docRef = useRef<DatabaseDocument | null>(null);
   const origin = useRef(Symbol('view')).current;
   const sequence = useRef(0);
   const desiredSchema = useRef<DatabaseSchema | null>(null);
   const schemaBusy = useRef(false);
-  const rowQueues = useRef(new Map<string, Promise<unknown>>());
   const sourceRef = useRef(source);
   sourceRef.current = source;
 
@@ -115,19 +107,13 @@ export function useDatabase(source: DatabaseDataSource, databaseId: string): Dat
   useEffect(() => {
     setLoading(true); setDoc(null); setError('');
     void reload();
-    return subscribe(databaseId, from => { if (from !== origin) void reload(); });
+    return subscribeDatabase(databaseId, from => { if (from !== origin) void reload(); });
   }, [databaseId, reload, origin, setDoc]);
 
   const fail = useCallback((failure: unknown, fallback: string) => {
     sourceRef.current.notice(failureText(failure, fallback));
     void reload();
   }, [reload]);
-
-  const markPending = (keys: string[], on: boolean) => setPending(previous => {
-    const next = new Set(previous);
-    for (const key of keys) { if (on) next.add(key); else next.delete(key); }
-    return next;
-  });
 
   const schemaWaiters = useRef<((saved: boolean) => void)[]>([]);
   const flushSchema = useCallback(async () => {
@@ -166,69 +152,5 @@ export function useDatabase(source: DatabaseDataSource, databaseId: string): Dat
     return done;
   }, [flushSchema, setDoc]);
 
-  const updateRow = useCallback((rowId: string, patch: RowPatch): Promise<boolean> => {
-    const keys = [...(patch.title !== undefined ? [`${rowId}:title`] : []),
-      ...Object.keys(patch.properties ?? {}).map(id => `${rowId}:${id}`)];
-    markPending(keys, true);
-    // Show the value right away, marked as unconfirmed, and replace it with the server's row.
-    const current = docRef.current;
-    if (current) setDoc({ ...current, rows: current.rows.map(row => row.id !== rowId ? row : {
-      ...row, ...(patch.title !== undefined ? { title: patch.title } : {}),
-      properties: patch.properties ? applyRowPatch(row.properties, patch.properties) : row.properties,
-    }) });
-    const previous = rowQueues.current.get(rowId) ?? Promise.resolve();
-    const run = previous.catch(() => undefined).then(async () => {
-      const row = docRef.current?.rows.find(item => item.id === rowId);
-      if (!row) return false;
-      try {
-        const saved = await sourceRef.current.updateRow(rowId, row.revision, patch);
-        const latest = docRef.current;
-        if (latest) setDoc({ ...latest, rows: latest.rows.map(item => item.id === rowId
-          ? { ...saved, title: item.title, properties: item.properties } : item) });
-        announceDatabaseChange(databaseId, origin);
-        return true;
-      } catch (failure) {
-        fail(failure, '修改未保存。');
-        return false;
-      } finally { markPending(keys, false); }
-    });
-    rowQueues.current.set(rowId, run);
-    return run;
-  }, [databaseId, fail, origin, setDoc]);
-
-  const createRow = useCallback(async (title = '', properties: RowProperties = {}) => {
-    try {
-      const row = await sourceRef.current.createRow(databaseId, title, properties);
-      const latest = docRef.current;
-      if (latest && !latest.rows.some(item => item.id === row.id)) setDoc({ ...latest, rows: [...latest.rows, row] });
-      announceDatabaseChange(databaseId, origin);
-      return row;
-    } catch (failure) { fail(failure, '新行未创建。'); return null; }
-  }, [databaseId, fail, origin, setDoc]);
-
-  const moveRow = useCallback(async (rowId: string, afterRowId: string | null) => {
-    const current = docRef.current;
-    if (!current) return;
-    const moving = current.rows.find(row => row.id === rowId);
-    if (!moving) return;
-    const rest = current.rows.filter(row => row.id !== rowId);
-    const index = afterRowId === null ? 0 : rest.findIndex(row => row.id === afterRowId) + 1;
-    setDoc({ ...current, rows: [...rest.slice(0, index), moving, ...rest.slice(index)] });
-    try {
-      await sourceRef.current.moveRow(databaseId, rowId, afterRowId);
-      announceDatabaseChange(databaseId, origin);
-    } catch (failure) { fail(failure, '行顺序未保存。'); }
-  }, [databaseId, fail, origin, setDoc]);
-
-  const trashRow = useCallback(async (rowId: string) => {
-    const row = docRef.current?.rows.find(item => item.id === rowId);
-    if (!row) return;
-    try {
-      await sourceRef.current.trashRow(row);
-      await reload();
-      announceDatabaseChange(databaseId, origin);
-    } catch (failure) { fail(failure, '删除未完成。'); }
-  }, [databaseId, fail, origin, reload]);
-
-  return { doc, loading, error, pending, reload, saveSchema, updateRow, createRow, moveRow, trashRow };
+  return { doc, loading, error, reload, saveSchema };
 }

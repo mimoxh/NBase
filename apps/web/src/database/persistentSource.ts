@@ -1,5 +1,5 @@
-import { databaseSchemaProblem, type CreateDatabaseRequest, type DatabaseDocument, type DatabaseRow,
-  type DatabaseSchemaResponse, type PageDocument, type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
+import { databaseSchemaProblem, type CreateDatabaseRequest, type DatabaseDocument, type DatabaseQueryRequest, type DatabaseQueryResponse, type DatabaseRow,
+  type DatabaseRowsResponse, type DatabaseSchemaResponse, type PageDocument, type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
 import { createContentFromMarkdown } from '../editor/markdown';
 import { ApiError, pageClient, request, workspacePath } from '../persistence/client';
 import type { DatabaseDataSource, RowPatch } from './source';
@@ -29,11 +29,15 @@ export function rowFromPage(page: PageDocument): DatabaseRow {
 
 export const databaseClient = {
   get: async (workspaceId: string, databaseId: string, signal?: AbortSignal): Promise<DatabaseDocument> => {
-    const doc = await request<unknown>(`${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}`,
+    const doc = await request<unknown>(`${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}?rows=none`,
       'GET', undefined, undefined, signal);
     if (!isDatabaseDocument(doc)) throw new ApiError(0, 'INVALID_RESPONSE');
     return doc;
   },
+  query: (workspaceId: string, databaseId: string, body: DatabaseQueryRequest, csrfToken: string) =>
+    request<DatabaseQueryResponse>(`${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/query`, 'POST', body, csrfToken),
+  readRows: async (workspaceId: string, databaseId: string, ids: string[], csrfToken: string) =>
+    (await request<DatabaseRowsResponse>(`${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/rows/read`, 'POST', { ids }, csrfToken)).rows,
   create: (workspaceId: string, body: CreateDatabaseRequest, csrfToken: string) =>
     withReceipt(workspaceId, body.clientMutationId, () =>
       request<DatabaseDocument>(`${workspacePath(workspaceId)}/databases`, 'POST', body, csrfToken)),
@@ -60,6 +64,8 @@ export function createPersistentSource(options: PersistentSourceOptions): Databa
   return {
     canWrite: options.canWrite,
     load: (databaseId, signal) => databaseClient.get(workspaceId, databaseId, signal),
+    query: (databaseId, body) => databaseClient.query(workspaceId, databaseId, body, csrfToken),
+    readRows: (databaseId, ids) => databaseClient.readRows(workspaceId, databaseId, ids, csrfToken),
     saveSchema: (databaseId, schema, expectedRevision) => databaseClient.updateSchema(workspaceId, databaseId,
       { clientMutationId: crypto.randomUUID(), expectedRevision, ...schema }, csrfToken),
     createRow: async (databaseId, title, properties) => {
