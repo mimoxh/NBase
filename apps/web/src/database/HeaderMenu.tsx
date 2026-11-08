@@ -3,6 +3,7 @@ import { databaseConditionLimit, evaluateView, filterOperatorsFor, flatFilters, 
   type PropertyDefinition, type PropertyType, type ViewFilter } from '@nbase/contracts';
 import { Popover } from '../components/Popover';
 import { creatableTypes, typeLabels } from './labels';
+import { OptionEditor } from './OptionEditor';
 import type { DatabaseState } from './source';
 
 export function HeaderMenu({ def, view, state, onClose, onSaveProperties }: {
@@ -57,6 +58,11 @@ export function HeaderMenu({ def, view, state, onClose, onSaveProperties }: {
       <select className="nb-db-select" value={def.type} onChange={event => setType(event.target.value as PropertyType)}>
         {creatableTypes.map(type => <option key={type} value={type}>{typeLabels[type]}</option>)}
       </select></label>}
+    {(def.type === 'select' || def.type === 'multi_select') && <OptionEditor def={doc.properties.find(p => p.id === def.id) ?? def} onChange={(options, removedId) => {
+      // A condition on a removed option could never be edited or met again.
+      const views = removedId ? doc.views.map(item => ({ ...item, filters: retainFilters(item.filters, f => f.propertyId !== def.id || f.value !== removedId) })) : doc.views;
+      onSaveProperties(doc.properties.map(p => p.id === def.id ? { ...p, options } : p), views);
+    }} />}
     <div className="nb-db-menu">
       <button onClick={() => sort('asc')}>升序排列</button>
       <button onClick={() => sort('desc')}>降序排列</button>

@@ -2,6 +2,7 @@ import { useMemo, useState, type ReactNode } from 'react';
 import { activeProperties, databasePropertyLimit, databaseViewLimit, isFilterGroup, operatorNeedsValue, viewColumns, type DatabaseQueryRequest, type DatabaseRow,
   type DatabaseView as View, type PropertyDefinition, type PropertyType, type PropertyValue, type QueryContext, type RowProperties } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
+import { BulkBar } from './BulkBar';
 import { OptionTag } from './cells';
 import { TableView } from './grid/TableView';
 import { nextOptionColor, operatorLabel, typeLabels } from './labels';
@@ -57,6 +58,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
   const [localViewId, setLocalViewId] = useState<string | null>(viewId);
   const [panel, setPanel] = useState<Panel>(null);
   const [limit, setLimit] = useState(compact ? 50 : 200);
+  const [selectedRows, setSelectedRows] = useState<ReadonlySet<string>>(new Set());
   const canWrite = source.canWrite;
 
   const view = doc ? doc.views.find(item => item.id === (localViewId ?? viewId)) ?? doc.views[0] : undefined;
@@ -75,7 +77,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
   const save = (nextProperties: PropertyDefinition[], nextViews: View[] = doc.views) =>
     state.saveSchema({ properties: nextProperties, views: nextViews });
   const updateView = (patch: Partial<View>) => save(properties, doc.views.map(item => item.id === view.id ? { ...item, ...patch } : item));
-  const selectView = (id: string) => { setLocalViewId(id); onViewChange?.(id); };
+  const selectView = (id: string) => { setLocalViewId(id); setSelectedRows(new Set()); onViewChange?.(id); };
   const closePanel = () => setPanel(null);
 
   const addProperty = (type: PropertyType) => {
@@ -141,11 +143,13 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
       </div>
     </div>
     {filterChips.some(Boolean) && <div className="nb-db-chips">{filterChips}</div>}
+    {canWrite && selectedRows.size > 0 && <BulkBar store={store} properties={properties} selected={selectedRows} canSort={view.sorts.length === 0}
+      onClear={() => setSelectedRows(new Set())} notice={source.notice} />}
     {store.error && <div className="nb-db-status" role="alert">{store.error}
       <button className="nb-btn nb-btn-quiet" onClick={() => void store.refresh()}>重试</button></div>}
     <TableView source={source} state={state} store={store} view={view} columns={columns}
       rowCount={compact ? Math.min(limit, store.total) : store.total} windowed={!compact} canAddProperty={active.length < databasePropertyLimit}
-      panel={panel} setPanel={setPanel} onUpdateView={patch => void updateView(patch)}
+      panel={panel} setPanel={setPanel} selected={selectedRows} onSelect={setSelectedRows} onUpdateView={patch => void updateView(patch)}
       onSave={(next, views) => void save(next, views)} onAddProperty={addProperty} onCell={setCell} onCreateOption={createOption} />
     <div className="nb-db-foot">
       {canWrite && <button className="nb-db-add-row" onClick={() => void addRow()}><Icon name="plus" size={14} />新建一行</button>}

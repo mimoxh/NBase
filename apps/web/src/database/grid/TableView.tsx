@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { DatabaseRow, DatabaseView as View, PropertyDefinition, PropertyType, PropertyValue } from '@nbase/contracts';
 import { Icon } from '../../components/Icon';
 import { Popover } from '../../components/Popover';
@@ -9,13 +9,15 @@ import type { Panel } from '../panel';
 import type { RowStore } from '../rowStore';
 import type { DatabaseDataSource, DatabaseState } from '../source';
 import { useColumnResize } from './useColumnResize';
+import { useGrid } from './useGrid';
 import { rowHeight, useWindowedRows } from './useWindowedRows';
 
-export function TableView({ source, state, store, view, columns, rowCount, windowed, canAddProperty, panel, setPanel,
+export function TableView({ source, state, store, view, columns, rowCount, windowed, canAddProperty, panel, setPanel, selected, onSelect,
   onUpdateView, onSave, onAddProperty, onCell, onCreateOption }: {
   source: DatabaseDataSource; state: DatabaseState; store: RowStore; view: View; columns: PropertyDefinition[];
   /** How many rows of the view to show. */
   rowCount: number; windowed: boolean; canAddProperty: boolean; panel: Panel; setPanel: (panel: Panel) => void;
+  selected: ReadonlySet<string>; onSelect: (next: ReadonlySet<string>) => void;
   onUpdateView: (patch: Partial<View>) => void;
   onSave: (properties: PropertyDefinition[], views?: View[]) => void;
   onAddProperty: (type: PropertyType) => void;
@@ -28,19 +30,38 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
   const { widthOf, startResize } = useColumnResize(view, canWrite, widths => onUpdateView({ widths }));
   const { anchor, start, end } = useWindowedRows(rowCount, windowed);
   useEffect(() => { store.ensure(start, end); }, [store, start, end, store.order]);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const grid = useGrid({ store, columns, rowCount, canWrite, notice: source.notice, rootRef, bodyRef: anchor });
+  const lastTicked = useRef<number | null>(null);
+  const tick = (index: number, id: string, shift: boolean) => {
+    const next = new Set(selected);
+    if (shift && lastTicked.current !== null) {
+      const [from, to] = [Math.min(lastTicked.current, index), Math.max(lastTicked.current, index)];
+      store.order.slice(from, to + 1).forEach(item => next.add(item));
+    } else if (next.has(id)) next.delete(id); else next.add(id);
+    lastTicked.current = index;
+    onSelect(next);
+  };
+  const allSelected = store.total > 0 && store.order.every(id => selected.has(id));
+  const inRange = (row: number, col: number) => !!grid.range && row >= grid.range.top && row <= grid.range.bottom
+    && col >= grid.range.left && col <= grid.range.right;
   const manualOrder = view.sorts.length === 0 && canWrite;
   const columnCount = columns.length + (canWrite ? 2 : 1);
   const spacer = (height: number) => height > 0 && <tr aria-hidden="true" className="nb-db-spacer" style={{ height }}><td colSpan={columnCount} /></tr>;
   const visible = store.order.slice(start, end).map((id, offset) => ({ id, index: start + offset, row: store.rowAt(start + offset) }));
-  return <div className="nb-db-scroll">
-    <table className="nb-db-table" style={{ width: columns.reduce((sum, def) => sum + widthOf(def), 0) + (canWrite ? 76 : 36) }}>
+  return <div className="nb-db-scroll" ref={rootRef} onClickCapture={grid.clickCapture}>
+    <input ref={grid.sinkRef} className="nb-db-sink" aria-label="表格单元格：方向键移动，回车编辑，直接输入可替换内容" autoComplete="off" spellCheck={false} {...grid.sinkProps} />
+    <table className="nb-db-table" style={{ width: columns.reduce((sum, def) => sum + widthOf(def), 0) + (canWrite ? 92 : 36) }}>
       <colgroup>
-        <col style={{ width: 36 }} />
+        <col style={{ width: canWrite ? 52 : 36 }} />
         {columns.map(def => <col key={def.id} style={{ width: widthOf(def) }} />)}
-        {canWrite && <col style={{ width: 40 }} />}
+        {canWrite && <col style={{ width: 56 }} />}
       </colgroup>
       <thead><tr>
-        <th className="nb-db-gutter" aria-label="行操作" />
+        <th className="nb-db-gutter" aria-label="行操作">
+          {canWrite && <input type="checkbox" className="nb-db-row-check nb-db-row-check-all" aria-label="选择全部行" checked={allSelected}
+            onChange={event => onSelect(event.target.checked ? new Set(store.order) : new Set())} />}
+        </th>
         {columns.map(def => <th key={def.id} scope="col">
           <span className="nb-db-anchor nb-db-th">
             <button className="nb-db-th-button" disabled={!canWrite} onClick={() => setPanel({ kind: 'header', id: def.id })}>
@@ -70,7 +91,7 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
         {visible.map(({ id, index, row }) => !row
           ? <tr key={id} className="nb-db-row-loading" aria-busy="true" style={{ height: rowHeight }}><td colSpan={columnCount} /></tr>
           : <tr key={id}
-          className={`${dropRow === row.id ? 'nb-db-drop' : ''} ${dragRow === row.id ? 'nb-db-dragging' : ''}`}
+          className={`${dropRow === row.id ? 'nb-db-drop' : ''} ${dragRow === row.id ? 'nb-db-dragging' : ''} ${selected.has(row.id) ? 'nb-db-row-selected' : ''}`}
           onDragOver={event => { if (!dragRow || dragRow === row.id) return; event.preventDefault(); setDropRow(row.id); }}
           onDragLeave={() => setDropRow(previous => previous === row.id ? null : previous)}
           onDrop={event => {
@@ -86,6 +107,8 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
           }}>
           <td className="nb-db-gutter">
             <span className="nb-db-row-actions">
+              {canWrite && <input type="checkbox" className="nb-db-row-check" aria-label={`选择「${row.title || '未命名'}」`} checked={selected.has(row.id)}
+                onChange={() => undefined} onClick={event => tick(index, row.id, event.shiftKey)} />}
               {manualOrder && <span className="nb-db-handle" draggable aria-label="拖动调整行顺序" title="拖动调整顺序"
                 onDragStart={event => { setDragRow(row.id); event.dataTransfer.effectAllowed = 'move';
                   event.dataTransfer.setData('application/x-nbase-row', row.id); }}
@@ -93,11 +116,15 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
               {!manualOrder && <span className="nb-db-index">{index + 1}</span>}
             </span>
           </td>
-          {columns.map(def => {
+          {columns.map((def, col) => {
             const pendingKey = `${row.id}:${def.type === 'title' ? 'title' : def.id}`;
-            return <td key={def.id} className={`nb-db-cell nb-db-type-${def.type} ${store.pending.has(pendingKey) ? 'pending' : ''}`}>
+            const point = { row: index, col };
+            const cursor = grid.focus?.row === index && grid.focus.col === col;
+            return <td key={def.id} data-r={index} data-c={col} aria-selected={inRange(index, col)}
+              onMouseDown={event => grid.cellMouseDown(event, point)} onMouseEnter={event => grid.cellMouseEnter(event, point)}
+              className={`nb-db-cell nb-db-type-${def.type} ${store.pending.has(pendingKey) ? 'pending' : ''} ${inRange(index, col) ? 'nb-db-in-range' : ''} ${cursor ? 'nb-db-cursor' : ''}`}>
               <span className="nb-db-anchor nb-db-cell-inner">
-                <EditableCell row={row} def={def} editable={canWrite}
+                <EditableCell row={row} def={def} editable={canWrite} onNavigate={grid.navigate}
                   onChange={value => onCell(row, def, value)}
                   onTitle={title => void store.updateRow(row.id, { title: title.slice(0, 255) })}
                   onCreateOption={canWrite ? onCreateOption(def) : undefined} />
@@ -106,6 +133,8 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
             </td>;
           })}
           {canWrite && <td className="nb-db-row-end">
+            <button className="nb-db-tool nb-db-row-delete" aria-label={`复制「${row.title || '未命名'}」`} title="复制这一行"
+              onClick={() => void store.duplicateRows([row.id], manualOrder)}><Icon name="copy" size={13} /></button>
             <button className="nb-db-tool nb-db-row-delete" aria-label={`删除「${row.title || '未命名'}」`} title="移入回收站"
               onClick={() => void store.trashRow(row.id)}><Icon name="trash" size={13} /></button>
           </td>}

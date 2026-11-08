@@ -303,13 +303,14 @@ export class RowStore {
   }
 
   /** Copies rows; the copies join the view on the following read. */
-  async duplicateRows(ids: string[], onProgress?: (done: number) => void): Promise<string[]> {
+  async duplicateRows(ids: string[], placeNextToSource: boolean, onProgress?: (done: number) => void): Promise<string[]> {
     const created: string[] = [];
     try {
       await this.inChunks(ids, async chunk => {
         const result = await this.source.bulk(this.databaseId, { clientMutationId: crypto.randomUUID(), operation: 'duplicate', ids: chunk });
         created.push(...result.rows.map(row => row.id));
       }, onProgress);
+      if (ids.length === 1 && created[0] && placeNextToSource) await this.source.moveRow(this.databaseId, created[0], ids[0]!);
       await this.refresh();
       announceDatabaseChange(this.databaseId, this.origin);
     } catch (failure) { this.fail(failure, '复制未全部完成。'); }

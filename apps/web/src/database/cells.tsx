@@ -29,18 +29,33 @@ export function CellValue({ row, def }: { row: DatabaseRow; def: PropertyDefinit
   }
 }
 
-function TextInput({ initial, type = 'text', onCommit, onCancel, label }: {
+/** Where the cursor goes when an edit ends from the keyboard. */
+export type CellNavigation = 'down' | 'right' | 'left' | 'stay';
+
+let editSeed: string | null = null;
+
+/** Text typed on a selected cell, picked up by the editor that opens next. */
+export function setCellEditSeed(text: string): void { editSeed = text; }
+
+function takeCellEditSeed(): string | null {
+  const seed = editSeed;
+  editSeed = null;
+  return seed;
+}
+
+function TextInput({ initial, type = 'text', onCommit, onCancel, onNavigate, label }: {
   initial: string; type?: 'text' | 'number' | 'url' | 'date'; label: string;
-  onCommit: (value: string) => void; onCancel: () => void;
+  onCommit: (value: string) => void; onCancel: () => void; onNavigate?: ((direction: CellNavigation) => void) | undefined;
 }) {
-  const [value, setValue] = useState(initial);
+  const [value, setValue] = useState(() => takeCellEditSeed() ?? initial);
   const composing = useRef(false);
   const done = useRef(false);
   const commit = () => { if (!done.current) { done.current = true; onCommit(value); } };
   const keyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
-    if (event.key === 'Enter') { event.preventDefault(); commit(); }
-    if (event.key === 'Escape') { event.preventDefault(); done.current = true; onCancel(); }
+    if (event.key === 'Enter') { event.preventDefault(); commit(); onNavigate?.('down'); }
+    if (event.key === 'Tab' && onNavigate) { event.preventDefault(); commit(); onNavigate(event.shiftKey ? 'left' : 'right'); }
+    if (event.key === 'Escape') { event.preventDefault(); done.current = true; onCancel(); onNavigate?.('stay'); }
   };
   return <input className="nb-db-input" autoFocus aria-label={label} type={type === 'url' ? 'url' : type}
     value={value} onChange={event => setValue(event.target.value)} onBlur={commit} onKeyDown={keyDown}
@@ -52,7 +67,7 @@ export function SelectEditor({ def, value, multiple, onChange, onCreateOption, o
   def: PropertyDefinition; value: string[]; multiple: boolean;
   onChange: (next: string[]) => void; onCreateOption?: ((name: string) => Promise<string | null>) | undefined; onClose: () => void;
 }) {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(() => takeCellEditSeed() ?? '');
   const [busy, setBusy] = useState(false);
   const options = def.options ?? [];
   const q = query.trim();
@@ -101,11 +116,12 @@ export function SelectEditor({ def, value, multiple, onChange, onCreateOption, o
  * Click-to-edit cell. Checkbox toggles at once; text-like types use an inline input; select
  * types open a picker. Values reach `onChange` already typed; null clears the cell.
  */
-export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOption }: {
+export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOption, onNavigate }: {
   row: DatabaseRow; def: PropertyDefinition; editable: boolean;
   onChange: (value: PropertyValue | null) => void;
   onTitle: (title: string) => void;
   onCreateOption?: ((name: string) => Promise<string | null>) | undefined;
+  onNavigate?: ((direction: CellNavigation) => void) | undefined;
 }) {
   const [editing, setEditing] = useState(false);
   const [invalid, setInvalid] = useState('');
@@ -118,19 +134,21 @@ export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOp
       onClick={() => onChange(value === true ? null : true)}><CellValue row={row} def={def} /></button>;
   }
   if (def.type === 'select' || def.type === 'multi_select') {
-    const selected = value === undefined ? [] : Array.isArray(value) ? value : [String(value)];
+    // A removed option's id stays in the row but must not be sent back; the server would refuse the whole value.
+    const selected = (value === undefined ? [] : Array.isArray(value) ? value : [String(value)])
+      .filter(id => def.options?.some(option => option.id === id));
     return <>
       <button className="nb-db-cell-button" aria-label={`编辑${def.name}`} onClick={() => setEditing(true)}>
         <CellValue row={row} def={def} /></button>
       {editing && <SelectEditor def={def} value={selected} multiple={def.type === 'multi_select'} onCreateOption={onCreateOption}
-        onClose={() => setEditing(false)}
+        onClose={() => { setEditing(false); onNavigate?.('stay'); }}
         onChange={next => onChange(def.type === 'select' ? next[0] ?? null : next.length ? next : null)} />}
     </>;
   }
   if (editing) {
     const initial = value === undefined ? '' : String(value);
     const type = def.type === 'number' ? 'number' : def.type === 'date' ? 'date' : def.type === 'url' ? 'url' : 'text';
-    return <TextInput initial={initial} type={type} label={def.name} onCancel={() => setEditing(false)} onCommit={text => {
+    return <TextInput initial={initial} type={type} label={def.name} onNavigate={onNavigate} onCancel={() => setEditing(false)} onCommit={text => {
       setEditing(false);
       const trimmed = def.type === 'title' ? text : text.trim();
       if (def.type === 'title') { if (trimmed !== row.title) onTitle(trimmed); return; }
