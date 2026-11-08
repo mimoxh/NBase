@@ -1,23 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
 import { pageCoverIds, type PageCoverId } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
+import { Popover } from '../components/Popover';
 
 const emojis = ['📄', '📝', '📒', '📗', '📘', '📙', '📚', '🧭', '🛠', '🧪', '🐘', '💾', '🗄', '📦', '🔐', '⚙️',
   '🌱', '🌿', '🍀', '🌸', '🌙', '⭐', '🔥', '💡', '🎯', '🧩', '📌', '📎', '🖊', '✏️', '🗒', '📋',
   '🍳', '🍅', '☕', '🍜', '🧋', '🎂', '🍵', '🥗', '🏠', '🏢', '🚗', '✈️', '🚄', '🗺', '🏔', '⛺',
   '💪', '🧠', '❤️', '🎨', '🎵', '📷', '🎬', '⌚', '💰', '📈', '📊', '✅', '❌', '⚠️', '🚀', '🏁'];
-
-function Popover({ label, children, onClose }: { label: string; children: ReactNode; onClose: () => void }) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const close = (event: MouseEvent) => { if (!ref.current?.contains(event.target as Node)) onClose(); };
-    const key = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.stopPropagation(); onClose(); } };
-    document.addEventListener('mousedown', close);
-    document.addEventListener('keydown', key, true);
-    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', key, true); };
-  }, [onClose]);
-  return <div className="nb-picker" role="dialog" aria-label={label} ref={ref}>{children}</div>;
-}
 
 export function EmojiPicker({ onPick, onRemove, onClose }: {
   onPick: (icon: string) => void; onRemove: () => void; onClose: () => void;

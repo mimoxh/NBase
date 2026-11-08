@@ -11,11 +11,12 @@ import { CalloutNode } from './nodes/CalloutNode';
 import { PageReferenceNode } from './nodes/PageReferenceNode';
 import { FootnoteDefinitionNode, FootnoteReferenceNode } from './nodes/FootnoteNodes';
 import { MermaidNode } from './nodes/MermaidNode';
+import { DatabaseViewNode } from './nodes/DatabaseViewNode';
 
 /** The same registry is used for the UI, Markdown import and JSON reopening. */
 export const EDITOR_NODES = [
   HeadingNode, QuoteNode, ListNode, ListItemNode, CodeNode, CodeHighlightNode,
   LinkNode, AutoLinkNode, TableNode, TableRowNode, TableCellNode,
   HorizontalRuleNode, ImageReferenceNode, AttachmentNode, EquationNode, CalloutNode, PageReferenceNode,
-  FootnoteDefinitionNode, FootnoteReferenceNode, MermaidNode,
+  FootnoteDefinitionNode, FootnoteReferenceNode, MermaidNode, DatabaseViewNode,
 ];

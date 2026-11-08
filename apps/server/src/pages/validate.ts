@@ -1,4 +1,4 @@
-import { attachmentPresentationOf, isAttachmentPresentation, isCalloutKind, isCalloutTitle, isFootnoteId, isMarkdownFrontMatter, isStoredMermaidSource, markdownFrontMatterKey, pageCoverIds, quickCaptureMarker, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
+import { attachmentPresentationOf, isAttachmentPresentation, isCalloutKind, isSerializedDatabaseView, isCalloutTitle, isFootnoteId, isMarkdownFrontMatter, isStoredMermaidSource, markdownFrontMatterKey, pageCoverIds, quickCaptureMarker, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
 import { isPageReference } from './search-text.js';
 
 export const maxContentBytes = 1024 * 1024;
@@ -8,7 +8,7 @@ const elementTypes = new Set([
   'root', 'paragraph', 'heading', 'quote', 'callout', 'list', 'listitem', 'code',
   'link', 'autolink', 'table', 'tablerow', 'tablecell', 'footnote-definition',
 ]);
-const leafTypes = new Set(['text', 'code-highlight', 'linebreak', 'tab', 'horizontalrule', 'image-reference', 'attachment', 'equation', 'page-reference', 'footnote-reference', 'mermaid']);
+const leafTypes = new Set(['text', 'code-highlight', 'linebreak', 'tab', 'horizontalrule', 'image-reference', 'attachment', 'equation', 'page-reference', 'footnote-reference', 'mermaid', 'database-view']);
 const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype']);
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -69,6 +69,7 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
     if (node.type === 'equation' && (typeof node.equation !== 'string' || node.equation.length > 10_000
       || typeof node.inline !== 'boolean')) invalid();
     if (node.type === 'mermaid' && (inTable || inLinkOrCode || !isStoredMermaidSource(node.source))) invalid();
+    if (node.type === 'database-view' && (depth !== 1 || !isSerializedDatabaseView(node))) invalid();
     if (node.type === 'page-reference'
       && (inLinkOrCode || !isPageReference(node) || node.targetPageId !== node.targetPageId.toLowerCase())) invalid();
     if ((node.type === 'footnote-reference' || node.type === 'footnote-definition') && !isFootnoteId(node.footnoteId)) invalid();

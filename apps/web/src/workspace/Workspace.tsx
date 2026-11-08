@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ChangeEvent } from 'react';
-import type { PageCoverId, PageSummary } from '@nbase/contracts';
+import { defaultDatabaseSchema, type PageCoverId, type PageSummary } from '@nbase/contracts';
+import { LazyDatabaseView as DatabaseView, LazyRowPanel as RowPanel } from '../database/lazy';
+import { createDemoSource } from '../database/demoSource';
+import { announceDatabaseChange } from '../database/source';
 import { DocumentEditor } from '../editor/DocumentEditor';
 import { SourceEditorDialog } from '../editor/SourceEditorDialog';
 import { createContentFromMarkdown, parseMarkdownImport } from '../editor/markdown';
@@ -23,8 +26,12 @@ import '../shell/shell.css';
 
 const toSummary = (page: Page): PageSummary => ({
   id: page.id, workspaceId: 'demo', parentId: page.parentId, title: page.title,
-  icon: page.icon, cover: page.cover, revision: '1', createdAt: '', updatedAt: '',
+  icon: page.icon, cover: page.cover, kind: page.kind ?? 'document', revision: '1', createdAt: '', updatedAt: '',
 });
+
+function defaultDatabase(): NonNullable<Page['database']> {
+  return { revision: 1, ...defaultDatabaseSchema({ title: crypto.randomUUID(), view: crypto.randomUUID() }) };
+}
 
 function download(name: string, text: string) {
   const url = URL.createObjectURL(new Blob([text], { type: 'text/markdown;charset=utf-8' }));
@@ -184,11 +191,37 @@ export function WorkspaceApp() {
     return snapshot;
   }, []);
   const openPage = useCallback((id: string) => { flush(); dispatch({ type: 'open', id }); setDialog(null); setMobileOpen(false); mainRef.current?.scrollTo({ top: 0 }); }, [flush]);
+  const openPageRef = useRef(openPage);
+  openPageRef.current = openPage;
   const newPage = (parentId: string | null = null) => {
     flush(); dispatch({ type: 'create', page: { id: crypto.randomUUID(), title: '未命名页面', parentId, markdown: '', starred: false, deleted: false, dirty: true, icon: null, cover: null } });
     setDialog(null); setReadOnly(false); setMobileOpen(false); notice('已在当前会话中新建页面，请下载以保留内容。');
     requestAnimationFrame(() => { const title = document.querySelector<HTMLInputElement>('[aria-label="页面标题"]'); title?.focus(); title?.select(); });
   };
+  const newDatabase = (parentId: string | null = null) => {
+    flush();
+    dispatch({ type: 'create', page: { id: crypto.randomUUID(), title: '未命名数据库', parentId, markdown: '', starred: false,
+      deleted: false, dirty: true, icon: null, cover: null, kind: 'database', database: defaultDatabase() } });
+    setDialog(null); setReadOnly(false); setMobileOpen(false); notice('已在当前会话中新建数据库，刷新后会重置。');
+    requestAnimationFrame(() => { const title = document.querySelector<HTMLInputElement>('[aria-label="数据库标题"]'); title?.focus(); title?.select(); });
+  };
+  const demoSource = useMemo(() => createDemoSource({ state: stateRef, dispatch,
+    openPage: id => openPageRef.current(id), notice }), [notice]);
+  const databaseChoices = useMemo(() => state.pages.filter(p => p.kind === 'database' && !p.deleted)
+    .map(p => ({ id: p.id, title: p.title, icon: p.icon })), [state.pages]);
+  const databaseEmbedding = useMemo(() => ({
+    source: demoSource, databases: databaseChoices,
+    // Inline creation keeps the current document open; the new database goes under it.
+    createDatabase: async () => {
+      const parent = stateRef.current.pages.find(p => p.id === stateRef.current.currentId);
+      const page: Page = { id: crypto.randomUUID(), title: '未命名数据库', parentId: parent && (parent.kind ?? 'document') === 'document'
+        ? parent.id : null, markdown: '', starred: false, deleted: false, dirty: true, icon: null, cover: null,
+        kind: 'database', database: defaultDatabase() };
+      stateRef.current = { ...stateRef.current, pages: [...stateRef.current.pages, page] };
+      dispatch({ type: 'insert', page });
+      return page.id;
+    },
+  }), [demoSource, databaseChoices]);
   const toggleSidebar = () => {
     if (window.innerWidth <= 720) { setMobileOpen(value => !value); return; }
     setSidebarHidden(previous => { try { localStorage.setItem('nbase.sidebar', previous ? '' : 'collapsed'); } catch { /* best effort */ } return !previous; });
@@ -233,7 +266,7 @@ export function WorkspaceApp() {
     else if (key === 'trash') setDialog('trash');
     else if (key === 'theme') setTheme(theme === 'dark' ? 'light' : 'dark');
   };
-  const summaries = useMemo(() => state.pages.filter(p => !p.deleted).map(toSummary), [state.pages]);
+  const summaries = useMemo(() => state.pages.filter(p => !p.deleted && p.kind !== 'row').map(toSummary), [state.pages]);
   const favoriteSet = useMemo(() => new Set(state.pages.filter(p => p.starred && !p.deleted).map(p => p.id)), [state.pages]);
   const favoritePages = useMemo(() => state.pages.filter(p => p.starred && !p.deleted).map(toSummary), [state.pages]);
   const recentPages = useMemo(() => state.recent.slice(0, 5).flatMap(id => state.pages.filter(p => p.id === id && !p.deleted).map(toSummary)), [state.pages, state.recent]);
@@ -241,13 +274,18 @@ export function WorkspaceApp() {
   const treeActions: TreeRowActions = useMemo(() => ({
     onOpen: openPage,
     onAddChild: (id: string) => newPage(id),
+    onAddDatabase: (id: string) => newDatabase(id),
     onFavorite: (id: string) => dispatch({ type: 'star', id }),
     onMove: (id: string) => { const page = state.pages.find(p => p.id === id); setMoveTarget(page?.parentId ?? ''); setDialogFor(id); setDialog('move'); },
     onTrash: (id: string) => { setDialogFor(id); setDialog('delete'); },
     onPlace: (id: string, placement: PagePlacement) => dispatch({ type: 'place', id, placement }),
   }), [openPage, state.pages]);
   const target = dialogFor ? state.pages.find(p => p.id === dialogFor) : undefined;
-  const pageMenuItems: (MenuItem | 'divider')[] = current ? [
+  const pageMenuItems: (MenuItem | 'divider')[] = current?.kind === 'database' ? [
+    { key: 'move', label: '移动到…', icon: 'folder', onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialogFor(current.id); setDialog('move'); } },
+    'divider',
+    { key: 'trash', label: '移入回收站（含所有行）', icon: 'trash', danger: true, onSelect: () => { setDialogFor(current.id); setDialog('delete'); } },
+  ] : current ? [
     ...readingMenuItems(readingPrefs, setReadingPrefs),
     'divider',
     { key: 'mode', label: readOnly ? '切换到编辑' : '切换到阅读', icon: 'page', onSelect: () => { flush(); setReadOnly(!readOnly); } },
@@ -258,8 +296,13 @@ export function WorkspaceApp() {
     { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
     ...(current.originalMarkdown !== undefined ? [{ key: 'raw', label: '下载导入原文', icon: 'download' as const, onSelect: () => download(`${current.title}-原始文件`, current.originalMarkdown ?? '') }] : []),
     'divider',
-    { key: 'child', label: '添加子页面', icon: 'plus', onSelect: () => newPage(current.id) },
-    { key: 'move', label: '移动到…', icon: 'folder', onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialogFor(current.id); setDialog('move'); } },
+    ...(current.kind === 'row' ? [
+      { key: 'database', label: '返回数据库', icon: 'table' as const, onSelect: () => { if (current.parentId) openPage(current.parentId); } },
+    ] : [
+      { key: 'child', label: '添加子页面', icon: 'plus' as const, onSelect: () => newPage(current.id) },
+      { key: 'child-database', label: '添加数据库', icon: 'table' as const, onSelect: () => newDatabase(current.id) },
+      { key: 'move', label: '移动到…', icon: 'folder' as const, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialogFor(current.id); setDialog('move'); } },
+    ]),
     'divider',
     { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, onSelect: () => { setDialogFor(current.id); setDialog('delete'); } },
   ] : [];
@@ -269,7 +312,7 @@ export function WorkspaceApp() {
     <Sidebar workspaceName="演示空间" loginName="演示会话" accountLabel="演示模式 · 未登录" theme={theme} onTheme={setTheme}
       onLogout={() => notice('演示模式没有账号；刷新页面即可重置。')}
       onSearch={() => { flush(); setDialog('search'); }} onTrash={() => setDialog('trash')}
-      onNewPage={() => newPage()} onImport={() => fileRef.current?.click()}
+      onNewPage={() => newPage()} onNewDatabase={() => newDatabase()} onImport={() => fileRef.current?.click()}
       createBusy={false} pages={summaries} activeId={isDocument ? current.id : null}
       favorites={favoriteSet} favoritePages={favoritePages} recentPages={recentPages}
       treeLoading={false} treeError="" onTreeRetry={() => undefined}
@@ -289,7 +332,18 @@ export function WorkspaceApp() {
       <NoticeBar tone="info">演示模式 · 内容仅保留在当前会话，刷新后重置
         <button onClick={isDocument ? exportCurrent : () => notice('打开需要保留的页面，再从页面菜单下载 Markdown。')}>{isDocument ? '下载此页' : '如何保留内容'}</button></NoticeBar>
       <main ref={mainRef} className="nb-scroll" tabIndex={-1}>
-        {isDocument ? <>
+        {isDocument && current.kind === 'database' ? <>
+          <div className="nb-doc-wide-head">
+            <PageHeader icon={current.icon ?? '🗃️'} cover={current.cover} editable={!readOnly}
+              onIcon={icon => dispatch({ type: 'icon', id: current.id, icon })}
+              onCover={(cover: PageCoverId | null) => dispatch({ type: 'cover', id: current.id, cover })}
+              title={readOnly ? <div className="nb-doc-title-static" data-nbase-find-title>{current.title || '未命名数据库'}</div>
+                : <input className="nb-doc-title page-title" data-nbase-find-title aria-label="数据库标题" value={current.title} placeholder="未命名数据库"
+                  onChange={event => dispatch({ type: 'rename', id: current.id, title: event.target.value })}
+                  onBlur={() => announceDatabaseChange(current.id)} />} />
+          </div>
+          <div className="nb-doc-wide"><DatabaseView key={current.id} source={demoSource} databaseId={current.id} /></div>
+        </> : isDocument ? <>
           <PageHeader icon={current.icon} cover={current.cover} editable={!readOnly}
             onIcon={icon => dispatch({ type: 'icon', id: current.id, icon })}
             onCover={(cover: PageCoverId | null) => dispatch({ type: 'cover', id: current.id, cover })}
@@ -297,10 +351,19 @@ export function WorkspaceApp() {
               : <input className="nb-doc-title page-title" data-nbase-find-title aria-label="页面标题" value={current.title} placeholder="未命名页面"
                 onChange={event => dispatch({ type: 'rename', id: current.id, title: event.target.value })} />} />
           <div className="nb-doc-body">
+            {current.kind === 'row' && current.parentId && <RowPanel key={current.parentId} source={demoSource}
+              databaseId={current.parentId} editable={!readOnly} pending={false}
+              row={{ id: current.id, title: current.title, icon: current.icon, properties: current.properties ?? {},
+                revision: String(current.revision ?? 1), createdAt: current.createdAt ?? '', updatedAt: current.updatedAt ?? '' }}
+              onChange={(propertyId, value) => {
+                void demoSource.updateRow(current.id, String(current.revision ?? 1), { properties: { [propertyId]: value } })
+                  .then(() => announceDatabaseChange(current.parentId!))
+                  .catch(() => notice('这个值不符合字段设置，未保存。'));
+              }} />}
             <DocumentEditor key={current.id} ref={editorRef} documentId={current.id}
               title={current.title} onReplaceTitle={value => dispatch({ type: 'rename', id: current.id, title: value })}
               initialContent={current.snapshot?.content} initialMarkdown={current.markdown}
-              readOnly={readOnly} onChange={onChange} onReady={onReady} onNotice={notice} />
+              readOnly={readOnly} onChange={onChange} onReady={onReady} onNotice={notice} databases={databaseEmbedding} />
           </div>
           <Toc outline={current.snapshot?.outline ?? []} onJump={id => editorRef.current?.jumpToHeading(id)} />
         </> : <section className="nb-home">

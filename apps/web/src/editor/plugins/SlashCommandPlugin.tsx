@@ -13,6 +13,7 @@ import type { BlockStyle } from '../blockStyles';
 import { $createEquationNode, $insertEquationNode, $requestEquationEdit } from '../nodes/EquationNode';
 import { $applyCallout, calloutLabels } from '../nodes/CalloutNode';
 import { INSERT_MERMAID_COMMAND } from '../nodes/MermaidNode';
+import { REQUEST_DATABASE_VIEW_COMMAND, useDatabaseEmbedding } from '../nodes/DatabaseViewNode';
 import { calloutKinds, type CalloutKind } from '@nbase/contracts';
 import type { AttachmentPickKind } from '../types';
 
@@ -21,6 +22,7 @@ type SlashAction =
   | { kind: 'hr' }
   | { kind: 'table' }
   | { kind: 'mermaid' }
+  | { kind: 'database'; mode: 'new' | 'link' }
   | { kind: 'attachment'; value: AttachmentPickKind }
   | { kind: 'callout'; value: CalloutKind }
   | { kind: 'equation'; inline: boolean };
@@ -42,6 +44,10 @@ const COMMANDS: SlashCommand[] = [
   { key: 'hr', label: '分割线', hint: '--- 水平线', keywords: ['hr', 'divider', 'line', '分割线', '分隔线'], action: { kind: 'hr' } },
   { key: 'table', label: '表格', hint: '3 × 3 表格', keywords: ['table', '表格'], action: { kind: 'table' }, hideInTable: true },
   { key: 'mermaid', label: '图表', hint: 'Mermaid 流程图或时序图', keywords: ['mermaid', 'diagram', '图表', '流程图', '时序图'], action: { kind: 'mermaid' }, hideInTable: true },
+  { key: 'database', label: '数据库', hint: '新建多维表格并插入视图', keywords: ['database', 'db', 'table', '数据库', '多维表格', '表格视图'],
+    action: { kind: 'database', mode: 'new' }, hideInTable: true },
+  { key: 'database-link', label: '关联数据库', hint: '插入已有数据库的视图', keywords: ['database', 'link', 'db', '数据库', '关联', '多维表格'],
+    action: { kind: 'database', mode: 'link' }, hideInTable: true },
   { key: 'image', label: '图片', hint: '上传图片', keywords: ['image', 'img', 'picture', 'photo', '图片', '图像', '照片'], action: { kind: 'attachment', value: 'image' } },
   { key: 'attachment', label: '附件', hint: '上传文件', keywords: ['file', 'attachment', 'upload', '附件', '文件', '上传'], action: { kind: 'attachment', value: 'file' } },
   ...calloutKinds.map((kind): SlashCommand => ({
@@ -75,12 +81,13 @@ function rank(command: SlashCommand, query: string): number {
   return Number.POSITIVE_INFINITY;
 }
 
-export function filterSlashCommands(query: string, inTable: boolean, canUpload = false): SlashCommand[] {
+export function filterSlashCommands(query: string, inTable: boolean, canUpload = false, canDatabase = false): SlashCommand[] {
   const q = query.trim().toLowerCase();
   return COMMANDS
     .map((command, index) => ({ command, index, order: rank(command, q) }))
     .filter(item => item.order < Infinity && !(inTable && item.command.hideInTable)
-      && (canUpload || item.command.action.kind !== 'attachment'))
+      && (canUpload || item.command.action.kind !== 'attachment')
+      && (canDatabase || item.command.action.kind !== 'database'))
     .sort((a, b) => a.order - b.order || a.index - b.index)
     .map(item => item.command);
 }
@@ -139,9 +146,10 @@ export function SlashCommandPlugin({ onPickAttachment }: { onPickAttachment?: ((
   const pickAttachment = useRef(onPickAttachment);
   pickAttachment.current = onPickAttachment;
   const canUpload = Boolean(onPickAttachment);
+  const canDatabase = Boolean(useDatabaseEmbedding());
   const options = useMemo(
-    () => filterSlashCommands(query ?? '', selectionInTable(editor), canUpload).map(command => new SlashOption(command)),
-    [canUpload, editor, query]);
+    () => filterSlashCommands(query ?? '', selectionInTable(editor), canUpload, canDatabase).map(command => new SlashOption(command)),
+    [canUpload, canDatabase, editor, query]);
 
   const selectOption = useCallback((option: SlashOption, nodeToRemove: TextNode | null, closeMenu: () => void) => {
     editor.update(() => {
@@ -167,6 +175,7 @@ export function SlashCommandPlugin({ onPickAttachment }: { onPickAttachment?: ((
           && tableTriggerParagraph.isEmpty()) tableTriggerParagraph.remove();
       }
       else if (action.kind === 'mermaid') editor.dispatchCommand(INSERT_MERMAID_COMMAND, undefined);
+      else if (action.kind === 'database') editor.dispatchCommand(REQUEST_DATABASE_VIEW_COMMAND, action.mode);
       else if (action.kind === 'callout') $applyCallout(action.value);
       else if (action.kind === 'attachment') { /* The file picker opens after this update. */ }
       else $requestEquationEdit($insertEquationNode('', false));

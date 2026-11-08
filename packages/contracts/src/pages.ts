@@ -1,3 +1,5 @@
+import type { PageKind, PropertyValue, RowProperties } from './databases.js';
+
 /** API content is validated on the server before storage. The web editor owns Lexical's node types. */
 export interface StoredDocumentContent {
   schemaVersion: number;
@@ -18,6 +20,8 @@ export interface PageSummary {
   cover: PageCoverId | null;
   /** Omitted by older servers and stored receipts. */
   tagIds?: string[];
+  /** Omitted by older servers and stored receipts; treat as 'document'. */
+  kind?: PageKind;
   revision: string;
   createdAt: string;
   updatedAt: string;
@@ -25,6 +29,8 @@ export interface PageSummary {
 
 export interface PageDocument extends PageSummary {
   content: StoredDocumentContent;
+  /** Row pages only: property values keyed by property id. */
+  properties?: RowProperties;
 }
 
 export interface PageListResponse {
@@ -45,6 +51,8 @@ export interface CreatePageRequest {
   icon?: string | null;
   cover?: PageCoverId | null;
   tagIds?: string[];
+  /** Only when the parent is a database; the page becomes a row. */
+  properties?: RowProperties;
 }
 
 export interface UpdatePageRequest {
@@ -57,6 +65,8 @@ export interface UpdatePageRequest {
   icon?: string | null;
   cover?: PageCoverId | null;
   tagIds?: string[];
+  /** Row pages only: partial patch, null removes a value. */
+  properties?: Record<string, PropertyValue | null>;
 }
 
 export interface PageStateRequest {

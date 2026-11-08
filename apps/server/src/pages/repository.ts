@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { pageBacklinkLimit, type PageBacklinksResponse } from '@nbase/contracts';
+import { databaseRowLimit, pageBacklinkLimit, type PageBacklinksResponse, type PageKind, type RowProperties } from '@nbase/contracts';
+import { loadDatabaseSchema, mergeRowProperties, rowIndexText } from '../databases/schema.js';
 import type { CreatePageRequest, FavoriteListResponse, PageCoverId, PageDocument, PageHistoryResponse, PageListResponse, PageStateRequest,
   PageSummary, PageTreeResponse, PageVersion, PageVersionOperation, PageVersionSummary, RestorePageVersionRequest,
   SearchResponse, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest } from '@nbase/contracts';
@@ -24,7 +25,8 @@ export class PageError extends Error {
     public readonly statusCode: number,
     public readonly code: 'NOT_FOUND' | 'FORBIDDEN' | 'REVISION_CONFLICT' | 'MUTATION_CONFLICT'
       | 'PAGE_TREE_INVALID' | 'PAGE_TREE_CHANGED' | 'CONTENT_VERSION_UNSUPPORTED' | 'ATTACHMENT_INVALID'
-      | 'FAVORITE_LIMIT' | 'PAGE_POSITION_INVALID' | 'TAG_INVALID' | 'TAG_NAME_CONFLICT' | 'PAGE_REFERENCE_INVALID',
+      | 'FAVORITE_LIMIT' | 'PAGE_POSITION_INVALID' | 'TAG_INVALID' | 'TAG_NAME_CONFLICT' | 'PAGE_REFERENCE_INVALID'
+      | 'PAGE_KIND_INVALID' | 'PROPERTY_INVALID' | 'DATABASE_ROW_LIMIT' | 'DATABASE_SCHEMA_INVALID' | 'DATABASE_UNAVAILABLE',
     public readonly currentRevision?: string,
   ) { super(code); }
 
@@ -43,6 +45,8 @@ interface PageRow {
   tag_ids?: string[];
   content_json: PageDocument['content'];
   content_schema_version: number;
+  kind: PageKind;
+  row_properties: RowProperties | null;
   revision: string;
   created_at: Date;
   updated_at: Date;
@@ -59,7 +63,7 @@ interface ReceiptRow<T = PageDocument> {
 
 interface VersionRow {
   page_id: string; revision: string; title: string; parent_id: string | null;
-  icon: string | null; cover: PageCoverId | null;
+  icon: string | null; cover: PageCoverId | null; row_properties: RowProperties | null;
   content_json: PageDocument['content']; saved_at: Date; operation: PageVersionOperation;
   deleted_at: Date | null;
 }
@@ -93,7 +97,9 @@ function pageFromRow(row: PageRow): PageDocument {
     icon: row.icon ?? null,
     cover: row.cover ?? null,
     tagIds: row.tag_ids ?? [],
+    kind: row.kind ?? 'document',
     content: row.content_json,
+    ...(row.kind === 'row' ? { properties: row.row_properties ?? {} } : {}),
     revision: row.revision,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -101,8 +107,8 @@ function pageFromRow(row: PageRow): PageDocument {
 }
 
 function summaryFromRow(row: PageRow): PageSummary {
-  const { content: _content, ...summary } = pageFromRow(row);
-  void _content;
+  const { content: _content, properties: _properties, ...summary } = pageFromRow(row);
+  void _content; void _properties;
   return summary;
 }
 
@@ -134,10 +140,10 @@ const pageReceiptOperations = new Set(['create', 'update', 'trash', 'restore', '
 
 const sortPositionGap = 1024;
 
-const pageColumns = `id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, revision::text AS revision,
-  created_at, updated_at`;
+const pageColumns = `id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, kind, row_properties,
+  revision::text AS revision, created_at, updated_at`;
 const joinedPageColumns = `p.id, p.workspace_id, p.parent_id, p.title, p.icon, p.cover, p.content_json, p.content_schema_version,
-  p.revision::text AS revision, p.created_at, p.updated_at,
+  p.kind, p.row_properties, p.revision::text AS revision, p.created_at, p.updated_at,
   ARRAY(SELECT pt.tag_id FROM page_tags pt WHERE pt.workspace_id = p.workspace_id AND pt.page_id = p.id ORDER BY pt.tag_id) AS tag_ids`;
 
 export class PgPageRepository {
@@ -146,9 +152,9 @@ export class PgPageRepository {
   private async snapshot(client: PoolClient, workspaceId: string, ids: string[], actorId: string,
     operation: PageVersionOperation): Promise<void> {
     await client.query(`INSERT INTO page_versions (workspace_id, page_id, revision, title, parent_id, icon, cover,
-      content_json, content_schema_version, deleted_at, saved_at, actor_user_id, operation)
+      content_json, content_schema_version, row_properties, deleted_at, saved_at, actor_user_id, operation)
       SELECT workspace_id, id, revision, title, parent_id, icon, cover, content_json, content_schema_version,
-        deleted_at, updated_at, $3, $4 FROM pages WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
+        row_properties, deleted_at, updated_at, $3, $4 FROM pages WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
     [workspaceId, ids, actorId, operation]);
   }
 
@@ -166,13 +172,14 @@ export class PgPageRepository {
 
   async version(workspaceId: string, actorId: string, pageId: string, revision: string): Promise<PageVersion | null> {
     const result = await this.pool.query<VersionRow>(`SELECT h.page_id, h.revision::text AS revision,
-      h.title, h.parent_id, h.icon, h.cover, h.content_json, h.saved_at, h.operation, h.deleted_at FROM page_versions h
+      h.title, h.parent_id, h.icon, h.cover, h.row_properties, h.content_json, h.saved_at, h.operation, h.deleted_at FROM page_versions h
       JOIN workspace_memberships m ON m.workspace_id = h.workspace_id AND m.user_id = $2
       WHERE h.workspace_id = $1 AND h.page_id = $3 AND h.revision = $4::bigint`,
     [workspaceId, actorId, pageId, revision]);
     const row = result.rows[0];
     return row ? { ...versionSummary(row), pageId: row.page_id, parentId: row.parent_id,
-      icon: row.icon ?? null, cover: row.cover ?? null, content: row.content_json } : null;
+      icon: row.icon ?? null, cover: row.cover ?? null, content: row.content_json,
+      ...(row.row_properties ? { properties: row.row_properties } : {}) } : null;
   }
 
   async trashList(workspaceId: string, actorId: string, limit: number,
@@ -255,16 +262,19 @@ export class PgPageRepository {
     };
   }
 
-  /** Pages reachable from active roots through active parents; membership gates the anchor like `list`. */
+  /**
+   * Pages reachable from active roots through active parents; membership gates the anchor like `list`.
+   * Database rows are listed by the database itself, so the tree stops at database pages.
+   */
   async tree(workspaceId: string, actorId: string, limit = 2000): Promise<PageTreeResponse> {
     const result = await this.pool.query<PageRow>(`
       WITH RECURSIVE tree AS (
-        SELECT p.id FROM pages p
+        SELECT p.id, p.kind FROM pages p
         JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
         WHERE p.workspace_id = $1 AND p.parent_id IS NULL AND p.deleted_at IS NULL
         UNION
-        SELECT c.id FROM pages c JOIN tree t ON c.parent_id = t.id
-        WHERE c.workspace_id = $1 AND c.deleted_at IS NULL
+        SELECT c.id, c.kind FROM pages c JOIN tree t ON c.parent_id = t.id
+        WHERE c.workspace_id = $1 AND c.deleted_at IS NULL AND t.kind <> 'database'
       )
       SELECT ${joinedPageColumns} FROM pages p
       JOIN tree t ON t.id = p.id
@@ -443,24 +453,47 @@ export class PgPageRepository {
     return pageFromRow(row);
   }
 
+  /**
+   * A page created under a database becomes one of its rows; `database` is only requested by the
+   * database module. Rows cannot have children, and databases cannot nest inside databases.
+   */
   async createInTransaction(client: PoolClient, workspaceId: string, actorId: string,
-    body: CreatePageRequest): Promise<MutationResult<PageDocument>> {
+    body: CreatePageRequest, requestedKind: 'document' | 'database' = 'document'): Promise<MutationResult<PageDocument>> {
     await this.validateAttachments(client, workspaceId, body.content);
     const index = extractDocumentIndex(body.content);
     await this.validatePageReferenceTargets(client, workspaceId, index.references);
+    let kind: PageKind = requestedKind;
+    let rowProperties: RowProperties | null = null;
+    let searchText = index.searchText;
     if (body.parentId !== null) {
-      const parent = await client.query(
-        'SELECT 1 FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL',
+      const parent = await client.query<{ kind: PageKind }>(
+        'SELECT kind FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL',
         [workspaceId, body.parentId],
       );
-      if (!parent.rows[0]) throw new PageError(422, 'PAGE_TREE_INVALID');
+      const parentKind = parent.rows[0]?.kind;
+      if (!parentKind) throw new PageError(422, 'PAGE_TREE_INVALID');
+      if (parentKind === 'row' || (parentKind === 'database' && requestedKind === 'database')) {
+        throw new PageError(422, 'PAGE_KIND_INVALID');
+      }
+      if (parentKind === 'database') {
+        kind = 'row';
+        const schema = await loadDatabaseSchema(client, workspaceId, body.parentId);
+        if (!schema) throw new PageError(422, 'DATABASE_UNAVAILABLE');
+        const count = await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM pages
+          WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL`, [workspaceId, body.parentId]);
+        if ((count.rows[0]?.n ?? 0) >= databaseRowLimit) throw new PageError(409, 'DATABASE_ROW_LIMIT');
+        rowProperties = this.mergeProperties(schema.properties_json, {}, body.properties ?? {});
+        searchText = rowIndexText(index.searchText, schema.properties_json, rowProperties);
+      }
     }
+    if (body.properties !== undefined && kind !== 'row') throw new PageError(422, 'PAGE_KIND_INVALID');
     const result = await client.query<PageRow>(`
-      INSERT INTO pages (id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, search_text)
-      VALUES ($1, $2, $3, $4, $7, $8, $5::jsonb, 1, $6)
+      INSERT INTO pages (id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, search_text,
+        kind, row_properties)
+      VALUES ($1, $2, $3, $4, $7, $8, $5::jsonb, 1, $6, $9, $10::jsonb)
       RETURNING ${pageColumns}
     `, [randomUUID(), workspaceId, body.parentId, body.title, JSON.stringify(body.content),
-      index.searchText, body.icon ?? null, body.cover ?? null]);
+      searchText, body.icon ?? null, body.cover ?? null, kind, rowProperties ? JSON.stringify(rowProperties) : null]);
     const page = pageFromRow(result.rows[0]!);
     if (body.tagIds?.length) page.tagIds = await this.replaceTags(client, workspaceId, page.id, body.tagIds);
     if (index.references.length) await replacePageLinks(client, workspaceId, page.id, index.references);
@@ -468,7 +501,19 @@ export class PgPageRepository {
     return { statusCode: 201, body: page };
   }
 
+  private mergeProperties(...args: Parameters<typeof mergeRowProperties>): RowProperties {
+    try {
+      return mergeRowProperties(...args);
+    } catch {
+      throw new PageError(422, 'PROPERTY_INVALID');
+    }
+  }
+
   private async validateParent(client: PoolClient, workspaceId: string, pageId: string, parentId: string): Promise<void> {
+    const target = await client.query<{ kind: PageKind }>(
+      'SELECT kind FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL', [workspaceId, parentId]);
+    // Moving pages into a database or under a row is not supported; rows are created in place.
+    if (target.rows[0] && target.rows[0].kind !== 'document') throw new PageError(422, 'PAGE_KIND_INVALID');
     let candidate: string | null = parentId;
     const visited = new Set<string>();
     while (candidate !== null) {
@@ -500,6 +545,11 @@ export class PgPageRepository {
     if (!row) throw new PageError(404, 'NOT_FOUND');
     if (row.content_schema_version !== 1) throw new PageError(422, 'CONTENT_VERSION_UNSUPPORTED');
     if (row.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', row.revision);
+    if (row.kind === 'database' && body.content) throw new PageError(422, 'PAGE_KIND_INVALID');
+    if (body.properties !== undefined && row.kind !== 'row') throw new PageError(422, 'PAGE_KIND_INVALID');
+    if (row.kind === 'row' && body.parentId !== undefined && body.parentId !== row.parent_id) {
+      throw new PageError(422, 'PAGE_KIND_INVALID');
+    }
     if (body.content) await this.validateAttachments(client, workspaceId, body.content);
     const index = body.content ? extractDocumentIndex(body.content) : null;
     if (index) await this.validatePageReferenceTargets(client, workspaceId, index.references);
@@ -507,17 +557,27 @@ export class PgPageRepository {
     if (parentId !== null && parentId !== row.parent_id) await this.validateParent(client, workspaceId, pageId, parentId);
     const icon = body.icon === undefined ? row.icon : body.icon;
     const cover = body.cover === undefined ? row.cover : body.cover;
+    let rowProperties = row.row_properties;
+    let searchText = index?.searchText ?? null;
+    if (row.kind === 'row' && (index || body.properties)) {
+      const schema = row.parent_id ? await loadDatabaseSchema(client, workspaceId, row.parent_id) : null;
+      if (!schema) throw new PageError(422, 'DATABASE_UNAVAILABLE');
+      if (body.properties) rowProperties = this.mergeProperties(schema.properties_json, row.row_properties ?? {}, body.properties);
+      const bodyText = index?.searchText ?? extractDocumentIndex(row.content_json).searchText;
+      searchText = rowIndexText(bodyText, schema.properties_json, rowProperties ?? {});
+    }
 
     const result = await client.query<PageRow>(`
       UPDATE pages SET title = $3, parent_id = $4, content_json = $5::jsonb,
         content_schema_version = 1, search_text = COALESCE($7, search_text), icon = $8, cover = $9,
+        row_properties = $10::jsonb,
         sort_position = CASE WHEN parent_id IS DISTINCT FROM $4::uuid THEN nextval('pages_sort_position_seq') * 1024 ELSE sort_position END,
         revision = revision + 1, updated_at = now()
       WHERE workspace_id = $1 AND id = $2 AND revision = $6::bigint AND deleted_at IS NULL
       RETURNING ${pageColumns}
     `, [workspaceId, pageId, body.title ?? row.title, parentId,
       JSON.stringify(body.content ?? row.content_json), body.expectedRevision,
-      index?.searchText ?? null, icon, cover]);
+      searchText, icon, cover, rowProperties ? JSON.stringify(rowProperties) : null]);
     if (!result.rows[0]) throw new PageError(409, 'REVISION_CONFLICT');
     const tagIds = body.tagIds === undefined ? row.tag_ids : await this.replaceTags(client, workspaceId, pageId, body.tagIds);
     if (index) await replacePageLinks(client, workspaceId, pageId, index.references);
@@ -535,11 +595,12 @@ export class PgPageRepository {
       if (!row) throw new PageError(404, 'NOT_FOUND');
       if (row.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', row.revision);
       if (body.expectedSubtreeIds) {
+        // Clients see the page tree, which lists databases but not their rows; rows go along with them.
         const actual = await client.query<{ id: string }>(`WITH RECURSIVE subtree AS (
-          SELECT id FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-          UNION ALL SELECT child.id FROM pages child JOIN subtree parent ON child.parent_id = parent.id
+          SELECT id, kind FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+          UNION ALL SELECT child.id, child.kind FROM pages child JOIN subtree parent ON child.parent_id = parent.id
           WHERE child.workspace_id = $1 AND child.deleted_at IS NULL
-        ) SELECT id FROM subtree`, [workspaceId, pageId]);
+        ) SELECT id FROM subtree WHERE id = $2 OR kind <> 'row'`, [workspaceId, pageId]);
         const expected = body.expectedSubtreeIds.map(id => id.toLowerCase()).sort();
         if (JSON.stringify(actual.rows.map(item => item.id).sort()) !== JSON.stringify(expected)) {
           throw new PageError(409, 'PAGE_TREE_CHANGED');
@@ -578,7 +639,11 @@ export class PgPageRepository {
       if (row.parent_id) {
         const parent = await client.query('SELECT 1 FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL',
           [workspaceId, row.parent_id]);
-        if (!parent.rows[0]) parentId = null;
+        if (!parent.rows[0]) {
+          // A row cannot stand alone; its database has to come back first.
+          if (row.kind === 'row') throw new PageError(409, 'DATABASE_UNAVAILABLE');
+          parentId = null;
+        }
       }
       const restored = await client.query<PageRow>(`
         WITH RECURSIVE subtree AS (
@@ -611,8 +676,10 @@ export class PgPageRepository {
       if (!current) throw new PageError(404, 'NOT_FOUND');
       if (current.content_schema_version !== 1) throw new PageError(422, 'CONTENT_VERSION_UNSUPPORTED');
       if (current.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', current.revision);
-      const source = await client.query<{ title: string; content_json: PageDocument['content'] }>(
-        'SELECT title, content_json FROM page_versions WHERE workspace_id = $1 AND page_id = $2 AND revision = $3::bigint',
+      if (current.kind === 'database') throw new PageError(422, 'PAGE_KIND_INVALID');
+      const source = await client.query<{ title: string; content_json: PageDocument['content'];
+        row_properties: RowProperties | null }>(
+        'SELECT title, content_json, row_properties FROM page_versions WHERE workspace_id = $1 AND page_id = $2 AND revision = $3::bigint',
         [workspaceId, pageId, body.sourceRevision]);
       const version = source.rows[0];
       if (!version) throw new PageError(404, 'NOT_FOUND');
@@ -620,11 +687,21 @@ export class PgPageRepository {
       await this.validateAttachments(client, workspaceId, content);
       const index = extractDocumentIndex(content);
       await this.validatePageReferenceTargets(client, workspaceId, index.references);
-      // Restore title/body and retain the current page metadata.
+      let searchText = index.searchText;
+      let rowProperties = current.row_properties;
+      if (current.kind === 'row') {
+        // Values are restored as stored; ones the current schema no longer reads simply display as empty.
+        const schema = current.parent_id ? await loadDatabaseSchema(client, workspaceId, current.parent_id) : null;
+        if (!schema) throw new PageError(422, 'DATABASE_UNAVAILABLE');
+        rowProperties = version.row_properties ?? current.row_properties ?? {};
+        searchText = rowIndexText(index.searchText, schema.properties_json, rowProperties);
+      }
+      // Restore title/body (and row values) and retain the current page metadata.
       const result = await client.query<PageRow>(`UPDATE pages SET title = $3, content_json = $4::jsonb,
-        content_schema_version = 1, search_text = $5, revision = revision + 1, updated_at = now()
+        content_schema_version = 1, search_text = $5, row_properties = $6::jsonb, revision = revision + 1, updated_at = now()
         WHERE workspace_id = $1 AND id = $2 RETURNING ${pageColumns}`,
-      [workspaceId, pageId, version.title, JSON.stringify(content), index.searchText]);
+      [workspaceId, pageId, version.title, JSON.stringify(content), searchText,
+        rowProperties ? JSON.stringify(rowProperties) : null]);
       await replacePageLinks(client, workspaceId, pageId, index.references);
       await this.snapshot(client, workspaceId, [pageId], actorId, 'restore-version');
       return { statusCode: 200, body: pageFromRow({ ...result.rows[0]!, tag_ids: current.tag_ids ?? [] }) };

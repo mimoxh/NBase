@@ -29,6 +29,8 @@ import { SectionFoldingPlugin, type SectionFoldingHandle } from './plugins/Secti
 import { PageReferencesProvider } from './nodes/PageReferenceNode';
 import { PageReferencePlugin } from './plugins/PageReferencePlugin';
 import { MermaidPlugin } from './plugins/MermaidPlugin';
+import { DatabaseViewPlugin } from './plugins/DatabaseViewPlugin';
+import { DatabaseEmbeddingProvider } from './nodes/DatabaseViewNode';
 import { ListIndentPlugin } from './plugins/ListIndentPlugin';
 import { LinkInteractionPlugin } from './plugins/LinkInteractionPlugin';
 import { FloatingToolbarPlugin } from './plugins/FloatingToolbarPlugin';
@@ -198,7 +200,8 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
   // The initial state belongs to this mounted document; edits never replace it.
   }; }, []);
   return <AttachmentWorkspaceContext.Provider value={props.workspaceId ?? null}>
-    <PageReferencesProvider references={props.pageReferences}><LexicalComposer initialConfig={config}>
+    <PageReferencesProvider references={props.pageReferences}><DatabaseEmbeddingProvider value={props.databases}>
+    <LexicalComposer initialConfig={config}>
     <div className="document-editor" data-readonly={Boolean(props.readOnly)}>
       {failure && <div className="nbase-editor-error" role="alert"><strong>编辑器发生错误，原始内容仍保留。</strong><span>{failure}</span><details><summary>查看打开时的原始内容</summary><pre>{props.initialMarkdown ?? JSON.stringify(props.initialContent, null, 2)}</pre></details></div>}
       <ToolbarPlugin readOnly={Boolean(props.readOnly)} onNotice={props.onNotice}
@@ -213,7 +216,7 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <HorizontalRulePlugin /><MarkdownShortcutPlugin transformers={MARKDOWN_TRANSFORMERS} />
       <CodeHighlightPlugin /><CodeCopyPlugin onNotice={props.onNotice} />
       <EquationPlugin /><SlashCommandPlugin onPickAttachment={props.onPickAttachment} /><CalloutPlugin /><PageReferencePlugin historyState={history} />
-      <MermaidPlugin historyState={history} />
+      <MermaidPlugin historyState={history} /><DatabaseViewPlugin />
       <ListIndentPlugin /><LinkInteractionPlugin onNotice={props.onNotice} />
       <FloatingToolbarPlugin /><BlockHandlePlugin onBeforeMove={element => folding.current?.expand(element)} />
       <ShortcutsPlugin /><WordCountPlugin />
@@ -222,7 +225,7 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <SectionFoldingPlugin ref={folding} />
       <StateBridge props={props} editorRef={editorRef} folding={folding} history={history} />
     </div>
-  </LexicalComposer></PageReferencesProvider></AttachmentWorkspaceContext.Provider>;
+  </LexicalComposer></DatabaseEmbeddingProvider></PageReferencesProvider></AttachmentWorkspaceContext.Provider>;
 }
 
 export const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(function DocumentEditor(props, ref) {

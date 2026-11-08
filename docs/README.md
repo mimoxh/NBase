@@ -11,6 +11,7 @@
 | [architecture/p2-api.md](architecture/p2-api.md) | P2 最小账号与后续文档 API 契约 |
 | [architecture/local-postgres.md](architecture/local-postgres.md) | 本机隔离 PostgreSQL 测试库的启动、凭据位置与边界 |
 | [architecture/attachments.md](architecture/attachments.md) | 附件授权、存储、导出与清理边界 |
+| [architecture/databases.md](architecture/databases.md) | 多维表格首版：页面类型、字段与视图契约、接口、文档内嵌和分页边界 |
 | [architecture/search.md](architecture/search.md) | 当前页面搜索索引、授权、查询与定位契约 |
 | [architecture/history-trash.md](architecture/history-trash.md) | 历史快照、回收站子树、修订恢复与本机重试记录 |
 | [architecture/deployment.md](architecture/deployment.md) | Docker 持久卷、秘密文件、启动/就绪检查、账号恢复与会话撤销 |

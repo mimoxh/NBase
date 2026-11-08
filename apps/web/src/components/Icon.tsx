@@ -16,6 +16,8 @@ const paths = {
  moon: 'M20 13A8 8 0 1 1 11 4a7 7 0 0 0 9 9', logout: 'M14 8V5H4v14h10v-3M9 12h12m-4-4 4 4-4 4',
  'chevron-down': 'm6 9 6 6 6-6', link: 'M9 15 15 9M10 13a4 4 0 0 1 0-6l2-2a4 4 0 0 1 6 6l-1 1M14 11a4 4 0 0 1 0 6l-2 2a4 4 0 0 1-6-6l1-1',
  copy: 'M9 9h12v13H9zM4 15V3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3',
+ table: 'M3 4h18v16H3zM3 10h18M3 15h18M9 4v16', filter: 'M3 5h18l-7 8v6l-4 2v-8z',
+ sort: 'M7 4v16m-4-4 4 4 4-4M17 20V4m-4 4 4-4 4 4',
 } as const;
 export type IconName = keyof typeof paths;
 export function Icon({ name, size = 18 }: { name: IconName; size?: number }) { return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={paths[name]} /></svg>; }

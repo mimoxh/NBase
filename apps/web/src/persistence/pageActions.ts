@@ -111,13 +111,15 @@ export function createPageActions({ session, workspace, actionsLoaded, pages, pe
   };
 
   const beginPageAction = async (operation: LocalPendingAction['operation'], pageId: string,
-    expectedRevision: string, pageTitle: string, sourceRevision?: string) => {
+    expectedRevision: string, pageTitle: string, sourceRevision?: string, databaseRow = false) => {
     if (!session || !workspace || pageActionBusyRef.current) return;
     if (!actionsLoaded || pendingActionsRef.current.size) { setDialog(null); setNotice('请先处理本机待确认操作，再发起新的恢复或删除。'); return; }
     pageActionBusyRef.current = true; setPageActionBusy(true);
     try {
-      let affectedIds = operation === 'trash' ? subtreeIds(pages, pageId) : [pageId];
-      if (operation === 'trash') {
+      // A database row is not in the page tree; it has no children of its own.
+      const isRow = databaseRow || docsRef.current.get(pageId)?.kind === 'row';
+      let affectedIds = operation === 'trash' && !isRow ? subtreeIds(pages, pageId) : [pageId];
+      if (operation === 'trash' && !isRow) {
         const freshPages = await loadPageTree(workspace.id);
         const freshIds = subtreeIds(freshPages, pageId);
         setPages(freshPages);

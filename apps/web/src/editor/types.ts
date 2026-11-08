@@ -1,5 +1,6 @@
 import type { SerializedEditorState } from 'lexical';
 import type { AttachmentMetadata, PageSummary } from '@nbase/contracts';
+import type { DatabaseEmbedding } from './nodes/DatabaseViewNode';
 
 /** Versioned document payload; runtime node keys are never document identities. */
 export interface DocumentContent {
@@ -43,6 +44,8 @@ export interface DocumentEditorProps {
   onUploadFiles?: ((files: File[]) => Promise<AttachmentMetadata[]>) | undefined;
   /** Opens the workspace file picker; without it the slash menu offers no upload commands. */
   onPickAttachment?: ((kind: AttachmentPickKind) => void) | undefined;
+  /** Shows database view blocks live; without it they render as placeholders and no database commands appear. */
+  databases?: DatabaseEmbedding | undefined;
 }
 
 export interface DocumentEditorHandle {

@@ -1,0 +1,83 @@
+import { databaseSchemaProblem, rowValueProblem, type DatabaseDocument, type DatabaseRow } from '@nbase/contracts';
+import { workspaceReducer, type Action, type Page, type Workspace } from '../workspace/model';
+import { DatabaseSourceError, type DatabaseDataSource } from './source';
+
+const epoch = '2026-11-01T08:00:00.000Z';
+
+function rowOf(page: Page): DatabaseRow {
+  return { id: page.id, title: page.title, icon: page.icon, properties: page.properties ?? {},
+    revision: String(page.revision ?? 1), createdAt: page.createdAt ?? epoch, updatedAt: page.updatedAt ?? page.createdAt ?? epoch };
+}
+
+/**
+ * Session-only database storage for the demo workspace. Each write runs the workspace reducer
+ * on a local copy first, so a read right after a write sees it before React re-renders.
+ */
+export function createDemoSource(options: {
+  state: { current: Workspace };
+  dispatch: (action: Action) => void;
+  openPage: (id: string) => void;
+  notice: (text: string) => void;
+}): DatabaseDataSource {
+  const apply = (action: Action) => {
+    options.state.current = workspaceReducer(options.state.current, action);
+    options.dispatch(action);
+  };
+  const database = (id: string) => {
+    const page = options.state.current.pages.find(p => p.id === id && !p.deleted && p.kind === 'database' && p.database);
+    if (!page?.database) throw new DatabaseSourceError('NOT_FOUND', '数据库不存在或已移入回收站。');
+    return { page, schema: page.database };
+  };
+  const row = (id: string) => {
+    const page = options.state.current.pages.find(p => p.id === id && !p.deleted && p.kind === 'row');
+    if (!page?.parentId) throw new DatabaseSourceError('NOT_FOUND', '这一行已不存在。');
+    return page;
+  };
+  return {
+    canWrite: true,
+    load: async id => {
+      const { page, schema } = database(id);
+      const rows = options.state.current.pages.filter(p => p.parentId === id && !p.deleted && p.kind === 'row').map(rowOf);
+      const document: DatabaseDocument = {
+        page: { id: page.id, workspaceId: 'demo', parentId: page.parentId, title: page.title, icon: page.icon, cover: page.cover,
+          kind: 'database', revision: '1', createdAt: page.createdAt ?? epoch, updatedAt: page.updatedAt ?? epoch },
+        properties: schema.properties, views: schema.views, schemaRevision: String(schema.revision), rows,
+      };
+      return structuredClone(document);
+    },
+    saveSchema: async (id, next, expectedRevision) => {
+      const { schema } = database(id);
+      if (String(schema.revision) !== expectedRevision) throw new DatabaseSourceError('REVISION_CONFLICT', '数据库结构已改变。');
+      if (databaseSchemaProblem(next.properties, next.views)) throw new DatabaseSourceError('DATABASE_SCHEMA_INVALID', '设置无效。');
+      apply({ type: 'db-schema', id, properties: next.properties, views: next.views });
+      return { pageId: id, properties: next.properties, views: next.views, schemaRevision: String(schema.revision + 1) };
+    },
+    createRow: async (id, title, properties) => {
+      const { schema } = database(id);
+      for (const [key, value] of Object.entries(properties)) {
+        if (rowValueProblem(schema.properties, key, value)) throw new DatabaseSourceError('PROPERTY_INVALID', '值无效。');
+      }
+      const now = new Date().toISOString();
+      const page: Page = { id: crypto.randomUUID(), title, parentId: id, markdown: '', icon: null, cover: null, starred: false,
+        deleted: false, dirty: true, kind: 'row', properties, revision: 1, createdAt: now, updatedAt: now };
+      apply({ type: 'insert', page });
+      return rowOf(page);
+    },
+    updateRow: async (rowId, expectedRevision, patch) => {
+      const page = row(rowId);
+      if (String(page.revision ?? 1) !== expectedRevision) throw new DatabaseSourceError('REVISION_CONFLICT', '这一行已改变。');
+      const { schema } = database(page.parentId!);
+      for (const [key, value] of Object.entries(patch.properties ?? {})) {
+        if (rowValueProblem(schema.properties, key, value)) throw new DatabaseSourceError('PROPERTY_INVALID', '值无效。');
+      }
+      apply({ type: 'row-update', id: rowId, at: new Date().toISOString(),
+        ...(patch.title !== undefined ? { title: patch.title } : {}), ...(patch.properties ? { properties: patch.properties } : {}) });
+      return rowOf(row(rowId));
+    },
+    moveRow: async (id, rowId, afterRowId) => { apply({ type: 'place', id: rowId, placement: { parentId: id, afterId: afterRowId } }); },
+    trashRow: async target => { apply({ type: 'delete', id: target.id }); options.notice('已移入回收站，可在当前会话恢复。'); },
+    openRow: id => options.openPage(id),
+    openDatabase: id => options.openPage(id),
+    notice: options.notice,
+  };
+}

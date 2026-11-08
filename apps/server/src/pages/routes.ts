@@ -1,4 +1,5 @@
-import { pageTagLimit, type CreatePageRequest, type PageStateRequest, type UpdatePageRequest } from '@nbase/contracts';
+import { databasePropertyLimit, pageTagLimit, type CreatePageRequest, type PageStateRequest, type PropertyValue,
+  type RowProperties, type UpdatePageRequest } from '@nbase/contracts';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AuthRepository } from '../auth/repository.js';
 import {
@@ -36,6 +37,18 @@ function pageTagIds(value: unknown): string[] {
   return ids;
 }
 
+/** Shape check only; values are checked against the database schema inside the write transaction. */
+function rowProperties(value: unknown, allowNull: boolean): Record<string, PropertyValue | null> {
+  if (!object(value) || Object.keys(value).length > databasePropertyLimit) throw new RouteError(400, 'INVALID_REQUEST');
+  for (const [key, item] of Object.entries(value)) {
+    const valid = isUuid(key) && key === key.toLowerCase() && (
+      (item === null && allowNull) || typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean'
+      || (Array.isArray(item) && item.every(entry => typeof entry === 'string')));
+    if (!valid) throw new RouteError(400, 'INVALID_REQUEST');
+  }
+  return value as Record<string, PropertyValue | null>;
+}
+
 function createBody(value: unknown): CreatePageRequest {
   if (!object(value) || !isUuid(value.clientMutationId) || !parentId(value.parentId) || !title(value.title)) {
     throw new RouteError(400, 'INVALID_REQUEST');
@@ -49,12 +62,13 @@ function createBody(value: unknown): CreatePageRequest {
   if (Object.hasOwn(value, 'icon')) body.icon = validatePageIcon(value.icon);
   if (Object.hasOwn(value, 'cover')) body.cover = validatePageCover(value.cover);
   if (Object.hasOwn(value, 'tagIds')) body.tagIds = pageTagIds(value.tagIds);
+  if (Object.hasOwn(value, 'properties')) body.properties = rowProperties(value.properties, false) as RowProperties;
   return body;
 }
 
 function updateBody(value: unknown): UpdatePageRequest {
   if (!object(value) || !isUuid(value.clientMutationId) || !isRevision(value.expectedRevision)
-    || !(['title', 'parentId', 'content', 'icon', 'cover', 'tagIds'].some((key) => Object.hasOwn(value, key)))) {
+    || !(['title', 'parentId', 'content', 'icon', 'cover', 'tagIds', 'properties'].some((key) => Object.hasOwn(value, key)))) {
     throw new RouteError(400, 'INVALID_REQUEST');
   }
   if (Object.hasOwn(value, 'title') && !title(value.title)) throw new RouteError(400, 'INVALID_REQUEST');
@@ -66,6 +80,7 @@ function updateBody(value: unknown): UpdatePageRequest {
   if (Object.hasOwn(value, 'icon')) body.icon = validatePageIcon(value.icon);
   if (Object.hasOwn(value, 'cover')) body.cover = validatePageCover(value.cover);
   if (Object.hasOwn(value, 'tagIds')) body.tagIds = pageTagIds(value.tagIds);
+  if (Object.hasOwn(value, 'properties')) body.properties = rowProperties(value.properties, true);
   return body;
 }
 

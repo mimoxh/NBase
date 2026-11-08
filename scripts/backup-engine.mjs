@@ -24,6 +24,7 @@ function tablesForSchema(version) {
     ...(version >= 7 ? { workspace_tags: 'workspace_id, id', page_tags: 'workspace_id, page_id, tag_id' } : {}),
     ...(version >= 8 ? { note_templates: 'workspace_id, owner_user_id, id' } : {}),
     ...(version >= 10 ? { page_links: 'workspace_id, source_page_id, occurrence' } : {}),
+    ...(version >= 13 ? { databases: 'workspace_id, page_id' } : {}),
   };
 }
 const backupLock = '2026110301';

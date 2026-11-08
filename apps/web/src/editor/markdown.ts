@@ -30,6 +30,8 @@ import { readMarkdownFrontMatter } from './markdownFrontMatter';
 import { maskMarkdownInlineLiterals, resolveMarkdownReferences } from './markdownReferences';
 import { normalizeCodeBlockLanguage } from './codeLanguages';
 import { MERMAID_TRANSFORMER } from './mermaidMarkdown';
+import { $createDatabaseViewNode, $isDatabaseViewNode, DatabaseViewNode, databaseViewMarkdown,
+  databaseViewMarkdownPattern } from './nodes/DatabaseViewNode';
 import { normalizeDocumentContent } from './normalize';
 import type { DocumentContent, EditorSnapshot, MarkdownAssessment, OutlineItem } from './types';
 
@@ -79,6 +81,17 @@ const PAGE_REFERENCE: TextMatchTransformer = {
     const target = pageIdFromReferenceUrl(match[2]!);
     const label = match[1]!.replace(/\\([!-/:-@[-`{-~])/g, '$1');
     if (target && isPageReferenceLabel(label)) node.replace($createPageReferenceNode(target, label));
+  },
+};
+
+/** A database view block is a link on its own line; only imports turn it back into a block. */
+const DATABASE_VIEW: ElementTransformer = {
+  type: 'element', dependencies: [DatabaseViewNode],
+  regExp: databaseViewMarkdownPattern,
+  export: node => $isDatabaseViewNode(node) ? databaseViewMarkdown(node.getDatabaseId(), node.getViewId()) : null,
+  replace(parent, _children, match, isImport) {
+    if (!isImport) return false;
+    parent.replace($createDatabaseViewNode(match[1]!, match[2] ?? null));
   },
 };
 
@@ -347,7 +360,7 @@ const TABLE = createTableTransformer(() => INLINE_TRANSFORMERS);
 const INLINE_TRANSFORMERS: Transformer[] = [IMAGE, PAGE_REFERENCE, LITERAL_LEGACY_REFERENCE, SAFE_LINK, FOOTNOTE_REFERENCE, EQUATION_INLINE, LITERAL_INLINE_CODE,
   ...TRANSFORMERS.filter(item => item.type === 'text-format')];
 export const MARKDOWN_TRANSFORMERS: Transformer[] = [
-  CALLOUT, EQUATION_BLOCK, TABLE, HORIZONTAL_RULE, CHECK_LIST, FOOTNOTE_DEFINITION,
+  DATABASE_VIEW, CALLOUT, EQUATION_BLOCK, TABLE, HORIZONTAL_RULE, CHECK_LIST, FOOTNOTE_DEFINITION,
   ATTACHMENT, IMAGE, PAGE_REFERENCE, LITERAL_LEGACY_REFERENCE, SAFE_LINK, FOOTNOTE_REFERENCE, EQUATION_INLINE, LITERAL_INLINE_CODE, DELIMITER_ESCAPE,
   MERMAID_TRANSFORMER, CODE_ALIASED, ...TRANSFORMERS.filter(item => item !== LINK && item !== CHECK_LIST && item !== CODE),
 ];

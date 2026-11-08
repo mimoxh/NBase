@@ -12,6 +12,7 @@ import type { PgAttachmentRepository } from './attachments/repository.js';
 import { registerTemplateRoutes, renderNoteTemplate } from './notes/templates.js';
 import { registerTagRoutes } from './notes/tags.js';
 import { registerDailyRoutes } from './notes/daily.js';
+import { registerDatabaseRoutes } from './databases/routes.js';
 
 interface AuthOptions {
   repository: AuthRepository;
@@ -59,6 +60,7 @@ export async function buildApp(options: AppOptions = {}) {
       registerTagRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
       registerTemplateRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
       registerDailyRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin, renderNoteTemplate);
+      registerDatabaseRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
     }
     if (options.attachments) registerAttachmentRoutes(app, options.attachments,
       options.auth.repository, options.auth.publicOrigin);

@@ -275,6 +275,8 @@ export function registerTemplateRoutes(app: FastifyInstance, pool: Pool, pages: 
       const result = await pages.mutate(workspaceId, actorId, body.clientMutationId, 'copy', pageId, body, async client => {
         const source = await pages.getInTransaction(client, workspaceId, pageId);
         if (body.sourceRevision !== source.revision) throw new PageError(409, 'REVISION_CONFLICT', source.revision);
+        // Copying a database or a row would need its schema and values; not supported yet.
+        if (source.kind !== 'document') throw new PageError(422, 'PAGE_KIND_INVALID');
         const defaultTitle = (source.title.trim() || '未命名页面').slice(0, 251).replace(/[\ud800-\udbff]$/u, '') + '（副本）';
         return pages.createInTransaction(client, workspaceId, actorId, {
           clientMutationId: body.clientMutationId, parentId: body.parentId, title: body.title || defaultTitle,

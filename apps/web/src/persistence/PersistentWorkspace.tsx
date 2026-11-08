@@ -11,6 +11,10 @@ import { SourceEditorDialog } from '../editor/SourceEditorDialog';
 import { createContentFromMarkdown, markdownFromContent, parseMarkdownImport } from '../editor/markdown';
 import type { AttachmentPickKind, DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
 import { ApiError, attachmentClient, loadPageTree, pageClient, tagClient } from './client';
+import type { PropertyValue } from '@nbase/contracts';
+import { LazyDatabaseView as DatabaseView, LazyRowPanel as RowPanel } from '../database/lazy';
+import { createPersistentSource, databaseClient, rowFromPage } from '../database/persistentSource';
+import { announceDatabaseChange } from '../database/source';
 import { draftKey, draftVersion, localDrafts, sameDraftVersion,
   type LocalPageDraft, type LocalPendingAction, type LocalPendingCreate, type LocalPendingNoteWrite } from './drafts';
 import { useNoteWrites } from './useNoteWrites';
@@ -148,9 +152,10 @@ export function PersistentWorkspace() {
   const upsertPage = (input: PageDocument) => {
     const page = normalizePage(input);
     docsRef.current.set(page.id, page);
-    const { content: _content, ...summary } = page;
-    void _content;
-    setPages(previous => previous.some(item => item.id === page.id)
+    const { content: _content, properties: _properties, ...summary } = page;
+    void _content; void _properties;
+    // Database rows are listed by their database, not by the page tree.
+    if (page.kind !== 'row') setPages(previous => previous.some(item => item.id === page.id)
       ? previous.map(item => item.id === page.id ? summary : item) : [...previous, summary]);
     if (activeIdRef.current === page.id) setDocumentPage(page);
   };
@@ -574,6 +579,8 @@ export function PersistentWorkspace() {
     titleRef, docsRef, draftsRef, pendingActionsRef, pendingCreatesRef, pageActionBusyRef, uploadingRef, openSequence, saveTimers, savePageRef,
     editorRef, setActive, setStatus, setNotice, setReauth, setDialog, setPages, setPendingActions, setPageActionBusy, setDocumentPage,
     setInitialContent, setEditorSnapshot, setConflict, setOtherDraft, openPage, reloadTree, refreshTags, markDraft, waitForSave });
+  const beginPageActionRef = useRef(beginPageAction);
+  beginPageActionRef.current = beginPageAction;
 
   const recoverOtherDraft = () => {
     if (!session || !workspace || !documentPage || !otherDraft || draftsRef.current.has(documentPage.id)) return;
@@ -596,7 +603,8 @@ export function PersistentWorkspace() {
   };
 
   /** One revisioned PATCH for parent/icon/cover; keeps the save-guard sequence of the old move flow. */
-  const updatePageMeta = async (pageId: string, patch: Pick<UpdatePageRequest, 'parentId' | 'icon' | 'cover' | 'tagIds'>,
+  const updatePageMeta = async (pageId: string,
+    patch: Pick<UpdatePageRequest, 'parentId' | 'icon' | 'cover' | 'tagIds' | 'title' | 'properties'>,
     done: string, problem = '请先解决本页的保存问题，再修改页面。') => {
     if (!session || !workspace || readOnly || !canWrite) return false;
     if (pageActionBusyRef.current
@@ -623,11 +631,66 @@ export function PersistentWorkspace() {
         if (!receipt) throw error;
         updated = receipt.response;
       }
-      upsertPage(updated); setNotice(done);
+      upsertPage(updated);
+      if (done) setNotice(done);
       if (patch.tagIds) void refreshTags().catch(() => undefined);
+      if (updated.kind === 'row' && updated.parentId) announceDatabaseChange(updated.parentId);
+      if (updated.kind === 'database') announceDatabaseChange(updated.id);
       return true;
-    } catch (error) { setNotice(message(error)); if (isAuthError(error)) setReauth(true); return false; }
+    } catch (error) {
+      setNotice(error instanceof ApiError && error.code === 'PROPERTY_INVALID' ? '这个值不符合字段设置，未保存。' : message(error));
+      if (isAuthError(error)) setReauth(true);
+      return false;
+    }
   };
+
+  /** Rows of the open row page are written here so the page's revision stays in step with its body saves. */
+  const [rowSaving, setRowSaving] = useState(false);
+  const setRowProperty = async (pageId: string, propertyId: string, value: PropertyValue | null) => {
+    setRowSaving(true);
+    try { await updatePageMeta(pageId, { properties: { [propertyId]: value } }, ''); }
+    finally { setRowSaving(false); }
+  };
+
+  /** Creates an empty database; `open` switches to it, otherwise the id is returned for an inline block. */
+  const createDatabase = async (parentId: string | null, open = true): Promise<string | null> => {
+    if (!session || !workspace || !canWrite || createBusyRef.current) return null;
+    createBusyRef.current = true; setCreateBusy(true);
+    try {
+      const created = await databaseClient.create(workspace.id, { clientMutationId: crypto.randomUUID(), parentId,
+        title: '未命名数据库' }, session.csrfToken);
+      setPages(previous => previous.some(item => item.id === created.page.id) ? previous : [...previous, normalizePage(created.page)]);
+      if (!open) return created.page.id;
+      setDialog(null);
+      createBusyRef.current = false; setCreateBusy(false);
+      await openPage(created.page.id);
+      requestAnimationFrame(() => {
+        const input = document.querySelector<HTMLInputElement>('.persistent-workspace .document-heading .page-title');
+        input?.focus(); input?.select();
+      });
+      return created.page.id;
+    } catch (error) { setNotice(message(error)); if (isAuthError(error)) setReauth(true); return null; }
+    finally { createBusyRef.current = false; setCreateBusy(false); }
+  };
+  const createDatabaseRef = useRef(createDatabase);
+  createDatabaseRef.current = createDatabase;
+  const databaseChoices = useMemo(() => pages.filter(page => page.kind === 'database')
+    .map(page => ({ id: page.id, title: page.title, icon: page.icon })), [pages]);
+
+  const databaseSource = useMemo(() => session && workspace ? createPersistentSource({
+    workspaceId: workspace.id, csrfToken: session.csrfToken, canWrite: canWrite && !readOnly,
+    openPage: id => { setDialog(null); void openPageRef.current(id); },
+    notice: setNotice,
+    trashRow: row => beginPageActionRef.current('trash', row.id, row.revision, row.title, undefined, true),
+    onRowSaved: page => { if (docsRef.current.has(page.id)) upsertPage(page); },
+  }) : null, [session, workspace, canWrite, readOnly]);
+  const databaseEmbedding = useMemo(() => databaseSource ? {
+    source: databaseSource, databases: databaseChoices,
+    createDatabase: () => {
+      const parent = activeIdRef.current;
+      return createDatabaseRef.current(parent && docsRef.current.get(parent)?.kind === 'document' ? parent : null, false);
+    },
+  } : undefined, [databaseSource, databaseChoices]);
 
   const placePageInTree = async (pageId: string, placement: PagePlacement) => {
     if (!session || !workspace || !canWrite) return;
@@ -817,6 +880,7 @@ export function PersistentWorkspace() {
   const treeActions = {
     onOpen: openTreePage,
     onAddChild: (id: string) => openNewNote(id),
+    ...(canWrite ? { onAddDatabase: (id: string) => { void createDatabase(id); } } : {}),
     onFavorite: (id: string) => { void toggleFavorite(id); },
     onMove: (id: string) => {
       void openPage(id).then(opened => {
@@ -827,7 +891,21 @@ export function PersistentWorkspace() {
     onTrash: (id: string) => { void openPage(id).then(opened => { if (opened) setDialog('delete'); }); },
     ...(canWrite ? { onPlace: (id: string, placement: PagePlacement) => { void placePageInTree(id, placement); } } : {}),
   };
-  const pageMenuItems: (MenuItem | 'divider')[] = current ? [
+  const pageMenuItems: (MenuItem | 'divider')[] = current?.kind === 'database' ? [
+    { key: 'move', label: '移动到…', icon: 'folder', disabled: currentLocked || !canWrite, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialog('move'); } },
+    'divider',
+    { key: 'trash', label: '移入回收站（含所有行）', icon: 'trash', danger: true, disabled: currentLocked || !canWrite, onSelect: () => setDialog('delete') },
+  ] : current?.kind === 'row' ? [
+    ...readingMenuItems(readingPrefs, setReadingPrefs),
+    'divider',
+    { key: 'mode', label: readOnly ? '切换为编辑' : '切换为阅读', icon: 'focus', disabled: !canWrite, onSelect: () => setReadOnly(!readOnly) },
+    { key: 'attach', label: '添加图片或附件', icon: 'image', disabled: editorReadOnly, onSelect: () => pickAttachment('file') },
+    { key: 'source', label: 'Markdown 源码', icon: 'code', onSelect: openSource },
+    { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
+    ...(current.parentId ? [{ key: 'database', label: '返回数据库', icon: 'table' as const, onSelect: () => void openPage(current.parentId!) }] : []),
+    'divider',
+    { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, disabled: currentLocked || !canWrite, onSelect: () => setDialog('delete') },
+  ] : current ? [
     ...readingMenuItems(readingPrefs, setReadingPrefs),
     'divider',
     { key: 'mode', label: readOnly ? '切换为编辑' : '切换为阅读', icon: 'focus', disabled: !canWrite, onSelect: () => setReadOnly(!readOnly) },
@@ -837,6 +915,7 @@ export function PersistentWorkspace() {
     { key: 'folder-zip', label: '导出已保存的页面与子页面 ZIP', icon: 'download', disabled: folderExporting, onSelect: () => void exportFolder() },
     'divider',
     { key: 'child', label: '添加子页面', icon: 'plus', disabled: createBusy || currentLocked || !canWrite, onSelect: () => openNewNote(current.id) },
+    { key: 'child-database', label: '添加数据库', icon: 'table', disabled: createBusy || currentLocked || !canWrite, onSelect: () => void createDatabase(current.id) },
     { key: 'copy', label: '复制页面', icon: 'copy', disabled: currentLocked || !canWrite || !noteWrites.ready || noteWrites.busy,
       onSelect: () => { setNoteDialogError(''); setDialog('copy'); } },
     { key: 'template', label: '另存为个人模板', icon: 'page', disabled: currentLocked || !canWrite, onSelect: () => openTemplates(true) },
@@ -860,6 +939,7 @@ export function PersistentWorkspace() {
       </>}
       treeControls={tags.length > 0 && <TagFilter tags={tags} value={treeTagIds} onChange={setTreeTagIds} />}
       onNewPage={() => openNewNote(null)} onImport={() => { if (canWrite) fileRef.current?.click(); }}
+      {...(canWrite ? { onNewDatabase: () => void createDatabase(null) } : {})}
       {...(canWrite ? { onImportFolder: () => setDialog('folder-import') } : {})}
       createBusy={createBusy || !canWrite} pages={filterPageTree(pages, treeTagIds)} activeId={activeId}
       favorites={favoriteSet} favoritePages={favoritePages} recentPages={recentPages}
@@ -873,7 +953,7 @@ export function PersistentWorkspace() {
         onSidebarToggle={toggleSidebar}
         onOpenBreadcrumb={id => { if (id) void openPage(id); else leaveCurrent(); }}
         readOnly={readOnly} onToggleReadOnly={() => setReadOnly(!readOnly)}
-        onHistory={() => setDialog('history')} disabled={currentLocked} pageMenuItems={pageMenuItems} />}
+        onHistory={() => setDialog('history')} hideHistory={current?.kind === 'database'} disabled={currentLocked} pageMenuItems={pageMenuItems} />}
       {!activeId && <header className="nb-topbar">
         <button className="icon-button nb-sidebar-toggle" aria-label="切换导航" onClick={toggleSidebar}><Icon name="sidebar" size={17} /></button>
         <nav className="nb-crumbs" aria-label="页面位置"><strong>工作台</strong></nav></header>}
@@ -887,13 +967,29 @@ export function PersistentWorkspace() {
         {activeId ? loadingPage ? <div className="nb-home" role="status">正在读取页面…</div>
           : conflict ? <ConflictCard conflict={conflict} conflictMarkdown={conflictMarkdown} createBusy={createBusy} onDownload={exportCurrent}
             onSaveCopy={() => void createPage(conflict.server.parentId, `${conflict.draft.title || '未命名页面'}（冲突副本）`, conflict.draft.content, conflict.draft)} />
-          : current ? <>
+          : current && current.kind === 'database' ? <>
+            <div className="nb-doc-wide-head">
+              <PageHeader icon={current.icon ?? '🗃️'} cover={current.cover} editable={!editorReadOnly}
+                onIcon={icon => setIcon(current.id, icon)} onCover={cover => setCover(current.id, cover)}
+                title={readOnly || !canWrite ? <h1 className="nb-doc-title-static" data-nbase-find-title>{title || '未命名数据库'}</h1>
+                  : <input className="nb-doc-title page-title" data-nbase-find-title aria-label="数据库标题" value={title} disabled={currentLocked}
+                    onChange={event => setCurrentTitle(event.target.value)} placeholder="未命名数据库"
+                    onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.currentTarget.blur(); }}
+                    onBlur={() => { if (titleRef.current !== current.title) void updatePageMeta(current.id, { title: titleRef.current.slice(0, 255) }, ''); }} />} />
+            </div>
+            <div className="nb-doc-wide">
+              {databaseSource && <DatabaseView key={current.id} source={databaseSource} databaseId={current.id} />}
+            </div>
+          </> : current ? <>
             <PageHeader icon={current.icon} cover={current.cover} editable={!editorReadOnly}
               onIcon={icon => setIcon(current.id, icon)} onCover={cover => setCover(current.id, cover)}
               title={readOnly || !canWrite ? <h1 className="nb-doc-title-static" data-nbase-find-title>{title || '未命名页面'}</h1>
                 : <input className="nb-doc-title page-title" data-nbase-find-title aria-label="页面标题" value={title} disabled={currentLocked}
                   onChange={event => changeTitle(event.target.value)} placeholder="未命名页面" />} />
             <div className="nb-doc-body">
+              {current.kind === 'row' && current.parentId && databaseSource && <RowPanel key={current.parentId}
+                source={databaseSource} databaseId={current.parentId} row={rowFromPage(current)} pending={rowSaving}
+                editable={!editorReadOnly} onChange={(propertyId, value) => void setRowProperty(current.id, propertyId, value)} />}
               {(tags.length > 0 || current.tagIds?.length) && <PageTagControls tags={tags} value={current.tagIds ?? []}
                 disabled={editorReadOnly} {...(canWrite ? { onApply: (tagIds: string[]) => updatePageMeta(current.id, { tagIds }, '页面标签已保存。') } : {})} />}
               {supported && initialContent ? <DocumentEditor key={`${current.id}:${editorEpoch}`} ref={editorRef} documentId={current.id}
@@ -905,7 +1001,7 @@ export function PersistentWorkspace() {
                   if (pendingSearchRef.current?.pageId === id) requestAnimationFrame(() => locatePendingSearch(id));
                   if (pendingBacklinkRef.current?.link.sourcePageId === id) requestAnimationFrame(() => locatePendingBacklink(id));
                 }} onNotice={setNotice}
-                workspaceId={workspace?.id} onUploadFiles={uploadFiles} onPickAttachment={pickAttachment} />
+                workspaceId={workspace?.id} onUploadFiles={uploadFiles} onPickAttachment={pickAttachment} databases={databaseEmbedding} />
                 : <div role="alert" className="nbase-unsupported"><h2>暂不能打开此格式版本</h2>
                   <p>原始数据仍保留在服务端。请先下载副本，等待兼容升级。</p>
                   <button className="nb-btn" onClick={exportCurrent}>下载原始 JSON</button></div>}
@@ -975,7 +1071,7 @@ export function PersistentWorkspace() {
       onRestorePage={id => openTrash(id)} onCreate={openDailyNote} onCapture={quickCapture} onSaveSettings={saveDailySettings} />}
     {dialog === 'delete' && current && <TrashPageDialog title={title} childCount={subtreeIds(pages, current.id).length - 1} busy={pageActionBusy}
       onConfirm={() => void beginPageAction('trash', current.id, current.revision, title)} onClose={() => setDialog(null)} />}
-    {dialog === 'move' && current && <MovePageDialog current={current} pages={pages} target={moveTarget} onTarget={setMoveTarget}
+    {dialog === 'move' && current && <MovePageDialog current={current} pages={pages.filter(page => page.kind !== 'database')} target={moveTarget} onTarget={setMoveTarget}
       onConfirm={() => void movePage()} onClose={() => setDialog(null)} />}
     {dialog === 'folder-import' && workspace && canWrite && <FolderImportDialog userId={session.user.id} workspaceId={workspace.id}
       csrfToken={session.csrfToken} pages={pages} defaultParentId={activeId} parseMarkdown={parseMarkdownImport}

@@ -1,3 +1,4 @@
+import type { RowProperties } from './databases.js';
 import type { PageCoverId, PageDocument, PageStateRequest, PageSummary, StoredDocumentContent } from './pages.js';
 
 export type PageVersionOperation = 'baseline' | 'create' | 'update' | 'trash' | 'restore' | 'restore-version';
@@ -16,6 +17,8 @@ export interface PageVersion extends PageVersionSummary {
   icon: string | null;
   cover: PageCoverId | null;
   content: StoredDocumentContent;
+  /** Row pages only. */
+  properties?: RowProperties;
 }
 
 export interface PageHistoryResponse {

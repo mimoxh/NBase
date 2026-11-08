@@ -299,4 +299,33 @@ ALTER SEQUENCE pages_sort_position_seq OWNED BY pages.sort_position;
 CREATE INDEX pages_sibling_order_idx ON pages (workspace_id, parent_id, sort_position, id) WHERE deleted_at IS NULL;
 `,
   },
+  {
+    version: 13,
+    name: 'databases',
+    sql: `
+ALTER TABLE pages ADD COLUMN kind text NOT NULL DEFAULT 'document';
+ALTER TABLE pages ADD COLUMN row_properties jsonb;
+ALTER TABLE pages ADD CONSTRAINT pages_kind CHECK (kind IN ('document', 'database', 'row'));
+ALTER TABLE pages ADD CONSTRAINT pages_row_properties CHECK (
+  (kind = 'row') = (row_properties IS NOT NULL)
+  AND (row_properties IS NULL OR jsonb_typeof(row_properties) = 'object'));
+ALTER TABLE page_versions ADD COLUMN row_properties jsonb;
+ALTER TABLE page_versions ADD CONSTRAINT page_versions_row_properties
+  CHECK (row_properties IS NULL OR jsonb_typeof(row_properties) = 'object');
+
+CREATE TABLE databases (
+  workspace_id uuid NOT NULL,
+  page_id uuid NOT NULL,
+  properties_json jsonb NOT NULL,
+  views_json jsonb NOT NULL,
+  revision bigint NOT NULL DEFAULT 1,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, page_id),
+  FOREIGN KEY (workspace_id, page_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT,
+  CONSTRAINT databases_properties_array CHECK (jsonb_typeof(properties_json) = 'array'),
+  CONSTRAINT databases_views_array CHECK (jsonb_typeof(views_json) = 'array'),
+  CONSTRAINT databases_revision_positive CHECK (revision > 0)
+);
+`,
+  },
 ];
