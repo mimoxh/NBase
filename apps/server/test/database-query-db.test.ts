@@ -150,7 +150,49 @@ test('server query matches evaluateView for every filter and sort', {
     const noOrigin = await instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/query`, headers: read, payload: { filters: [], sorts: [] } });
     assert.equal(noOrigin.statusCode, 403);
     assert.equal((await instance.inject({ method: 'POST', url: `${base}/databases/${randomUUID()}/query`, headers: write, payload: { filters: [], sorts: [] } })).statusCode, 404);
+    // Bulk writes: receipts make retries safe, values are checked, and each row keeps a version and its body.
+    const bulk = (payload: Record<string, unknown>) => instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/rows/bulk`, headers: write, payload });
+    const createMutation = randomUUID();
+    const createBody = { clientMutationId: createMutation, operation: 'create',
+      rows: [{ title: '批量一', properties: { [f.number.id]: 1, [f.text.id]: '可搜索词' } }, { title: '批量二', properties: {} }] };
+    const bulkCreated = await bulk(createBody);
+    assert.equal(bulkCreated.statusCode, 200, bulkCreated.body);
+    const [one, two] = bulkCreated.json().rows as { id: string; revision: string }[];
+    assert.deepEqual((await bulk(createBody)).json().rows, bulkCreated.json().rows);
+    const count = async () => (await pool!.query<{ n: number }>(`SELECT count(*)::int AS n FROM pages WHERE parent_id = $1 AND deleted_at IS NULL`, [db.page.id])).rows[0]!.n;
+    assert.equal(await count(), samples.length + 2);
+    assert.equal((await bulk({ clientMutationId: randomUUID(), operation: 'create', rows: [{ title: 'x', properties: { [f.number.id]: 'bad' } }] })).statusCode, 422);
+    assert.equal((await bulk({ clientMutationId: randomUUID(), operation: 'patch', items: [{ id: one!.id, revision: '999', title: 'x' }] })).statusCode, 409);
+
+    await pool.query(`UPDATE pages SET content_json = $2::jsonb WHERE id = $1`, [one!.id, JSON.stringify({ schemaVersion: 1, editorState: { root: { type: 'root', version: 1, children: [
+      { type: 'paragraph', version: 1, children: [{ type: 'text', version: 1, text: '正文词', style: '' }] }] } } })]);
+    const patched = await bulk({ clientMutationId: randomUUID(), operation: 'patch', items: [
+      { id: one!.id, properties: { [f.text.id]: '新词' } }, { id: two!.id, title: '改名', properties: { [f.number.id]: 2 } }] });
+    assert.equal(patched.statusCode, 200, patched.body);
+    assert.deepEqual(patched.json().rows.map((row: { revision: string }) => row.revision), ['2', '2']);
+    const search = (await pool.query<{ search_text: string }>('SELECT search_text FROM pages WHERE id = $1', [one!.id])).rows[0]!.search_text;
+    assert.match(search, /正文词/);
+    assert.match(search, /新词/);
+    assert.doesNotMatch(search, /可搜索词/);
+    assert.equal((await pool.query('SELECT 1 FROM page_versions WHERE page_id = $1', [one!.id])).rows.length, 2);
+
+    const duplicated = await bulk({ clientMutationId: randomUUID(), operation: 'duplicate', ids: [one!.id] });
+    assert.equal(duplicated.statusCode, 200, duplicated.body);
+    const copy = (await pool.query<{ title: string; search_text: string; content_json: unknown }>('SELECT title, search_text, content_json FROM pages WHERE id = $1', [duplicated.json().rows[0].id])).rows[0]!;
+    assert.equal(copy.title, '批量一 副本');
+    assert.match(copy.search_text, /正文词/);
+
+    const trashedRows = await bulk({ clientMutationId: randomUUID(), operation: 'trash', ids: [two!.id, duplicated.json().rows[0].id] });
+    assert.equal(trashedRows.statusCode, 200, trashedRows.body);
+    const trashList = await instance.inject({ method: 'GET', url: `${base}/trash`, headers: read });
+    assert.equal(trashList.json().pages.length, 2);
+    const individual = await instance.inject({ method: 'POST', url: `${base}/pages/${two!.id}/restore`, headers: write,
+      payload: { clientMutationId: randomUUID(), expectedRevision: trashedRows.json().rows.find((row: { id: string }) => row.id === two!.id).revision } });
+    assert.equal(individual.statusCode, 200, individual.body);
+    assert.equal(await count(), samples.length + 2);
+
     await pool.query(`UPDATE workspace_memberships SET role = 'viewer' WHERE user_id = $1`, [owner.userId]);
+    assert.equal((await bulk({ clientMutationId: randomUUID(), operation: 'trash', ids: [one!.id] })).statusCode, 403);
     assert.equal((await instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/query`, headers: write, payload: { filters: [], sorts: [] } })).statusCode, 200);
   } finally {
     await app?.close();

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { DatabaseDocument, DatabaseQueryRequest, DatabaseQueryResponse, DatabaseRow, DatabaseSchemaResponse, DatabaseView,
+import type { DatabaseBulkRequest, DatabaseBulkResponse, DatabaseDocument, DatabaseQueryRequest, DatabaseQueryResponse, DatabaseRow, DatabaseSchemaResponse, DatabaseView,
   PropertyDefinition, PropertyValue, RowProperties } from '@nbase/contracts';
 
 export interface RowPatch {
@@ -22,6 +22,7 @@ export interface DatabaseDataSource {
   load(databaseId: string, signal?: AbortSignal): Promise<DatabaseDocument>;
   query(databaseId: string, request: DatabaseQueryRequest): Promise<DatabaseQueryResponse>;
   readRows(databaseId: string, ids: string[]): Promise<DatabaseRow[]>;
+  bulk(databaseId: string, request: DatabaseBulkRequest): Promise<DatabaseBulkResponse>;
   saveSchema(databaseId: string, schema: DatabaseSchema, expectedRevision: string): Promise<DatabaseSchemaResponse>;
   createRow(databaseId: string, title: string, properties: RowProperties): Promise<DatabaseRow>;
   updateRow(rowId: string, expectedRevision: string, patch: RowPatch): Promise<DatabaseRow>;

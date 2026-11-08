@@ -149,7 +149,7 @@ const joinedPageColumns = `p.id, p.workspace_id, p.parent_id, p.title, p.icon, p
 export class PgPageRepository {
   constructor(private readonly pool: Pool) {}
 
-  private async snapshot(client: PoolClient, workspaceId: string, ids: string[], actorId: string,
+  async snapshot(client: PoolClient, workspaceId: string, ids: string[], actorId: string,
     operation: PageVersionOperation): Promise<void> {
     await client.query(`INSERT INTO page_versions (workspace_id, page_id, revision, title, parent_id, icon, cover,
       content_json, content_schema_version, row_properties, deleted_at, saved_at, actor_user_id, operation)

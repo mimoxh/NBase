@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
-import { applyRowPatch, databaseQueryWindow, flatFilters, type DatabaseQueryRequest, type DatabaseRow, type RowProperties } from '@nbase/contracts';
+import { applyRowPatch, databaseBulkLimit, databaseQueryWindow, flatFilters, type BulkRowPatch, type DatabaseQueryRequest, type DatabaseRow,
+  type RowProperties } from '@nbase/contracts';
 import { announceDatabaseChange, failureText, subscribeDatabase, type DatabaseDataSource, type RowPatch } from './source';
 
 const cacheLimit = 3000;
 const fetchDelayMs = 30;
 const refreshDelayMs = 150;
 const queryDelayMs = 200;
+const bulkStartChunk = 200;
+const bulkMaxBytes = 1_500_000;
+const bulkFastMs = 200;
+const bulkSlowMs = 800;
+const encoder = new TextEncoder();
 
 function newer(a: string, b: string): boolean {
   return BigInt(a) > BigInt(b);
@@ -225,6 +231,89 @@ export class RowStore {
       await this.source.moveRow(this.databaseId, rowId, afterRowId);
       announceDatabaseChange(this.databaseId, this.origin);
     } catch (failure) { this.fail(failure, '行顺序未保存。'); }
+  }
+
+  /** Sends items in chunks small enough to keep the workspace free for other saves, slowing down if a chunk runs long. */
+  private async inChunks<T>(items: T[], send: (chunk: T[]) => Promise<void>, onProgress?: (done: number) => void): Promise<void> {
+    let size = bulkStartChunk;
+    let index = 0;
+    while (index < items.length) {
+      let end = index;
+      let bytes = 0;
+      while (end < items.length && end - index < size) {
+        bytes += encoder.encode(JSON.stringify(items[end])).length;
+        if (end > index && bytes > bulkMaxBytes) break;
+        end += 1;
+      }
+      const started = performance.now();
+      await send(items.slice(index, end));
+      const elapsed = performance.now() - started;
+      size = elapsed < bulkFastMs ? Math.min(databaseBulkLimit, Math.ceil(size * 1.5)) : elapsed > bulkSlowMs ? Math.max(50, Math.floor(size / 2)) : size;
+      index = end;
+      onProgress?.(index);
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+
+  private async settled(ids: string[]): Promise<void> {
+    await Promise.allSettled(ids.flatMap(id => { const queue = this.queues.get(id); return queue ? [queue] : []; }));
+  }
+
+  /** Writes many rows at once. Hydrated rows change right away; a failure re-reads the view. */
+  async patchRows(items: BulkRowPatch[], onProgress?: (done: number) => void): Promise<boolean> {
+    await this.settled(items.map(item => item.id));
+    let stale = false;
+    for (const item of items) {
+      const current = this.rows.get(item.id);
+      if (current) this.rows.set(item.id, { ...current, ...(item.title !== undefined ? { title: item.title } : {}),
+        properties: item.properties ? applyRowPatch(current.properties, item.properties) : current.properties });
+      stale = stale || this.touchesView(item);
+    }
+    if (stale) this.orderStale = true;
+    this.emit();
+    try {
+      await this.inChunks(items, async chunk => {
+        const result = await this.source.bulk(this.databaseId, { clientMutationId: crypto.randomUUID(), operation: 'patch', items: chunk });
+        for (const saved of result.rows) {
+          const current = this.rows.get(saved.id);
+          if (current) this.rows.set(saved.id, { ...current, revision: saved.revision, updatedAt: saved.updatedAt });
+        }
+      }, onProgress);
+      announceDatabaseChange(this.databaseId, this.origin);
+      return true;
+    } catch (failure) { this.fail(failure, '批量修改未全部完成。'); return false; }
+  }
+
+  async trashRows(ids: string[], onProgress?: (done: number) => void): Promise<boolean> {
+    await this.settled(ids);
+    const gone = new Set<string>();
+    try {
+      await this.inChunks(ids, async chunk => {
+        const result = await this.source.bulk(this.databaseId, { clientMutationId: crypto.randomUUID(), operation: 'trash', ids: chunk });
+        for (const saved of result.rows) { gone.add(saved.id); this.rows.delete(saved.id); }
+        this.order = this.order.filter(id => !gone.has(id));
+        this.total = this.order.length;
+        this.allRows -= result.rows.length;
+        gone.clear();
+        this.emit();
+      }, onProgress);
+      announceDatabaseChange(this.databaseId, this.origin);
+      return true;
+    } catch (failure) { this.fail(failure, '批量删除未全部完成。'); return false; }
+  }
+
+  /** Copies rows; the copies join the view on the following read. */
+  async duplicateRows(ids: string[], onProgress?: (done: number) => void): Promise<string[]> {
+    const created: string[] = [];
+    try {
+      await this.inChunks(ids, async chunk => {
+        const result = await this.source.bulk(this.databaseId, { clientMutationId: crypto.randomUUID(), operation: 'duplicate', ids: chunk });
+        created.push(...result.rows.map(row => row.id));
+      }, onProgress);
+      await this.refresh();
+      announceDatabaseChange(this.databaseId, this.origin);
+    } catch (failure) { this.fail(failure, '复制未全部完成。'); }
+    return created;
   }
 
   async trashRow(rowId: string): Promise<void> {

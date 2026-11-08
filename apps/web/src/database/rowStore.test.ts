@@ -24,6 +24,11 @@ function setup(ids: string[]) {
       return saved;
     }),
     createRow: vi.fn(async (_db: string, title: string) => { const created = row(`new-${server.size}`, '1', title); server.set(created.id, created); return created; }),
+    bulk: vi.fn(async (_db: string, request: { operation: string; items?: { id: string }[]; ids?: string[] }) => {
+      const ids = request.items?.map(item => item.id) ?? request.ids ?? [];
+      if (request.operation === 'trash') ids.forEach(id => server.delete(id));
+      return { pageId: 'db', rows: ids.map(id => ({ id, revision: '9', updatedAt: 'now' })) };
+    }),
     moveRow: vi.fn(async () => undefined),
     trashRow: vi.fn(async (target: DatabaseRow) => { server.delete(target.id); }),
     notice: vi.fn(), openRow: vi.fn(), openDatabase: vi.fn(), load: vi.fn(), saveSchema: vi.fn(),
@@ -108,6 +113,26 @@ describe('row store', () => {
     expect(store.orderStale).toBe(true);
     await store.refresh();
     expect(store.orderStale).toBe(false);
+  });
+
+  it('sends bulk writes in chunks and takes the new revisions', async () => {
+    const { store, source } = setup(Array.from({ length: 450 }, (_, i) => `r${i}`));
+    store.setQuery(emptyRequest, titleId, true);
+    await flush();
+    const progress: number[] = [];
+    const done = store.patchRows(store.order.map(id => ({ id, title: '批量' })), value => progress.push(value));
+    await vi.runAllTimersAsync();
+    expect(await done).toBe(true);
+    expect(source.bulk.mock.calls.length).toBeGreaterThan(1);
+    expect(source.bulk.mock.calls.every(call => (call[1].items?.length ?? 0) <= 500)).toBe(true);
+    expect(progress.at(-1)).toBe(450);
+    expect(store.rowAt(0)).toMatchObject({ title: '批量', revision: '9' });
+
+    const trashed = store.trashRows(['r0', 'r1']);
+    await vi.runAllTimersAsync();
+    expect(await trashed).toBe(true);
+    expect(store.total).toBe(448);
+    expect(store.rowAt(0)?.id).toBe('r2');
   });
 
   it('reports a failed save and re-reads', async () => {

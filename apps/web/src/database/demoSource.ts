@@ -1,5 +1,5 @@
 import { databaseQueryWindow, databaseSchemaProblem, evaluateView, rowValueProblem, type DatabaseDocument, type DatabaseRow,
-  type DatabaseView } from '@nbase/contracts';
+  type DatabaseView, type PropertyValue } from '@nbase/contracts';
 import { workspaceReducer, type Action, type Page, type Workspace } from '../workspace/model';
 import { DatabaseSourceError, type DatabaseDataSource } from './source';
 
@@ -49,6 +49,43 @@ export function createDemoSource(options: {
     readRows: async (id, ids) => {
       const byId = new Map(rowsOf(id).map(row => [row.id, row]));
       return structuredClone(ids.flatMap(rowId => { const row = byId.get(rowId); return row ? [row] : []; }));
+    },
+    bulk: async (id, request) => {
+      const { schema } = database(id);
+      const check = (values: Record<string, unknown>) => {
+        for (const [key, value] of Object.entries(values)) {
+          if (rowValueProblem(schema.properties, key, value)) throw new DatabaseSourceError('PROPERTY_INVALID', '值无效。');
+        }
+      };
+      const now = new Date().toISOString();
+      const report = (rowIds: string[]) => ({ pageId: id, rows: rowIds.map(rowId => {
+        const saved = row(rowId);
+        return { id: rowId, revision: String(saved.revision ?? 1), updatedAt: saved.updatedAt ?? now };
+      }) });
+      const insert = (title: string, properties: Record<string, PropertyValue>, markdown = '') => {
+        const page: Page = { id: crypto.randomUUID(), title, parentId: id, markdown, icon: null, cover: null, starred: false,
+          deleted: false, dirty: true, kind: 'row', properties, revision: 1, createdAt: now, updatedAt: now };
+        apply({ type: 'insert', page });
+        return page.id;
+      };
+      switch (request.operation) {
+        case 'create':
+          request.rows.forEach(item => check(item.properties));
+          return report(request.rows.map(item => insert(item.title, item.properties)));
+        case 'patch':
+          request.items.forEach(item => check(item.properties ?? {}));
+          request.items.forEach(item => apply({ type: 'row-update', id: item.id, at: now,
+            ...(item.title !== undefined ? { title: item.title } : {}), ...(item.properties ? { properties: item.properties } : {}) }));
+          return report(request.items.map(item => item.id));
+        case 'duplicate':
+          return report(request.ids.map(rowId => { const source = row(rowId);
+            return insert(source.title.trim() ? `${source.title} 副本` : source.title, { ...(source.properties ?? {}) }, source.markdown); }));
+        case 'trash': {
+          const rows = request.ids.map(rowId => ({ id: rowId, revision: String(row(rowId).revision ?? 1), updatedAt: now }));
+          request.ids.forEach(rowId => apply({ type: 'delete', id: rowId }));
+          return { pageId: id, rows };
+        }
+      }
     },
     load: async id => {
       const { page, schema } = database(id);

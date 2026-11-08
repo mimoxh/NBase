@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react';
 
-export const rowHeight = 34;
+/** Cell height plus the bottom border. */
+export const rowHeight = 35;
 const overscan = 20;
 
 /** Which rows of a long table are near the viewport. The page scrolls, not the table, so it measures against that scroller. */

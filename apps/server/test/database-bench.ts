@@ -127,7 +127,28 @@ try {
   const restored = await measure('restoreDatabase', () => instance.inject({ method: 'POST', url: `${base}/pages/${db.page.id}/restore`, headers: write,
     payload: { clientMutationId: randomUUID(), expectedRevision: trashed.json().revision } }));
   assert.equal(restored.statusCode, 200, restored.body);
+  // A paced import into a fresh database, with a document save racing every chunk.
+  const importTarget = (await instance.inject({ method: 'POST', url: `${base}/databases`, headers: write,
+    payload: { clientMutationId: randomUUID(), parentId: null, title: '导入表' } })).json() as DatabaseDocument;
+  const chunk = 500;
+  const importStart = performance.now();
+  const chunkTimes: number[] = [];
+  const probeTimes: number[] = [];
+  for (let start = 0; start < rowCount; start += chunk) {
+    const rows = Array.from({ length: Math.min(chunk, rowCount - start) }, (_, offset) => ({ title: `导入 ${start + offset}`, properties: {} }));
+    const started = performance.now();
+    const running = instance.inject({ method: 'POST', url: `${base}/databases/${importTarget.page.id}/rows/bulk`, headers: write,
+      payload: { clientMutationId: randomUUID(), operation: 'create', rows } });
+    const probing = probeWrite();
+    const response = await running;
+    assert.equal(response.statusCode, 200, response.body);
+    chunkTimes.push(performance.now() - started);
+    probeTimes.push(await probing);
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  const percentile = (values: number[], p: number) => Math.round([...values].sort((a, b) => a - b)[Math.floor(values.length * p)]!);
   console.table(report);
+  console.log(`import ${rowCount} rows in ${Math.round(performance.now() - importStart)} ms; chunk p50 ${percentile(chunkTimes, 0.5)} p95 ${percentile(chunkTimes, 0.95)}; save during import p50 ${percentile(probeTimes, 0.5)} p95 ${percentile(probeTimes, 0.95)} max ${percentile(probeTimes, 0.999)}`);
 } finally {
   await app?.close();
   await pool.end();

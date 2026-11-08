@@ -683,6 +683,7 @@ export function PersistentWorkspace() {
     notice: setNotice,
     trashRow: row => beginPageActionRef.current('trash', row.id, row.revision, row.title, undefined, true),
     onRowSaved: page => { if (docsRef.current.has(page.id)) upsertPage(page); },
+    onRowsChanged: ids => { for (const id of ids) docsRef.current.delete(id); },
   }) : null, [session, workspace, canWrite, readOnly]);
   const databaseEmbedding = useMemo(() => databaseSource ? {
     source: databaseSource, databases: databaseChoices,

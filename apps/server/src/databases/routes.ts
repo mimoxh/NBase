@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { databaseQueryWindow, databaseRowLimit, databaseSchemaProblem, defaultDatabaseSchema, isDatabaseQueryRequest, type CreateDatabaseRequest,
-  type DatabaseDocument, type DatabaseSchemaResponse, type DatabaseView, type PageSummary, type PropertyDefinition,
+import { databaseQueryWindow, databaseSchemaProblem, defaultDatabaseSchema, isDatabaseBulkRequest, isDatabaseQueryRequest, type CreateDatabaseRequest,
+  type DatabaseBulkResponse, type DatabaseDocument, type DatabaseSchemaResponse, type DatabaseView, type PageSummary, type PropertyDefinition,
   type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
@@ -10,6 +10,7 @@ import { authorizeWorkspace, WorkspaceRouteError } from '../auth/workspace.js';
 import { isRevision, isUuid, PageError, type PgPageRepository } from '../pages/repository.js';
 import { sendError } from '../pages/routes.js';
 import { validatePageIcon } from '../pages/validate.js';
+import { applyBulk } from './bulk.js';
 import { readDatabaseRows, runDatabaseQuery } from './query.js';
 import { databaseRow, loadDatabaseSchema, searchProjection, type RowRecord } from './schema.js';
 import { DatabaseWorker, selectRowsForIndex, writeRowSearchText } from './worker.js';
@@ -53,6 +54,9 @@ function pageSummary(row: DatabasePageRow): PageSummary {
     updatedAt: row.updated_at.toISOString() };
 }
 
+/** The plain read is for tools and tests; the app reads rows through /query, which has no such cap. */
+const wholeReadLimit = 2000;
+
 async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorId: string,
   pageId: string, withRows: boolean): Promise<DatabaseDocument | null> {
   const page = await db.query<DatabasePageRow & { properties_json: PropertyDefinition[]; views_json: DatabaseView[];
@@ -72,7 +76,7 @@ async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorI
     SELECT id, title, icon, row_properties, revision::text AS revision, created_at, updated_at FROM pages
     WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL AND kind = 'row'
     ORDER BY sort_position, id LIMIT $3
-  `, [workspaceId, pageId, databaseRowLimit]);
+  `, [workspaceId, pageId, wholeReadLimit]);
   return { page: pageSummary(head), properties: head.properties_json, views: head.views_json,
     schemaRevision: head.schema_revision, rows: rows.rows.map(databaseRow) };
 }
@@ -118,6 +122,22 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
       const result = await runDatabaseQuery(pool, workspaceId, actorId, pageId.toLowerCase(), request.body);
       if (!result) throw new PageError(404, 'NOT_FOUND');
       return reply.send(result);
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.post<{ Params: DatabaseParams }>(`${base}/:pageId/rows/bulk`, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId } = request.params;
+      const actorId = await authorize(request, workspaceId, true);
+      if (!isUuid(request.params.pageId)) throw new PageError(404, 'NOT_FOUND');
+      const pageId = request.params.pageId.toLowerCase();
+      const body = request.body;
+      if (!isDatabaseBulkRequest(body)) requestError();
+      const result = await pages.mutate<DatabaseBulkResponse>(workspaceId, actorId, body.clientMutationId, 'database-bulk', pageId, body,
+        async client => ({ statusCode: 200, body: await applyBulk(client, workspaceId, actorId, pageId, body, pages.snapshot.bind(pages)) }),
+        response => response.pageId);
+      return reply.code(result.statusCode).send(result.body);
     } catch (error) { return sendError(request, reply, error, secure); }
   });
 

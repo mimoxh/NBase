@@ -1,4 +1,4 @@
-import { databaseSchemaProblem, type CreateDatabaseRequest, type DatabaseDocument, type DatabaseQueryRequest, type DatabaseQueryResponse, type DatabaseRow,
+import { databaseSchemaProblem, type CreateDatabaseRequest, type DatabaseBulkResponse, type DatabaseDocument, type DatabaseQueryRequest, type DatabaseQueryResponse, type DatabaseRow,
   type DatabaseRowsResponse, type DatabaseSchemaResponse, type PageDocument, type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
 import { createContentFromMarkdown } from '../editor/markdown';
 import { ApiError, pageClient, request, workspacePath } from '../persistence/client';
@@ -57,6 +57,8 @@ export interface PersistentSourceOptions {
   trashRow: (row: DatabaseRow) => Promise<void>;
   /** Keeps the workspace's cached page in step when a row it holds changes elsewhere. */
   onRowSaved?: (page: PageDocument) => void;
+  /** Bulk writes only report revisions, so cached pages of these rows are dropped. */
+  onRowsChanged?: (rowIds: string[]) => void;
 }
 
 export function createPersistentSource(options: PersistentSourceOptions): DatabaseDataSource {
@@ -66,6 +68,12 @@ export function createPersistentSource(options: PersistentSourceOptions): Databa
     load: (databaseId, signal) => databaseClient.get(workspaceId, databaseId, signal),
     query: (databaseId, body) => databaseClient.query(workspaceId, databaseId, body, csrfToken),
     readRows: (databaseId, ids) => databaseClient.readRows(workspaceId, databaseId, ids, csrfToken),
+    bulk: async (databaseId, body) => {
+      const result = await withReceipt(workspaceId, body.clientMutationId, () => request<DatabaseBulkResponse>(
+        `${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/rows/bulk`, 'POST', body, csrfToken));
+      options.onRowsChanged?.(result.rows.map(row => row.id));
+      return result;
+    },
     saveSchema: (databaseId, schema, expectedRevision) => databaseClient.updateSchema(workspaceId, databaseId,
       { clientMutationId: crypto.randomUUID(), expectedRevision, ...schema }, csrfToken),
     createRow: async (databaseId, title, properties) => {

@@ -22,7 +22,8 @@ export const databasePropertyLimit = 100;
 export const databaseOptionLimit = 200;
 export const databaseViewLimit = 20;
 export const databaseConditionLimit = 20;
-export const databaseRowLimit = 2000;
+export const databaseRowLimit = 30000;
+export const databaseBulkLimit = 500;
 export const databaseNameLimit = 100;
 export const databaseTextValueLimit = 2000;
 export const databaseUrlValueLimit = 2048;
@@ -613,6 +614,58 @@ export interface DatabaseQueryResponse {
   /** The first window of `order`. */
   rows: DatabaseRow[];
   schemaRevision: string;
+}
+
+export interface BulkRowPatch {
+  id: string;
+  /** When present the row must still be at this revision. Without it, only the named fields are overwritten. */
+  revision?: string;
+  title?: string;
+  properties?: Record<string, PropertyValue | null>;
+}
+
+export type DatabaseBulkRequest = { clientMutationId: string } & (
+  | { operation: 'create'; rows: { title: string; properties: RowProperties }[] }
+  | { operation: 'patch'; items: BulkRowPatch[] }
+  | { operation: 'trash'; ids: string[] }
+  | { operation: 'duplicate'; ids: string[] }
+);
+
+export interface DatabaseBulkResponse {
+  pageId: string;
+  rows: { id: string; revision: string; updatedAt: string }[];
+}
+
+function isIdBatch(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0 && value.length <= databaseBulkLimit && value.every(isDatabaseId)
+    && new Set(value).size === value.length;
+}
+
+function isPatchValues(value: unknown): boolean {
+  return isRecord(value) && Object.keys(value).length <= databasePropertyLimit && Object.keys(value).every(isDatabaseId);
+}
+
+/** Checks the shape of a bulk request; values are validated against the schema when applied. */
+export function isDatabaseBulkRequest(value: unknown): value is DatabaseBulkRequest {
+  if (!isRecord(value) || !isDatabaseId(value.clientMutationId)) return false;
+  const title = (t: unknown) => typeof t === 'string' && t.length <= 255;
+  switch (value.operation) {
+    case 'create':
+      return hasOnly(value, ['clientMutationId', 'operation', 'rows']) && Array.isArray(value.rows) && value.rows.length > 0
+        && value.rows.length <= databaseBulkLimit
+        && value.rows.every(row => isRecord(row) && hasOnly(row, ['title', 'properties']) && title(row.title) && isPatchValues(row.properties));
+    case 'patch':
+      return hasOnly(value, ['clientMutationId', 'operation', 'items']) && Array.isArray(value.items) && value.items.length > 0
+        && value.items.length <= databaseBulkLimit
+        && value.items.every(item => isRecord(item) && hasOnly(item, ['id', 'revision', 'title', 'properties']) && isDatabaseId(item.id)
+          && (item.revision === undefined || (typeof item.revision === 'string' && /^\d{1,19}$/.test(item.revision)))
+          && (item.title === undefined || title(item.title)) && (item.properties === undefined || isPatchValues(item.properties))
+          && (item.title !== undefined || item.properties !== undefined))
+        && new Set(value.items.map(item => (item as BulkRowPatch).id)).size === value.items.length;
+    case 'trash': case 'duplicate':
+      return hasOnly(value, ['clientMutationId', 'operation', 'ids']) && isIdBatch(value.ids);
+    default: return false;
+  }
 }
 
 export interface DatabaseRowsRequest { ids: string[] }
