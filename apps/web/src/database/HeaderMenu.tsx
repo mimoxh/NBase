@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { databaseConditionLimit, evaluateView, filterOperatorsFor, flatFilters, operatorNeedsValue, retainFilters, type DatabaseView as View,
+import { databaseConditionLimit, evaluateView, filterOperatorsFor, flatFilters, operatorNeedsValue, retainFilters, viewColumns, type DatabaseView as View,
   type PropertyDefinition, type PropertyType, type ViewFilter } from '@nbase/contracts';
 import { Popover } from '../components/Popover';
 import { creatableTypes, typeLabels } from './labels';
@@ -20,6 +20,7 @@ export function HeaderMenu({ def, view, state, onClose, onSaveProperties }: {
     doc.views.map(item => item.id === view.id ? { ...item, ...patch } : item));
   const columns = evaluateView([], doc.properties, { ...view, hiddenPropertyIds: [] }).columns.filter(p => p.type !== 'title');
   const index = columns.findIndex(p => p.id === def.id);
+  const visibleIndex = viewColumns(doc.properties, view).findIndex(p => p.id === def.id);
   const shift = (step: number) => {
     const ids = columns.map(p => p.id);
     const [moved] = ids.splice(index, 1);
@@ -66,6 +67,8 @@ export function HeaderMenu({ def, view, state, onClose, onSaveProperties }: {
     <div className="nb-db-menu">
       <button onClick={() => sort('asc')}>升序排列</button>
       <button onClick={() => sort('desc')}>降序排列</button>
+      <button onClick={() => { updateView({ frozenColumns: (view.frozenColumns ?? 0) === visibleIndex + 1 ? 0 : visibleIndex + 1 }); onClose(); }}>
+        {(view.frozenColumns ?? 0) === visibleIndex + 1 ? '取消冻结' : '冻结到此列'}</button>
       {def.type !== 'title' && <>
         <button disabled={index <= 0} onClick={() => shift(-1)}>向左移动</button>
         <button disabled={index < 0 || index >= columns.length - 1} onClick={() => shift(1)}>向右移动</button>

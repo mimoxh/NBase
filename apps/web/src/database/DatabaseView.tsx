@@ -1,12 +1,12 @@
 import { useMemo, useState, type ReactNode } from 'react';
 import { activeProperties, databasePropertyLimit, databaseViewLimit, isFilterGroup, operatorNeedsValue, viewColumns, type DatabaseQueryRequest, type DatabaseRow,
-  type DatabaseView as View, type PropertyDefinition, type PropertyType, type PropertyValue, type QueryContext, type RowProperties } from '@nbase/contracts';
+  type DatabaseView as View, type PropertyDefinition, type PropertyType, type PropertyValue, type QueryContext, type RelativeDateToken, type RowProperties, type ViewFilter } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { BulkBar } from './BulkBar';
 import { OptionTag } from './cells';
 import { TableView } from './grid/TableView';
 import { DataMenu } from './io/DataMenu';
-import { nextOptionColor, operatorLabel, typeLabels } from './labels';
+import { nextOptionColor, operatorLabel, relativeDateLabels, typeLabels } from './labels';
 import type { Panel } from './panel';
 import { useRowStore } from './rowStore';
 import { useDatabase, type DatabaseDataSource } from './source';
@@ -116,14 +116,17 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
     selectView(rest[0]!.id);
   };
 
-  const filterChips = view.filters.map((filter, index) => {
-    if (isFilterGroup(filter)) return null;
+  const conditionText = (filter: ViewFilter) => {
     const def = active.find(p => p.id === filter.propertyId);
     if (!def) return null;
     const optionName = def.options?.find(o => o.id === filter.value)?.name;
-    const valueText = operatorNeedsValue(filter.operator) ? (optionName ?? (filter.value === undefined || filter.value === null || filter.value === '' ? '…' : String(filter.value))) : '';
-    return <button key={index} className="nb-db-chip" onClick={() => setPanel({ kind: 'filter' })}>
-      {def.name} {operatorLabel(def.type, filter.operator)} {valueText}</button>;
+    const relative = typeof filter.value === 'string' && filter.value.startsWith('@') ? relativeDateLabels[filter.value.slice(1) as RelativeDateToken] : undefined;
+    const valueText = operatorNeedsValue(filter.operator) ? (optionName ?? relative ?? (filter.value === undefined || filter.value === null || filter.value === '' ? '…' : String(filter.value))) : '';
+    return `${def.name} ${operatorLabel(def.type, filter.operator)} ${valueText}`.trim();
+  };
+  const filterChips = view.filters.map((entry, index) => {
+    const text = (isFilterGroup(entry) ? entry.any : [entry]).map(conditionText).filter(Boolean).join(' 或 ');
+    return text ? <button key={index} className="nb-db-chip" onClick={() => setPanel({ kind: 'filter' })}>{text}</button> : null;
   });
 
   return <div className={`nb-db ${compact ? 'nb-db-compact' : ''}`}>
@@ -151,7 +154,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
       onClear={() => setSelectedRows(new Set())} notice={source.notice} />}
     {store.error && <div className="nb-db-status" role="alert">{store.error}
       <button className="nb-btn nb-btn-quiet" onClick={() => void store.refresh()}>重试</button></div>}
-    <TableView source={source} state={state} store={store} view={view} columns={columns}
+    <TableView source={source} state={state} store={store} view={view} columns={columns} request={request!}
       rowCount={compact ? Math.min(limit, store.total) : store.total} windowed={!compact} canAddProperty={active.length < databasePropertyLimit}
       panel={panel} setPanel={setPanel} selected={selectedRows} onSelect={setSelectedRows} onUpdateView={patch => void updateView(patch)}
       onSave={(next, views) => void save(next, views)} onAddProperty={addProperty} onCell={setCell} onCreateOption={createOption} />

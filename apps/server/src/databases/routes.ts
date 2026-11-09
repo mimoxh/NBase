@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { databaseQueryWindow, databaseSchemaProblem, defaultDatabaseSchema, isDatabaseBulkRequest, isDatabaseQueryRequest, type CreateDatabaseRequest,
+import { databaseQueryWindow, databaseSchemaProblem, defaultDatabaseSchema, isDatabaseAggregateRequest, isDatabaseBulkRequest, isDatabaseQueryRequest, type CreateDatabaseRequest,
   type DatabaseBulkResponse, type DatabaseDocument, type DatabaseSchemaResponse, type DatabaseView, type PageSummary, type PropertyDefinition,
   type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -11,7 +11,7 @@ import { isRevision, isUuid, PageError, type PgPageRepository } from '../pages/r
 import { sendError } from '../pages/routes.js';
 import { validatePageIcon } from '../pages/validate.js';
 import { applyBulk } from './bulk.js';
-import { readDatabaseRows, runDatabaseQuery } from './query.js';
+import { readDatabaseRows, runDatabaseAggregate, runDatabaseQuery } from './query.js';
 import { databaseRow, loadDatabaseSchema, searchProjection, type RowRecord } from './schema.js';
 import { DatabaseWorker, selectRowsForIndex, writeRowSearchText } from './worker.js';
 
@@ -120,6 +120,19 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
       if (!isUuid(pageId)) throw new PageError(404, 'NOT_FOUND');
       if (!isDatabaseQueryRequest(request.body)) requestError();
       const result = await runDatabaseQuery(pool, workspaceId, actorId, pageId.toLowerCase(), request.body);
+      if (!result) throw new PageError(404, 'NOT_FOUND');
+      return reply.send(result);
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.post<{ Params: DatabaseParams }>(`${base}/:pageId/aggregate`, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId, pageId } = request.params;
+      const actorId = await authorize(request, workspaceId, 'post-read');
+      if (!isUuid(pageId)) throw new PageError(404, 'NOT_FOUND');
+      if (!isDatabaseAggregateRequest(request.body)) requestError();
+      const result = await runDatabaseAggregate(pool, workspaceId, actorId, pageId.toLowerCase(), request.body);
       if (!result) throw new PageError(404, 'NOT_FOUND');
       return reply.send(result);
     } catch (error) { return sendError(request, reply, error, secure); }

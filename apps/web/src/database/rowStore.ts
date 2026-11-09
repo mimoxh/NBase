@@ -44,7 +44,7 @@ export class RowStore {
   private fetchTimer: ReturnType<typeof setTimeout> | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private readonly source: DatabaseDataSource, private readonly databaseId: string) {}
+  constructor(private readonly source: DatabaseDataSource, readonly databaseId: string) {}
 
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   getVersion = () => this.version;

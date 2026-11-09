@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import pg from 'pg';
-import { evaluateView, filterOperatorsFor, operatorNeedsValue, relativeDateTokens, type DatabaseDocument, type DatabaseQueryResponse,
+import { aggregateRows, aggregatesFor, evaluateView, filterOperatorsFor, operatorNeedsValue, relativeDateTokens, type DatabaseDocument, type DatabaseQueryResponse,
   type DatabaseView, type PropertyDefinition, type ViewFilterEntry, type ViewSort } from '@nbase/contracts';
 import { buildApp } from '../src/app.js';
 import { initializeOwner } from '../src/auth/initialize-owner.js';
@@ -126,6 +126,24 @@ test('server query matches evaluateView for every filter and sort', {
       }
     }
     assert.ok(cases > 150, `only ${cases} cases`);
+
+    // Footer statistics agree with the in-memory calculation, with and without filters.
+    const checkAggregates = async (filters: ViewFilterEntry[]) => {
+      const items = properties.flatMap(def => aggregatesFor(def.type).map(fn => ({ propertyId: def.id, fn })));
+      const response = await instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/aggregate`, headers: write, payload: { filters, items, context } });
+      assert.equal(response.statusCode, 200, response.body);
+      const matching = evaluateView(doc.rows, properties, view(filters, []), context).rows;
+      const expected = aggregateRows(matching, properties, items);
+      const actual = response.json().values as (number | string | null)[];
+      actual.forEach((value, index) => {
+        const label = `${properties.find(p => p.id === items[index]!.propertyId)!.name} ${items[index]!.fn}`;
+        if (typeof expected[index] === 'number') assert.ok(Math.abs((value as number) - (expected[index] as number)) < 1e-6, `${label}: ${value} vs ${expected[index]}`);
+        else assert.equal(value, expected[index], label);
+      });
+    };
+    await checkAggregates([]);
+    await checkAggregates([{ propertyId: f.number.id, operator: 'gt', value: 0 }]);
+    await checkAggregates([{ propertyId: f.text.id, operator: 'equals', value: '没有这样的值' }]);
 
     // Groups, incomplete conditions inside a group, unknown properties and combined sorts.
     await check('or', [{ any: [{ propertyId: f.number.id, operator: 'gt', value: 1 }, { propertyId: f.done.id, operator: 'is_checked' }] }]);

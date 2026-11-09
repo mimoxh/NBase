@@ -112,6 +112,19 @@ export interface DatabaseView {
   /** Column order after the pinned title column; unknown or missing ids fall back to definition order. */
   propertyOrder: string[];
   widths: Record<string, number>;
+  /** How many columns, counted from the title, stay in place when the table scrolls sideways. */
+  frozenColumns?: number;
+  /** Footer statistic per property. */
+  aggregates?: Record<string, AggregateFunction>;
+}
+
+export const aggregateFunctions = ['count', 'count_values', 'count_empty', 'sum', 'avg', 'min', 'max'] as const;
+export type AggregateFunction = typeof aggregateFunctions[number];
+
+export function aggregatesFor(type: PropertyType): readonly AggregateFunction[] {
+  if (type === 'number') return aggregateFunctions;
+  if (type === 'date' || type === 'created_time' || type === 'updated_time') return ['count', 'count_values', 'count_empty', 'min', 'max'];
+  return ['count', 'count_values', 'count_empty'];
 }
 
 export interface DatabaseRow {
@@ -276,7 +289,10 @@ function isIdList(value: unknown): value is string[] {
 }
 
 export function isDatabaseView(value: unknown): value is DatabaseView {
-  if (!isRecord(value) || !hasOnly(value, ['id', 'name', 'type', 'filters', 'sorts', 'hiddenPropertyIds', 'propertyOrder', 'widths'])) return false;
+  if (!isRecord(value) || !hasOnly(value, ['id', 'name', 'type', 'filters', 'sorts', 'hiddenPropertyIds', 'propertyOrder', 'widths', 'frozenColumns', 'aggregates'])) return false;
+  if (value.frozenColumns !== undefined && !(Number.isInteger(value.frozenColumns) && (value.frozenColumns as number) >= 0 && (value.frozenColumns as number) <= 20)) return false;
+  if (value.aggregates !== undefined && !(isRecord(value.aggregates) && Object.keys(value.aggregates).length <= databasePropertyLimit
+    && Object.entries(value.aggregates).every(([key, fn]) => isDatabaseId(key) && (aggregateFunctions as readonly unknown[]).includes(fn)))) return false;
   if (!isDatabaseId(value.id) || !isName(value.name) || value.type !== 'table') return false;
   if (!Array.isArray(value.filters) || !Array.isArray(value.sorts)) return false;
   if (!value.filters.every(isFilterEntry) || !value.sorts.every(isSort)) return false;
@@ -594,6 +610,40 @@ export function evaluateView(rows: DatabaseRow[], properties: PropertyDefinition
     });
   }
   return { columns: viewColumns(properties, view), rows: kept.map(({ row }) => row) };
+}
+
+export interface AggregateItem { propertyId: string; fn: AggregateFunction }
+export interface DatabaseAggregateRequest extends Pick<DatabaseQueryRequest, 'filters' | 'context'> { items: AggregateItem[] }
+export interface DatabaseAggregateResponse { values: (number | string | null)[] }
+
+export function isDatabaseAggregateRequest(value: unknown): value is DatabaseAggregateRequest {
+  if (!isRecord(value) || !hasOnly(value, ['filters', 'context', 'items']) || !Array.isArray(value.items) || value.items.length > databasePropertyLimit) return false;
+  if (!value.items.every(item => isRecord(item) && hasOnly(item, ['propertyId', 'fn']) && isDatabaseId(item.propertyId)
+    && (aggregateFunctions as readonly unknown[]).includes(item.fn))) return false;
+  return isDatabaseQueryRequest({ filters: value.filters, sorts: [], ...(value.context === undefined ? {} : { context: value.context }) });
+}
+
+/** Footer statistics over rows that already passed the view's filters. */
+export function aggregateRows(rows: DatabaseRow[], properties: PropertyDefinition[], items: AggregateItem[]): (number | string | null)[] {
+  const active = new Map(activeProperties(properties).map(p => [p.id, p]));
+  return items.map(({ propertyId, fn }) => {
+    const def = active.get(propertyId);
+    if (!def || !aggregatesFor(def.type).includes(fn)) return null;
+    if (fn === 'count') return rows.length;
+    const filled = rows.filter(row => !isEmpty(row, def));
+    if (fn === 'count_values') return filled.length;
+    if (fn === 'count_empty') return rows.length - filled.length;
+    if (!filled.length) return null;
+    const values = filled.map(row => cellValue(row, def)!);
+    if (def.type === 'number') {
+      const numbers = values as number[];
+      if (fn === 'sum') return numbers.reduce((a, b) => a + b, 0);
+      if (fn === 'avg') return numbers.reduce((a, b) => a + b, 0) / numbers.length;
+      return fn === 'min' ? Math.min(...numbers) : Math.max(...numbers);
+    }
+    const sorted = (values as string[]).slice().sort();
+    return fn === 'min' ? sorted[0]! : sorted.at(-1)!;
+  });
 }
 
 export const databaseQueryWindow = 200;

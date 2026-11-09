@@ -1,4 +1,4 @@
-import type { FilterOperator, OptionColor, PropertyType } from '@nbase/contracts';
+import type { AggregateFunction, FilterOperator, OptionColor, PropertyType, RelativeDateToken } from '@nbase/contracts';
 
 export const typeLabels: Record<PropertyType, string> = {
   title: '标题', text: '文本', number: '数字', select: '单选', multi_select: '多选', date: '日期',
@@ -28,6 +28,15 @@ export function operatorLabel(type: PropertyType, operator: FilterOperator): str
   if (type === 'select' && (operator === 'equals' || operator === 'not_equals')) return operator === 'equals' ? '是' : '不是';
   return operatorText[operator];
 }
+
+export const relativeDateLabels: Record<RelativeDateToken, string> = {
+  today: '今天', yesterday: '昨天', tomorrow: '明天', this_week: '本周', last_week: '上周', next_week: '下周', this_month: '本月',
+  last_month: '上月', next_month: '下月', last_7_days: '最近 7 天', last_30_days: '最近 30 天', next_7_days: '未来 7 天', next_30_days: '未来 30 天',
+};
+
+export const aggregateLabels: Record<AggregateFunction, string> = {
+  count: '行数', count_values: '有值', count_empty: '为空', sum: '求和', avg: '平均', min: '最小', max: '最大',
+};
 
 export const colorLabels: Record<OptionColor, string> = {
   default: '默认', gray: '灰色', brown: '棕色', orange: '橙色', yellow: '黄色', green: '绿色', blue: '蓝色',

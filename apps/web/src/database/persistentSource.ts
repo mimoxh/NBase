@@ -1,4 +1,4 @@
-import { databaseSchemaProblem, type CreateDatabaseRequest, type DatabaseBulkResponse, type DatabaseDocument, type DatabaseQueryRequest, type DatabaseQueryResponse, type DatabaseRow,
+import { databaseSchemaProblem, type CreateDatabaseRequest, type DatabaseAggregateResponse, type DatabaseBulkResponse, type DatabaseDocument, type DatabaseQueryRequest, type DatabaseQueryResponse, type DatabaseRow,
   type DatabaseRowsResponse, type DatabaseSchemaResponse, type PageDocument, type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
 import { createContentFromMarkdown } from '../editor/markdown';
 import { ApiError, pageClient, request, workspacePath } from '../persistence/client';
@@ -70,6 +70,8 @@ export function createPersistentSource(options: PersistentSourceOptions): Databa
     load: (databaseId, signal) => databaseClient.get(workspaceId, databaseId, signal),
     query: (databaseId, body) => databaseClient.query(workspaceId, databaseId, body, csrfToken),
     readRows: (databaseId, ids) => databaseClient.readRows(workspaceId, databaseId, ids, csrfToken),
+    aggregate: (databaseId, body) => request<DatabaseAggregateResponse>(
+      `${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/aggregate`, 'POST', body, csrfToken),
     bulk: async (databaseId, body) => {
       const result = await withReceipt(workspaceId, body.clientMutationId, () => request<DatabaseBulkResponse>(
         `${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/rows/bulk`, 'POST', body, csrfToken));

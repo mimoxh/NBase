@@ -1,4 +1,5 @@
-import { localDay, resolveFilters, activeProperties, databaseQueryWindow, type DatabaseQueryRequest, type DatabaseQueryResponse,
+import { localDay, resolveFilters, activeProperties, aggregatesFor, databaseQueryWindow, type AggregateFunction, type DatabaseAggregateRequest,
+  type DatabaseAggregateResponse, type DatabaseQueryRequest, type DatabaseQueryResponse,
   type DatabaseRow, type PropertyDefinition, type QueryContext, type ResolvedCondition, type ViewSort } from '@nbase/contracts';
 import type { Pool, PoolClient } from 'pg';
 import { databaseRow, type RowRecord } from './schema.js';
@@ -243,6 +244,39 @@ export function runDatabaseQuery(pool: Pool, workspaceId: string, actorId: strin
       WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL AND kind = 'row'`, [workspaceId, databaseId])).rows[0]!.n : ids.length;
     return { order: ids, total: ids.length, allRows, rows: await rowsById(client, workspaceId, databaseId, ids.slice(0, databaseQueryWindow)),
       schemaRevision: head.schema_revision };
+  }));
+}
+
+function aggregateSql(sql: Sql, def: PropertyDefinition, fn: AggregateFunction): string {
+  if (!aggregatesFor(def.type).includes(fn)) return 'NULL';
+  if (fn === 'count') return 'count(*)::int';
+  if (fn === 'count_values') return `(count(*) FILTER (WHERE NOT ${emptyOf(sql, def)}))::int`;
+  if (fn === 'count_empty') return `(count(*) FILTER (WHERE ${emptyOf(sql, def)}))::int`;
+  if (def.type === 'number') return `${fn}(${numberOf(sql, def)})`;
+  if (def.type === 'date') return `${fn}(${dateValueOf(sql, def)} COLLATE "C")`;
+  const column = def.type === 'created_time' ? 'p.created_at' : 'p.updated_at';
+  return `to_char(${fn}(${column}) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+}
+
+export function runDatabaseAggregate(pool: Pool, workspaceId: string, actorId: string, databaseId: string,
+  request: DatabaseAggregateRequest): Promise<DatabaseAggregateResponse | null> {
+  return queryGate.run(() => readTransaction(pool, async client => {
+    const head = await loadHead(client, workspaceId, actorId, databaseId);
+    if (!head) return null;
+    if (!request.items.length) return { values: [] };
+    const timeZone = await resolveZone(client, workspaceId, request.context?.timeZone);
+    const context: QueryContext = { timeZone, today: localDay(new Date(), timeZone), weekStart: request.context?.weekStart ?? 1 };
+    const sql = new Sql();
+    const scope = `p.workspace_id = ${sql.add(workspaceId, 'uuid')} AND p.parent_id = ${sql.add(databaseId, 'uuid')}
+      AND p.deleted_at IS NULL AND p.kind = 'row'`;
+    const { where } = compile(sql, head.properties_json, { filters: request.filters, sorts: [] }, context, timeZone);
+    const active = new Map(activeProperties(head.properties_json).map(p => [p.id, p]));
+    const columns = request.items.map((item, index) => {
+      const def = active.get(item.propertyId);
+      return `${def ? aggregateSql(sql, def, item.fn) : 'NULL'} AS a${index}`;
+    });
+    const result = await client.query<Record<string, number | string | null>>(`SELECT ${columns.join(', ')} FROM pages p WHERE ${scope} ${where}`, sql.values);
+    return { values: request.items.map((_, index) => result.rows[0]?.[`a${index}`] ?? null) };
   }));
 }
 

@@ -1,4 +1,4 @@
-import { databaseQueryWindow, databaseSchemaProblem, evaluateView, rowValueProblem, type DatabaseDocument, type DatabaseRow,
+import { aggregateRows, databaseQueryWindow, databaseSchemaProblem, evaluateView, rowValueProblem, type DatabaseDocument, type DatabaseRow,
   type DatabaseView, type PropertyValue } from '@nbase/contracts';
 import { workspaceReducer, type Action, type Page, type Workspace } from '../workspace/model';
 import { DatabaseSourceError, type DatabaseDataSource } from './source';
@@ -49,6 +49,11 @@ export function createDemoSource(options: {
     readRows: async (id, ids) => {
       const byId = new Map(rowsOf(id).map(row => [row.id, row]));
       return structuredClone(ids.flatMap(rowId => { const row = byId.get(rowId); return row ? [row] : []; }));
+    },
+    aggregate: async (id, request) => {
+      const { schema } = database(id);
+      const view: DatabaseView = { id: 'query', name: 'query', type: 'table', filters: request.filters, sorts: [], hiddenPropertyIds: [], propertyOrder: [], widths: {} };
+      return { values: aggregateRows(evaluateView(rowsOf(id), schema.properties, view, request.context ?? {}).rows, schema.properties, request.items) };
     },
     bulk: async (id, request) => {
       const { schema } = database(id);

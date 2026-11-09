@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { DatabaseRow, DatabaseView as View, PropertyDefinition, PropertyType, PropertyValue } from '@nbase/contracts';
+import type { DatabaseQueryRequest, DatabaseRow, DatabaseView as View, PropertyDefinition, PropertyType, PropertyValue } from '@nbase/contracts';
 import { Icon } from '../../components/Icon';
 import { Popover } from '../../components/Popover';
 import { EditableCell } from '../cells';
@@ -8,15 +8,17 @@ import { creatableTypes, typeGlyphs, typeLabels } from '../labels';
 import type { Panel } from '../panel';
 import type { RowStore } from '../rowStore';
 import type { DatabaseDataSource, DatabaseState } from '../source';
+import { AggregateBar } from './AggregateBar';
 import { useColumnResize } from './useColumnResize';
 import { useGrid } from './useGrid';
 import { rowHeight, useWindowedRows } from './useWindowedRows';
 
-export function TableView({ source, state, store, view, columns, rowCount, windowed, canAddProperty, panel, setPanel, selected, onSelect,
+export function TableView({ source, state, store, view, columns, rowCount, windowed, canAddProperty, panel, setPanel, request, selected, onSelect,
   onUpdateView, onSave, onAddProperty, onCell, onCreateOption }: {
   source: DatabaseDataSource; state: DatabaseState; store: RowStore; view: View; columns: PropertyDefinition[];
   /** How many rows of the view to show. */
   rowCount: number; windowed: boolean; canAddProperty: boolean; panel: Panel; setPanel: (panel: Panel) => void;
+  request: DatabaseQueryRequest;
   selected: ReadonlySet<string>; onSelect: (next: ReadonlySet<string>) => void;
   onUpdateView: (patch: Partial<View>) => void;
   onSave: (properties: PropertyDefinition[], views?: View[]) => void;
@@ -45,24 +47,33 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
   const allSelected = store.total > 0 && store.order.every(id => selected.has(id));
   const inRange = (row: number, col: number) => !!grid.range && row >= grid.range.top && row <= grid.range.bottom
     && col >= grid.range.left && col <= grid.range.right;
+  const gutterWidth = canWrite ? 52 : 36;
+  const frozenCount = Math.min(view.frozenColumns ?? 0, columns.length);
+  const frozenLeft = (index: number) => gutterWidth + columns.slice(0, index).reduce((sum, def) => sum + widthOf(def), 0);
+  const frozenClass = (index: number) => index < frozenCount ? `nb-db-frozen ${index === frozenCount - 1 ? 'nb-db-frozen-last' : ''}` : '';
+  const frozenStyle = (index: number) => index < frozenCount ? { left: frozenLeft(index) } : undefined;
+  const gutterClass = `nb-db-gutter ${frozenCount ? 'nb-db-frozen' : ''}`;
+  const gutterStyle = frozenCount ? { left: 0 } : undefined;
+  const aggregateBar = useRef<HTMLDivElement>(null);
   const manualOrder = view.sorts.length === 0 && canWrite;
   const columnCount = columns.length + (canWrite ? 2 : 1);
   const spacer = (height: number) => height > 0 && <tr aria-hidden="true" className="nb-db-spacer" style={{ height }}><td colSpan={columnCount} /></tr>;
   const visible = store.order.slice(start, end).map((id, offset) => ({ id, index: start + offset, row: store.rowAt(start + offset) }));
-  return <div className="nb-db-scroll" ref={rootRef} onClickCapture={grid.clickCapture}>
+  return <><div className="nb-db-scroll" ref={rootRef} onClickCapture={grid.clickCapture}
+    onScroll={event => { if (aggregateBar.current) aggregateBar.current.scrollLeft = event.currentTarget.scrollLeft; }}>
     <input ref={grid.sinkRef} className="nb-db-sink" aria-label="表格单元格：方向键移动，回车编辑，直接输入可替换内容" autoComplete="off" spellCheck={false} {...grid.sinkProps} />
     <table className="nb-db-table" style={{ width: columns.reduce((sum, def) => sum + widthOf(def), 0) + (canWrite ? 92 : 36) }}>
       <colgroup>
-        <col style={{ width: canWrite ? 52 : 36 }} />
+        <col style={{ width: gutterWidth }} />
         {columns.map(def => <col key={def.id} style={{ width: widthOf(def) }} />)}
         {canWrite && <col style={{ width: 56 }} />}
       </colgroup>
       <thead><tr>
-        <th className="nb-db-gutter" aria-label="行操作">
+        <th className={gutterClass} style={gutterStyle} aria-label="行操作">
           {canWrite && <input type="checkbox" className="nb-db-row-check nb-db-row-check-all" aria-label="选择全部行" checked={allSelected}
             onChange={event => onSelect(event.target.checked ? new Set(store.order) : new Set())} />}
         </th>
-        {columns.map(def => <th key={def.id} scope="col">
+        {columns.map((def, col) => <th key={def.id} scope="col" className={frozenClass(col)} style={frozenStyle(col)}>
           <span className="nb-db-anchor nb-db-th">
             <button className="nb-db-th-button" disabled={!canWrite} onClick={() => setPanel({ kind: 'header', id: def.id })}>
               <span className="nb-db-glyph">{typeGlyphs[def.type]}</span><span className="nb-db-th-name">{def.name}</span>
@@ -105,7 +116,7 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
             const to = order.indexOf(row.id);
             void store.moveRow(moving, from < to ? row.id : order[to - 1] ?? null);
           }}>
-          <td className="nb-db-gutter">
+          <td className={gutterClass} style={gutterStyle}>
             <span className="nb-db-row-actions">
               {canWrite && <input type="checkbox" className="nb-db-row-check" aria-label={`选择「${row.title || '未命名'}」`} checked={selected.has(row.id)}
                 onChange={() => undefined} onClick={event => tick(index, row.id, event.shiftKey)} />}
@@ -120,9 +131,9 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
             const pendingKey = `${row.id}:${def.type === 'title' ? 'title' : def.id}`;
             const point = { row: index, col };
             const cursor = grid.focus?.row === index && grid.focus.col === col;
-            return <td key={def.id} data-r={index} data-c={col} aria-selected={inRange(index, col)}
+            return <td key={def.id} data-r={index} data-c={col} aria-selected={inRange(index, col)} style={frozenStyle(col)}
               onMouseDown={event => grid.cellMouseDown(event, point)} onMouseEnter={event => grid.cellMouseEnter(event, point)}
-              className={`nb-db-cell nb-db-type-${def.type} ${store.pending.has(pendingKey) ? 'pending' : ''} ${inRange(index, col) ? 'nb-db-in-range' : ''} ${cursor ? 'nb-db-cursor' : ''}`}>
+              className={`nb-db-cell nb-db-type-${def.type} ${frozenClass(col)} ${store.pending.has(pendingKey) ? 'pending' : ''} ${inRange(index, col) ? 'nb-db-in-range' : ''} ${cursor ? 'nb-db-cursor' : ''}`}>
               <span className="nb-db-anchor nb-db-cell-inner">
                 <EditableCell row={row} def={def} editable={canWrite} onNavigate={grid.navigate}
                   onChange={value => onCell(row, def, value)}
@@ -144,5 +155,9 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
     </table>
     {!store.total && !store.loading && <p className="nb-db-empty-note nb-db-empty-rows">
       {store.allRows ? '没有符合筛选条件的行。' : canWrite ? '还没有内容，点击「新建」添加第一行。' : '还没有内容。'}</p>}
-  </div>;
+  </div>
+  <AggregateBar source={source} databaseId={store.databaseId} request={request} view={view} columns={columns} canWrite={canWrite} version={store.getVersion()}
+    gutter={gutterWidth} end={canWrite ? 96 : 0} widthOf={widthOf} frozen={{ count: frozenCount, leftOf: frozenLeft }} barRef={aggregateBar}
+    onChange={aggregates => onUpdateView({ aggregates })} />
+  </>;
 }
