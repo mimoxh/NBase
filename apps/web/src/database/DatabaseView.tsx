@@ -1,12 +1,12 @@
-import { useMemo, useState, type ReactNode } from 'react';
-import { activeProperties, databasePropertyLimit, databaseViewLimit, isFilterGroup, operatorNeedsValue, viewColumns, type DatabaseQueryRequest, type DatabaseRow,
-  type DatabaseView as View, type PropertyDefinition, type PropertyType, type PropertyValue, type QueryContext, type RelativeDateToken, type RowProperties, type ViewFilter } from '@nbase/contracts';
+import { lazy, Suspense, useMemo, useState, type ReactNode } from 'react';
+import { activeProperties, databasePropertyLimit, databaseViewLimit, isCalendarProperty, isFilterGroup, isGroupableProperty, localDay, operatorNeedsValue, viewColumns, type DatabaseQueryRequest, type DatabaseRow,
+  type DatabaseView as View, type DatabaseViewType, type PropertyDefinition, type PropertyType, type PropertyValue, type QueryContext, type RelativeDateToken, type RowProperties, type ViewFilter } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { BulkBar } from './BulkBar';
 import { OptionTag } from './cells';
 import { TableView } from './grid/TableView';
 import { DataMenu } from './io/DataMenu';
-import { nextOptionColor, operatorLabel, relativeDateLabels, typeLabels } from './labels';
+import { monthBounds, nextOptionColor, operatorLabel, relativeDateLabels, typeLabels } from './labels';
 import type { Panel } from './panel';
 import { useRowStore } from './rowStore';
 import { useDatabase, type DatabaseDataSource } from './source';
@@ -15,6 +15,9 @@ import { FilterPanel } from './toolbar/FilterPanel';
 import { SortPanel } from './toolbar/SortPanel';
 import { ViewTabs } from './toolbar/ViewTabs';
 import './database.css';
+
+const BoardView = lazy(() => import('./views/BoardView'));
+const CalendarView = lazy(() => import('./views/CalendarView'));
 
 const readerContext: Pick<QueryContext, 'timeZone' | 'weekStart'> = { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, weekStart: 1 };
 
@@ -63,8 +66,19 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
   const canWrite = source.canWrite;
 
   const view = doc ? doc.views.find(item => item.id === (localViewId ?? viewId)) ?? doc.views[0] : undefined;
-  const request = useMemo<DatabaseQueryRequest | null>(() => view
-    ? { filters: view.filters, sorts: view.sorts, context: readerContext } : null, [view?.filters, view?.sorts]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [month, setMonth] = useState(() => localDay(new Date()).slice(0, 7));
+  const activeDefs = doc ? activeProperties(doc.properties) : [];
+  const groupDef = view?.type === 'board' ? activeDefs.find(p => p.id === view.groupPropertyId && isGroupableProperty(p)) : undefined;
+  const dateDef = view?.type === 'calendar' ? activeDefs.find(p => p.id === view.datePropertyId && isCalendarProperty(p)) : undefined;
+  const request = useMemo<DatabaseQueryRequest | null>(() => {
+    if (!view) return null;
+    if (dateDef) {
+      const { first, last } = monthBounds(month);
+      return { filters: [...view.filters, { propertyId: dateDef.id, operator: 'gte', value: first }, { propertyId: dateDef.id, operator: 'lte', value: last }],
+        sorts: view.sorts, context: readerContext };
+    }
+    return { filters: view.filters, sorts: view.sorts, context: readerContext, ...(groupDef ? { groupBy: groupDef.id } : {}) };
+  }, [view?.filters, view?.sorts, groupDef?.id, dateDef?.id, month]); // eslint-disable-line react-hooks/exhaustive-deps
   const titlePropertyId = doc?.properties.find(p => p.type === 'title')?.id ?? null;
   const store = useRowStore(source, databaseId, request, titlePropertyId);
 
@@ -103,10 +117,12 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
     const row = await store.createRow('', defaultsFromFilters(view, properties));
     if (row && store.total > limit) setLimit(value => value + 1);
   };
-  const addView = () => {
+  const addView = (type: DatabaseViewType) => {
     if (doc.views.length >= databaseViewLimit) return;
-    const next: View = { id: crypto.randomUUID(), name: uniqueName('表格', doc.views.map(v => v.name)), type: 'table',
-      filters: [], sorts: [], hiddenPropertyIds: [], propertyOrder: view.propertyOrder, widths: view.widths };
+    const next: View = { id: crypto.randomUUID(), name: uniqueName({ table: '表格', board: '看板', calendar: '日历' }[type], doc.views.map(v => v.name)), type,
+      filters: [], sorts: [], hiddenPropertyIds: [], propertyOrder: view.propertyOrder, widths: view.widths,
+      ...(type === 'board' ? { groupPropertyId: active.find(isGroupableProperty)!.id } : {}),
+      ...(type === 'calendar' ? { datePropertyId: active.find(p => p.type === 'date')?.id ?? active.find(isCalendarProperty)!.id } : {}) };
     void save(properties, [...doc.views, next]);
     selectView(next.id);
   };
@@ -132,10 +148,20 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
   return <div className={`nb-db ${compact ? 'nb-db-compact' : ''}`}>
     {heading}
     <div className="nb-db-bar">
-      <ViewTabs views={doc.views} view={view} canWrite={canWrite} open={panel?.kind === 'views'} onOpen={() => setPanel({ kind: 'views' })}
+      <ViewTabs views={doc.views} view={view} canWrite={canWrite} canBoard={active.some(isGroupableProperty)} canCalendar={active.some(isCalendarProperty)} open={panel?.kind === 'views'} onOpen={() => setPanel({ kind: 'views' })}
         onClose={closePanel} onSelect={selectView} onAdd={addView} onDelete={deleteView}
         onRename={(id, name) => void save(properties, doc.views.map(v => v.id === id ? { ...v, name } : v))} />
       <div className="nb-db-tools">
+        {view.type === 'board' && <label className="nb-db-field-row">分组
+          <select className="nb-db-select" aria-label="看板分组字段" disabled={!canWrite} value={groupDef?.id ?? ''} onChange={event => void updateView({ groupPropertyId: event.target.value })}>
+            {!groupDef && <option value="">选择字段</option>}
+            {active.filter(isGroupableProperty).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select></label>}
+        {view.type === 'calendar' && <label className="nb-db-field-row">日期
+          <select className="nb-db-select" aria-label="日历日期字段" disabled={!canWrite} value={dateDef?.id ?? ''} onChange={event => void updateView({ datePropertyId: event.target.value })}>
+            {!dateDef && <option value="">选择字段</option>}
+            {active.filter(isCalendarProperty).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select></label>}
         <FilterPanel view={view} active={active} canWrite={canWrite} open={panel?.kind === 'filter'}
           onOpen={() => setPanel({ kind: 'filter' })} onClose={closePanel} onUpdate={patch => void updateView(patch)} />
         <SortPanel view={view} active={active} canWrite={canWrite} open={panel?.kind === 'sort'}
@@ -150,16 +176,20 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
       </div>
     </div>
     {filterChips.some(Boolean) && <div className="nb-db-chips">{filterChips}</div>}
-    {canWrite && selectedRows.size > 0 && <BulkBar store={store} properties={properties} selected={selectedRows} canSort={view.sorts.length === 0}
+    {view.type === 'table' && canWrite && selectedRows.size > 0 && <BulkBar store={store} properties={properties} selected={selectedRows} canSort={view.sorts.length === 0}
       onClear={() => setSelectedRows(new Set())} notice={source.notice} />}
     {store.error && <div className="nb-db-status" role="alert">{store.error}
       <button className="nb-btn nb-btn-quiet" onClick={() => void store.refresh()}>重试</button></div>}
-    <TableView source={source} state={state} store={store} view={view} columns={columns} request={request!}
+    {view.type === 'board' && (groupDef ? <Suspense fallback={null}><BoardView source={source} store={store} doc={doc} view={view} group={groupDef} canWrite={canWrite} /></Suspense>
+      : <p className="nb-db-empty-note">请先选择用于分组的单选或复选框字段。</p>)}
+    {view.type === 'calendar' && (dateDef ? <Suspense fallback={null}><CalendarView source={source} store={store} month={month} onMonth={setMonth} dateField={dateDef} canWrite={canWrite} /></Suspense>
+      : <p className="nb-db-empty-note">请先选择日期字段。</p>)}
+    {view.type === 'table' && <TableView source={source} state={state} store={store} view={view} columns={columns} request={request!}
       rowCount={compact ? Math.min(limit, store.total) : store.total} windowed={!compact} canAddProperty={active.length < databasePropertyLimit}
       panel={panel} setPanel={setPanel} selected={selectedRows} onSelect={setSelectedRows} onUpdateView={patch => void updateView(patch)}
-      onSave={(next, views) => void save(next, views)} onAddProperty={addProperty} onCell={setCell} onCreateOption={createOption} />
+      onSave={(next, views) => void save(next, views)} onAddProperty={addProperty} onCell={setCell} onCreateOption={createOption} />}
     <div className="nb-db-foot">
-      {canWrite && <button className="nb-db-add-row" onClick={() => void addRow()}><Icon name="plus" size={14} />新建一行</button>}
+      {canWrite && view.type === 'table' && <button className="nb-db-add-row" onClick={() => void addRow()}><Icon name="plus" size={14} />新建一行</button>}
       <span className="nb-db-count">{store.loading ? '正在读取…' : store.total === store.allRows ? `共 ${store.allRows} 行`
         : `显示 ${store.total} / ${store.allRows} 行`}</span>
       {store.orderStale && <button className="nb-btn nb-btn-quiet" onClick={() => void store.refresh()}>结果可能已变化，刷新</button>}

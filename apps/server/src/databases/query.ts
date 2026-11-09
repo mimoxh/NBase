@@ -1,5 +1,5 @@
-import { localDay, resolveFilters, activeProperties, aggregatesFor, databaseQueryWindow, type AggregateFunction, type DatabaseAggregateRequest,
-  type DatabaseAggregateResponse, type DatabaseQueryRequest, type DatabaseQueryResponse,
+import { localDay, resolveFilters, activeProperties, aggregatesFor, databaseQueryWindow, isGroupableProperty, type AggregateFunction, type DatabaseAggregateRequest,
+  type DatabaseAggregateResponse, type DatabaseRowGroup, type DatabaseQueryRequest, type DatabaseQueryResponse,
   type DatabaseRow, type PropertyDefinition, type QueryContext, type ResolvedCondition, type ViewSort } from '@nbase/contracts';
 import type { Pool, PoolClient } from 'pg';
 import { databaseRow, type RowRecord } from './schema.js';
@@ -146,6 +146,11 @@ function sortSql(sql: Sql, def: PropertyDefinition, direction: 'asc' | 'desc'): 
   }
 }
 
+function groupKeySql(sql: Sql, def: PropertyDefinition): string {
+  if (def.type === 'checkbox') return `(CASE WHEN ${checkedOf(sql, def)} THEN 'true' ELSE 'false' END)`;
+  return `(CASE WHEN ${emptyOf(sql, def)} THEN NULL ELSE ${selectOf(sql, def)} END)`;
+}
+
 function compile(sql: Sql, properties: PropertyDefinition[], request: DatabaseQueryRequest, context: QueryContext, timeZone: string) {
   const active = new Map(activeProperties(properties).map(p => [p.id, p]));
   const where = resolveFilters(request.filters, properties, context)
@@ -238,12 +243,24 @@ export function runDatabaseQuery(pool: Pool, workspaceId: string, actorId: strin
     const scope = `p.workspace_id = ${sql.add(workspaceId, 'uuid')} AND p.parent_id = ${sql.add(databaseId, 'uuid')}
       AND p.deleted_at IS NULL AND p.kind = 'row'`;
     const { where, order } = compile(sql, head.properties_json, request, context, timeZone);
-    const ordered = await client.query<{ id: string }>(`SELECT p.id FROM pages p WHERE ${scope} ${where} ORDER BY ${order}`, sql.values);
+    const groupDef = request.groupBy ? activeProperties(head.properties_json).find(p => p.id === request.groupBy && isGroupableProperty(p)) : undefined;
+    const groupColumn = groupDef ? `, ${groupKeySql(sql, groupDef)} AS group_key` : '';
+    const ordered = await client.query<{ id: string; group_key?: string | null }>(`SELECT p.id${groupColumn} FROM pages p WHERE ${scope} ${where} ORDER BY ${order}`, sql.values);
     const ids = ordered.rows.map(row => row.id);
+    let groups: DatabaseRowGroup[] | undefined;
+    if (groupDef) {
+      const byKey = new Map<string | null, string[]>();
+      for (const row of ordered.rows) {
+        const key = row.group_key ?? null;
+        const list = byKey.get(key);
+        if (list) list.push(row.id); else byKey.set(key, [row.id]);
+      }
+      groups = [...byKey].map(([key, list]) => ({ key, ids: list }));
+    }
     const allRows = where ? (await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM pages
       WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL AND kind = 'row'`, [workspaceId, databaseId])).rows[0]!.n : ids.length;
     return { order: ids, total: ids.length, allRows, rows: await rowsById(client, workspaceId, databaseId, ids.slice(0, databaseQueryWindow)),
-      schemaRevision: head.schema_revision };
+      schemaRevision: head.schema_revision, ...(groups ? { groups } : {}) };
   }));
 }
 

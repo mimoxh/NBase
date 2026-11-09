@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import pg from 'pg';
-import { aggregateRows, aggregatesFor, evaluateView, filterOperatorsFor, operatorNeedsValue, relativeDateTokens, type DatabaseDocument, type DatabaseQueryResponse,
+import { aggregateRows, aggregatesFor, evaluateView, filterOperatorsFor, groupRows, operatorNeedsValue, relativeDateTokens, type DatabaseDocument, type DatabaseQueryResponse, type DatabaseRowGroup,
   type DatabaseView, type PropertyDefinition, type ViewFilterEntry, type ViewSort } from '@nbase/contracts';
 import { buildApp } from '../src/app.js';
 import { initializeOwner } from '../src/auth/initialize-owner.js';
@@ -126,6 +126,17 @@ test('server query matches evaluateView for every filter and sort', {
       }
     }
     assert.ok(cases > 150, `only ${cases} cases`);
+
+    // Board groups match the in-memory split, including removed options and unchecked rows.
+    for (const def of [f.select, f.done]) {
+      const response = await instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/query`, headers: write,
+        payload: { filters: [], sorts: [{ propertyId: f.number.id, direction: 'asc' }], groupBy: def.id, context } });
+      assert.equal(response.statusCode, 200, response.body);
+      const ordered = evaluateView(doc.rows, properties, view([], [{ propertyId: f.number.id, direction: 'asc' }]), context).rows;
+      const expected = groupRows(ordered, properties.find(p => p.id === def.id)!);
+      const normal = (groups: DatabaseRowGroup[]) => [...groups].sort((a, b) => String(a.key).localeCompare(String(b.key)));
+      assert.deepEqual(normal(response.json().groups), normal(expected), def.name);
+    }
 
     // Footer statistics agree with the in-memory calculation, with and without filters.
     const checkAggregates = async (filters: ViewFilterEntry[]) => {

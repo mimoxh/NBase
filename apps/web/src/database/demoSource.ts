@@ -1,4 +1,4 @@
-import { aggregateRows, databaseQueryWindow, databaseSchemaProblem, evaluateView, rowValueProblem, type DatabaseDocument, type DatabaseRow,
+import { aggregateRows, databaseQueryWindow, databaseSchemaProblem, evaluateView, groupRows, isGroupableProperty, rowValueProblem, type DatabaseDocument, type DatabaseRow,
   type DatabaseView, type PropertyValue } from '@nbase/contracts';
 import { workspaceReducer, type Action, type Page, type Workspace } from '../workspace/model';
 import { DatabaseSourceError, type DatabaseDataSource } from './source';
@@ -43,8 +43,9 @@ export function createDemoSource(options: {
       const view: DatabaseView = { id: 'query', name: 'query', type: 'table', filters: request.filters, sorts: request.sorts,
         hiddenPropertyIds: [], propertyOrder: [], widths: {} };
       const matching = evaluateView(all, schema.properties, view, request.context ?? {}).rows;
+      const groupDef = schema.properties.find(p => p.id === request.groupBy && !p.deletedAt && isGroupableProperty(p));
       return structuredClone({ order: matching.map(row => row.id), total: matching.length, allRows: all.length,
-        rows: matching.slice(0, databaseQueryWindow), schemaRevision: String(schema.revision) });
+        rows: matching.slice(0, databaseQueryWindow), schemaRevision: String(schema.revision), ...(groupDef ? { groups: groupRows(matching, groupDef) } : {}) });
     },
     readRows: async (id, ids) => {
       const byId = new Map(rowsOf(id).map(row => [row.id, row]));

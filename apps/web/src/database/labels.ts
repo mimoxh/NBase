@@ -55,6 +55,11 @@ export function formatTimestamp(value: string): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
+export function monthBounds(month: string): { first: string; last: string } {
+  const [year, value] = month.split('-').map(Number) as [number, number];
+  return { first: `${month}-01`, last: new Date(Date.UTC(year, value, 0)).toISOString().slice(0, 10) };
+}
+
 export function formatNumber(value: number): string {
   return Number.isInteger(value) ? value.toLocaleString('zh-CN') : value.toLocaleString('zh-CN', { maximumFractionDigits: 10 });
 }

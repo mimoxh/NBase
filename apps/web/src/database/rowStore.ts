@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
 import { applyRowPatch, databaseBulkLimit, databaseQueryWindow, flatFilters, type BulkRowPatch, type DatabaseQueryRequest, type DatabaseRow,
-  type RowProperties } from '@nbase/contracts';
+  type DatabaseRowGroup, type PropertyValue, type RowProperties } from '@nbase/contracts';
 import { announceDatabaseChange, failureText, subscribeDatabase, type DatabaseDataSource, type RowPatch } from './source';
 
 const cacheLimit = 3000;
@@ -23,6 +23,8 @@ function newer(a: string, b: string): boolean {
  */
 export class RowStore {
   order: string[] = [];
+  /** Board columns, when the query asked for them. */
+  groups: DatabaseRowGroup[] = [];
   total = 0;
   allRows = 0;
   loading = true;
@@ -39,6 +41,7 @@ export class RowStore {
   private request: DatabaseQueryRequest | null = null;
   private titlePropertyId: string | null = null;
   private wanted: [number, number] = [0, databaseQueryWindow];
+  private wantedIds: string[] = [];
   private generation = 0;
   private version = 0;
   private fetchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -93,6 +96,7 @@ export class RowStore {
       const result = await this.source.query(this.databaseId, this.request);
       if (generation !== this.generation) return;
       this.order = result.order;
+      this.groups = result.groups ?? [];
       this.total = result.total;
       this.allRows = result.allRows;
       this.error = '';
@@ -120,7 +124,7 @@ export class RowStore {
 
   private evict(): void {
     if (this.rows.size <= cacheLimit) return;
-    const visible = new Set(this.order.slice(this.wanted[0], this.wanted[1]));
+    const visible = new Set([...this.order.slice(this.wanted[0], this.wanted[1]), ...this.wantedIds]);
     for (const id of this.rows.keys()) {
       if (this.rows.size <= cacheLimit) return;
       if (!this.queues.has(id) && !visible.has(id)) this.rows.delete(id);
@@ -132,6 +136,25 @@ export class RowStore {
     this.scheduleFetch();
   }
 
+  /** Board columns ask for specific rows rather than a range of the flat order. */
+  ensureIds(ids: string[]): void {
+    this.wanted = [0, 0];
+    this.wantedIds = ids;
+    this.scheduleFetch();
+  }
+
+  /** Moves a card between board columns, writing the new group value. */
+  moveToGroup(rowId: string, toKey: string | null, propertyId: string, value: PropertyValue | null): Promise<boolean> {
+    this.groups = this.placeInGroup(this.groups.map(group => ({ ...group, ids: group.ids.filter(id => id !== rowId) })), rowId, toKey);
+    return this.updateRow(rowId, { properties: { [propertyId]: value } });
+  }
+
+  private placeInGroup(groups: DatabaseRowGroup[], rowId: string, key: string | null): DatabaseRowGroup[] {
+    return groups.some(group => group.key === key)
+      ? groups.map(group => group.key === key ? { ...group, ids: [rowId, ...group.ids] } : group)
+      : [...groups, { key, ids: [rowId] }];
+  }
+
   private scheduleFetch(): void {
     if (this.fetchTimer) clearTimeout(this.fetchTimer);
     this.fetchTimer = setTimeout(() => { this.fetchTimer = null; void this.fetchMissing(); }, fetchDelayMs);
@@ -139,7 +162,7 @@ export class RowStore {
 
   private async fetchMissing(): Promise<void> {
     const generation = this.generation;
-    const missing = this.order.slice(this.wanted[0], this.wanted[1]).filter(id => !this.rows.has(id) && !this.inFlight.has(id));
+    const missing = [...this.order.slice(this.wanted[0], this.wanted[1]), ...this.wantedIds].filter(id => !this.rows.has(id) && !this.inFlight.has(id));
     for (let index = 0; index < missing.length; index += databaseQueryWindow) {
       const ids = missing.slice(index, index + databaseQueryWindow);
       ids.forEach(id => this.inFlight.add(id));
@@ -206,10 +229,11 @@ export class RowStore {
     return run;
   }
 
-  async createRow(title = '', properties: RowProperties = {}): Promise<DatabaseRow | null> {
+  async createRow(title = '', properties: RowProperties = {}, groupKey?: string | null): Promise<DatabaseRow | null> {
     try {
       const row = await this.source.createRow(this.databaseId, title, properties);
       this.rows.set(row.id, row);
+      if (groupKey !== undefined) this.groups = this.placeInGroup(this.groups, row.id, groupKey);
       if (!this.order.includes(row.id)) {
         this.order = [...this.order, row.id];
         this.total += 1;

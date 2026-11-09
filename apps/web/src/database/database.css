@@ -148,6 +148,31 @@
 .nb-db:not(.nb-db-compact) .nb-db-agg, .nb-db:not(.nb-db-compact) .nb-db-foot { position: sticky; z-index: 6; background: var(--nb-bg); }
 .nb-db:not(.nb-db-compact) .nb-db-foot { bottom: 0; }
 .nb-db:not(.nb-db-compact) .nb-db-agg { bottom: 40px; }
+.nb-db-board { display: flex; gap: 10px; overflow-x: auto; align-items: flex-start; padding: 8px 0; }
+.nb-db-board-column { flex: 0 0 260px; background: var(--nb-hover); border-radius: var(--nb-radius); padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.nb-db-board-drop { box-shadow: inset 0 0 0 2px var(--nb-accent); }
+.nb-db-board-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--nb-muted); }
+.nb-db-board-cards { display: flex; flex-direction: column; gap: 6px; min-height: 8px; }
+.nb-db-card { background: var(--nb-bg); border: 1px solid var(--nb-line); border-radius: 6px; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+.nb-db-card[draggable="true"] { cursor: grab; }
+.nb-db-card-loading { min-height: 40px; opacity: .5; }
+.nb-db-card-title { border: 0; background: transparent; padding: 0; text-align: left; font-weight: 550; cursor: pointer; color: inherit; font: inherit; }
+.nb-db-card-field { font-size: 12px; color: var(--nb-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.nb-db-calendar-bar { display: flex; align-items: center; gap: 6px; padding: 8px 0; flex-wrap: wrap; }
+.nb-db-calendar-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); border-top: 1px solid var(--nb-line); border-left: 1px solid var(--nb-line); }
+.nb-db-calendar-weekday { padding: 4px 6px; font-size: 12px; color: var(--nb-faint); border-right: 1px solid var(--nb-line); border-bottom: 1px solid var(--nb-line); }
+.nb-db-day { min-height: 96px; padding: 4px; border-right: 1px solid var(--nb-line); border-bottom: 1px solid var(--nb-line); display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.nb-db-day-out { background: var(--nb-hover); opacity: .7; }
+.nb-db-day-head { display: flex; justify-content: space-between; align-items: center; min-height: 20px; }
+.nb-db-day-number { font-size: 12px; color: var(--nb-muted); padding: 0 4px; border-radius: 999px; }
+.nb-db-day-today .nb-db-day-number { background: var(--nb-accent); color: #fff; }
+.nb-db-day-add { opacity: 0; padding: 0 3px; }
+.nb-db-day:hover .nb-db-day-add, .nb-db-day-add:focus-visible { opacity: 1; }
+.nb-db-event { display: block; width: 100%; border: 0; border-radius: 4px; background: var(--nb-accent-soft); color: var(--nb-accent-text); font-size: 12px; padding: 1px 6px;
+  text-align: left; cursor: pointer; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.nb-db-more { border: 0; background: transparent; color: var(--nb-faint); font-size: 12px; cursor: pointer; padding: 0 4px; }
+.nb-db-day-list { display: flex; flex-direction: column; gap: 3px; max-height: 240px; overflow-y: auto; }
+@container (max-width: 720px) { .nb-db-day { min-height: 56px; } .nb-db-event { font-size: 11px; padding: 0 3px; } .nb-db-board-column { flex-basis: 220px; } }
 .nb-db-invalid-note { color: var(--nb-danger); font-size: 12px; margin: 2px; }
 .nb-db-table .nb-db-cell-inner { overflow: hidden; }
 .nb-db-table .nb-db-tags { flex-wrap: nowrap; overflow: hidden; }

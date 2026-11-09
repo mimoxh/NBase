@@ -102,10 +102,17 @@ export interface ViewSort {
   direction: 'asc' | 'desc';
 }
 
+export const databaseViewTypes = ['table', 'board', 'calendar'] as const;
+export type DatabaseViewType = typeof databaseViewTypes[number];
+
 export interface DatabaseView {
   id: string;
   name: string;
-  type: 'table';
+  type: DatabaseViewType;
+  /** Board views: a single-select or checkbox property. */
+  groupPropertyId?: string;
+  /** Calendar views: a date, created-time or updated-time property. */
+  datePropertyId?: string;
   filters: ViewFilterEntry[];
   sorts: ViewSort[];
   hiddenPropertyIds: string[];
@@ -289,11 +296,13 @@ function isIdList(value: unknown): value is string[] {
 }
 
 export function isDatabaseView(value: unknown): value is DatabaseView {
-  if (!isRecord(value) || !hasOnly(value, ['id', 'name', 'type', 'filters', 'sorts', 'hiddenPropertyIds', 'propertyOrder', 'widths', 'frozenColumns', 'aggregates'])) return false;
+  if (!isRecord(value) || !hasOnly(value, ['id', 'name', 'type', 'groupPropertyId', 'datePropertyId', 'filters', 'sorts', 'hiddenPropertyIds', 'propertyOrder', 'widths', 'frozenColumns', 'aggregates'])) return false;
+  if (value.groupPropertyId !== undefined && !isDatabaseId(value.groupPropertyId)) return false;
+  if (value.datePropertyId !== undefined && !isDatabaseId(value.datePropertyId)) return false;
   if (value.frozenColumns !== undefined && !(Number.isInteger(value.frozenColumns) && (value.frozenColumns as number) >= 0 && (value.frozenColumns as number) <= 20)) return false;
   if (value.aggregates !== undefined && !(isRecord(value.aggregates) && Object.keys(value.aggregates).length <= databasePropertyLimit
     && Object.entries(value.aggregates).every(([key, fn]) => isDatabaseId(key) && (aggregateFunctions as readonly unknown[]).includes(fn)))) return false;
-  if (!isDatabaseId(value.id) || !isName(value.name) || value.type !== 'table') return false;
+  if (!isDatabaseId(value.id) || !isName(value.name) || !(databaseViewTypes as readonly unknown[]).includes(value.type)) return false;
   if (!Array.isArray(value.filters) || !Array.isArray(value.sorts)) return false;
   if (!value.filters.every(isFilterEntry) || !value.sorts.every(isSort)) return false;
   if (flatFilters(value.filters).length + value.sorts.length > databaseConditionLimit) return false;
@@ -653,6 +662,36 @@ export interface DatabaseQueryRequest {
   filters: ViewFilterEntry[];
   sorts: ViewSort[];
   context?: Pick<QueryContext, 'timeZone' | 'weekStart'>;
+  /** Returns `groups` as well: rows split by this single-select or checkbox property. */
+  groupBy?: string;
+}
+
+/** A board column. `key` is an option id, 'true' or 'false', or null for rows with no group. */
+export interface DatabaseRowGroup { key: string | null; ids: string[] }
+
+export function isGroupableProperty(def: PropertyDefinition): boolean {
+  return def.type === 'select' || def.type === 'checkbox';
+}
+
+export function isCalendarProperty(def: PropertyDefinition): boolean {
+  return def.type === 'date' || def.type === 'created_time' || def.type === 'updated_time';
+}
+
+/** The group a row belongs to on a board. */
+export function rowGroupKey(row: DatabaseRow, def: PropertyDefinition): string | null {
+  if (def.type === 'checkbox') return cellValue(row, def) === true ? 'true' : 'false';
+  return isEmpty(row, def) ? null : String(cellValue(row, def));
+}
+
+/** Splits ordered rows into groups, keeping their order inside each group. */
+export function groupRows(rows: DatabaseRow[], def: PropertyDefinition): DatabaseRowGroup[] {
+  const groups = new Map<string | null, string[]>();
+  for (const row of rows) {
+    const key = rowGroupKey(row, def);
+    const ids = groups.get(key);
+    if (ids) ids.push(row.id); else groups.set(key, [row.id]);
+  }
+  return [...groups].map(([key, ids]) => ({ key, ids }));
 }
 
 export interface DatabaseQueryResponse {
@@ -664,6 +703,7 @@ export interface DatabaseQueryResponse {
   /** The first window of `order`. */
   rows: DatabaseRow[];
   schemaRevision: string;
+  groups?: DatabaseRowGroup[];
 }
 
 export interface BulkRowPatch {
@@ -723,10 +763,12 @@ export interface DatabaseRowsResponse { rows: DatabaseRow[] }
 
 /** Checks a query body; conditions naming unknown properties are ignored when run, like saved views. */
 export function isDatabaseQueryRequest(value: unknown): value is DatabaseQueryRequest {
-  if (!isRecord(value) || !hasOnly(value, ['filters', 'sorts', 'context'])) return false;
+  if (!isRecord(value) || !hasOnly(value, ['filters', 'sorts', 'context', 'groupBy'])) return false;
   if (!Array.isArray(value.filters) || !Array.isArray(value.sorts)) return false;
   if (!value.filters.every(isFilterEntry) || !value.sorts.every(isSort)) return false;
-  if (flatFilters(value.filters).length + value.sorts.length > databaseConditionLimit) return false;
+  // A calendar adds its month range on top of a view's own conditions.
+  if (flatFilters(value.filters).length + value.sorts.length > databaseConditionLimit + 2) return false;
+  if (value.groupBy !== undefined && !isDatabaseId(value.groupBy)) return false;
   if (value.context === undefined) return true;
   if (!isRecord(value.context) || !hasOnly(value.context, ['timeZone', 'weekStart'])) return false;
   const { timeZone, weekStart } = value.context;
