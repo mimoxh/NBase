@@ -39,13 +39,13 @@
 .nb-db-view-tab:hover { background: var(--nb-hover); color: var(--nb-text); }
 .nb-db-view-tab.active { color: var(--nb-text); font-weight: 600; box-shadow: inset 0 -2px 0 var(--nb-text); border-radius: 6px 6px 0 0; }
 .nb-db-view-input { width: 140px; }
-.nb-db-tools { display: flex; align-items: center; gap: 4px; }
+.nb-db-tools { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .nb-db-tool { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: var(--nb-muted);
   padding: 4px 8px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .nb-db-tool:hover:not(:disabled) { background: var(--nb-hover); color: var(--nb-text); }
 .nb-db-tool:disabled { opacity: .4; cursor: default; }
 .nb-db-tool.on { color: var(--nb-accent-text); }
-.nb-db-new { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; margin-left: 4px; }
+.nb-db-new { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; margin-left: 4px; white-space: nowrap; }
 
 .nb-db-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 0; }
 .nb-db-chip { border: 1px solid var(--nb-line); background: var(--nb-accent-soft); color: var(--nb-accent-text); border-radius: 999px;
