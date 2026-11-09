@@ -19,6 +19,7 @@ class Sql {
   readonly values: unknown[] = [];
   /** Ids of formula and rollup properties, read from the cache instead of the row. */
   computed = new Set<string>();
+  readsComputed = false;
   add(value: unknown, cast: string): string {
     this.values.push(value);
     return `$${this.values.length}::${cast}`;
@@ -30,7 +31,9 @@ function optionIds(def: PropertyDefinition): string[] {
 }
 
 function jsonValue(sql: Sql, def: PropertyDefinition): string {
-  return sql.computed.has(def.id) ? `(c.values_json -> ${sql.add(def.id, 'text')})` : `(p.row_properties -> ${sql.add(def.id, 'text')})`;
+  const computed = sql.computed.has(def.id);
+  if (computed) sql.readsComputed = true;
+  return `(${computed ? 'c.values_json' : 'p.row_properties'} -> ${sql.add(def.id, 'text')})`;
 }
 
 /** Computed properties are filtered and sorted like a stored property of their result type. */
@@ -263,6 +266,13 @@ async function loadHead(client: PoolClient, workspaceId: string, actorId: string
   return head.rows[0] ?? null;
 }
 
+async function computedCachePending(client: PoolClient, workspaceId: string, databaseId: string): Promise<boolean> {
+  const pending = await client.query(`SELECT 1 FROM databases d WHERE d.workspace_id = $1 AND d.page_id = $2
+    AND (d.computed_done_generation < d.computed_generation OR EXISTS (SELECT 1 FROM database_computed_dirty x WHERE x.workspace_id = d.workspace_id AND x.database_id = d.page_id))`,
+  [workspaceId, databaseId]);
+  return pending.rows.length > 0;
+}
+
 export function runDatabaseQuery(pool: Pool, workspaceId: string, actorId: string, databaseId: string,
   request: DatabaseQueryRequest): Promise<DatabaseQueryResponse | null> {
   return queryGate.run(() => readTransaction(pool, async client => {
@@ -279,9 +289,7 @@ export function runDatabaseQuery(pool: Pool, workspaceId: string, actorId: strin
     const groupDef = request.groupBy ? activeProperties(head.properties_json).find(p => p.id === request.groupBy && isGroupableProperty(p)) : undefined;
     const groupColumn = groupDef ? `, ${groupKeySql(sql, groupDef)} AS group_key` : '';
     const ordered = await client.query<{ id: string; group_key?: string | null }>(`SELECT p.id${groupColumn} FROM pages p ${computedJoin} WHERE ${scope} ${where} ORDER BY ${order}`, sql.values);
-    const computedStale = hasComputed && (await client.query(`SELECT 1 FROM databases d WHERE d.workspace_id = $1 AND d.page_id = $2
-      AND (d.computed_done_generation < d.computed_generation OR EXISTS (SELECT 1 FROM database_computed_dirty x WHERE x.workspace_id = d.workspace_id AND x.database_id = d.page_id))`,
-    [workspaceId, databaseId])).rows.length > 0;
+    const computedStale = hasComputed && await computedCachePending(client, workspaceId, databaseId);
     const ids = ordered.rows.map(row => row.id);
     let groups: DatabaseRowGroup[] | undefined;
     if (groupDef) {
@@ -329,10 +337,11 @@ export function runDatabaseAggregate(pool: Pool, workspaceId: string, actorId: s
       const def = active.get(item.propertyId);
       return `${def ? aggregateSql(sql, def, item.fn) : 'NULL'} AS a${index}`;
     });
-    const computedJoin = head.properties_json.some(p => isComputedProperty(p) && !p.deletedAt)
+    const computedJoin = sql.readsComputed
       ? 'LEFT JOIN database_computed c ON c.workspace_id = p.workspace_id AND c.row_id = p.id' : '';
     const result = await client.query<Record<string, number | string | null>>(`SELECT ${columns.join(', ')} FROM pages p ${computedJoin} WHERE ${scope} ${where}`, sql.values);
-    return { values: request.items.map((_, index) => result.rows[0]?.[`a${index}`] ?? null) };
+    const computedStale = sql.readsComputed && await computedCachePending(client, workspaceId, databaseId);
+    return { values: request.items.map((_, index) => result.rows[0]?.[`a${index}`] ?? null), ...(computedStale ? { computedStale } : {}) };
   }));
 }
 

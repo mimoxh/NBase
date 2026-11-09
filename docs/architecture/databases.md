@@ -11,9 +11,9 @@
 
 ## 扩展（2026-11-08，迁移 v14～v17）
 
-**读取路径：** `POST /databases/:id/query` 在服务端筛选排序，返回全部行 ID 的顺序和第一窗内容；`POST .../rows/read` 按 ID 读取，每次最多 200 行。前端 `rowStore.ts` 保存顺序，只缓存视口附近的行（有待写入的行不淘汰），表格窗口化渲染。SQL 编译器在 `apps/server/src/databases/query.ts`，和 contracts 的 `evaluateView` 运行同一份 `resolveFilters` 结果，并有逐项对照测试。`POST .../aggregate` 计算页脚统计。
+**读取路径：** `POST /databases/:id/query` 在服务端筛选排序，返回全部行 ID 的顺序和第一窗内容；`POST .../rows/read` 按 ID 读取，每次最多 200 行。前端 `rowStore.ts` 保存顺序和窗口缓存。刷新后按需重读当前窗口及随后进入视野的旧缓存，单行或批量写入期间保留正在编辑的行。SQL 编译器在 `apps/server/src/databases/query.ts`，和 contracts 的 `evaluateView` 运行同一份 `resolveFilters` 结果，并有逐项对照测试。`POST .../aggregate` 计算页脚统计。
 
-**工作区锁：** 不在锁内做 O(n) 工作。大库的搜索重建和计算字段放在 `databases/worker.ts` 的后台 worker，小批量处理，只加行锁，进度存在 `databases` 表和 `database_computed_dirty`，重启后续跑。整库进回收站和恢复是例外，2.5 万行约 1 秒，期间其他写入排队。
+**工作区锁：** 不在锁内做 O(n) 工作。大库的搜索重建和计算字段放在 `databases/worker.ts` 的后台 worker，小批量处理，进度存在 `databases` 表和 `database_computed_dirty`，重启后续跑。计算 worker 用事务级咨询锁串行更新缓存。整库进回收站和恢复是例外，2.5 万行约 1 秒，期间其他写入排队。
 
 **批量：** `POST .../rows/bulk` 支持 create、patch、trash、duplicate，每块最多 500 行，带操作收据。客户端按耗时调整块大小；CSV 导入用固定分块和固定操作 ID，失败后可在对话框里继续。
 
@@ -23,7 +23,7 @@
 
 **关联：** 一对字段，`relation.owner` 为真的一侧把行 ID 存在 `row_properties`（每格最多 500），派生表 `database_row_links` 供对侧读取、筛选和排序。两侧都通过 `POST .../rows/:rowId/relations/:propertyId` 增删，实际写拥有侧的行并生成版本。普通写入接口拒绝写关联字段。
 
-**公式和汇总：** 解析器在 `packages/contracts/src/formula.ts`，无 `eval`。公式只能引用本行的普通字段，汇总读关联行的字段或公式，因此没有循环。表达式按字段 ID 存储，改字段名不影响。单元格显示时实时计算；筛选、排序和统计读 `database_computed` 缓存，未追上时响应带 `computedStale`，界面提示。公式不含“今天”，因为缓存无法随时间过期。
+**公式和汇总：** 解析器在 `packages/contracts/src/formula.ts`，无 `eval`。公式只能引用本行的普通字段，汇总读关联行的字段或公式，因此没有循环。表达式按字段 ID 存储，改字段名不影响。单元格显示时实时计算，筛选、排序和统计读 `database_computed` 缓存。迁移 v18 为行级任务增加代次，并安排重算现有公式和汇总。worker 只清理自己处理过的代次，计算期间的新写入会保留在队列中。缓存未追上时查询返回 `computedStale`，依赖缓存的统计栏持续查询，直到收到最新结果。公式不含“今天”，因为缓存无法随时间过期。
 
 **上限：** 每库 30,000 行。含行正文的 ZIP 最多 199 行，更大的库请导出 CSV 或使用完整备份。
 

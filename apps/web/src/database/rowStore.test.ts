@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DatabaseQueryRequest, DatabaseRow } from '@nbase/contracts';
 import { RowStore } from './rowStore';
-import type { DatabaseDataSource } from './source';
+import { announceDatabaseChange, type DatabaseDataSource } from './source';
 
 const propertyId = '11111111-1111-4111-8111-111111111111';
 const titleId = '22222222-2222-4222-8222-222222222222';
@@ -55,6 +55,102 @@ describe('row store', () => {
     expect(store.rowAt(500)?.id).toBe('r500');
     expect(source.readRows).toHaveBeenCalledTimes(1);
     expect(source.readRows.mock.calls[0]![1]).toHaveLength(40);
+  });
+
+  it('refreshes the visible cached rows after a sibling view changes the database', async () => {
+    const { store, source, server } = setup(Array.from({ length: 600 }, (_, i) => `r${i}`));
+    const disconnect = store.connect();
+    try {
+      store.setQuery(emptyRequest, titleId, true);
+      await flush();
+      store.ensureIds(['r550']);
+      await flush();
+      store.ensure(500, 501);
+      await flush();
+      source.readRows.mockClear();
+
+      server.set('r500', row('r500', '2', '新值'));
+      server.set('r550', row('r550', '2', '视口外的新值'));
+      announceDatabaseChange('db');
+      await flush();
+
+      expect(source.readRows.mock.calls).toEqual([['db', ['r500']]]);
+      expect(store.rowAt(500)).toMatchObject({ title: '新值', revision: '2' });
+
+      store.ensure(550, 551);
+      await flush();
+      expect(store.rowAt(550)).toMatchObject({ title: '视口外的新值', revision: '2' });
+    } finally { disconnect(); }
+  });
+
+  it('re-reads board cards and ignores a late read of the same revision from before refresh', async () => {
+    const { store, source, server } = setup(Array.from({ length: 600 }, (_, i) => `r${i}`));
+    const original = { ...row('r500'), computed: { [propertyId]: 20 } };
+    let deliverOld!: (rows: DatabaseRow[]) => void;
+    source.readRows.mockImplementationOnce(() => new Promise(resolve => { deliverOld = resolve; }));
+    store.setQuery(emptyRequest, titleId, true);
+    await flush();
+    store.ensureIds(['r500']);
+    await flush();
+
+    server.set('r500', { ...original, computed: { [propertyId]: 42 } });
+    await store.refresh();
+    await flush();
+    expect(store.rowById('r500')?.computed?.[propertyId]).toBe(42);
+
+    deliverOld([original]);
+    await flush();
+    expect(store.rowById('r500')?.computed?.[propertyId]).toBe(42);
+  });
+
+  it('retains a pending optimistic edit during a refresh and reloads the row after saving', async () => {
+    const { store, source } = setup(Array.from({ length: 600 }, (_, i) => `r${i}`));
+    store.setQuery(emptyRequest, titleId, true);
+    await flush();
+    store.ensure(500, 501);
+    await flush();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const originalUpdate = source.updateRow.getMockImplementation()!;
+    source.updateRow.mockImplementationOnce(async (id, expected, patch) => { await gate; return originalUpdate(id, expected, patch); });
+
+    const write = store.updateRow('r500', { title: '未保存' });
+    await store.refresh();
+    await flush();
+    expect(store.rowAt(500)?.title).toBe('未保存');
+    expect(source.readRows).toHaveBeenCalledTimes(1);
+
+    release();
+    expect(await write).toBe(true);
+    await flush();
+    expect(source.readRows).toHaveBeenCalledTimes(2);
+    expect(store.rowAt(500)).toMatchObject({ title: '未保存', revision: '2' });
+  });
+
+  it('does not overwrite an optimistic bulk patch during a window refresh', async () => {
+    const { store, source, server } = setup(Array.from({ length: 600 }, (_, i) => `r${i}`));
+    store.setQuery(emptyRequest, titleId, true);
+    await flush();
+    store.ensure(500, 501);
+    await flush();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    source.bulk.mockImplementationOnce(async () => {
+      await gate;
+      server.set('r500', row('r500', '2', '批量修改'));
+      return { pageId: 'db', rows: [{ id: 'r500', revision: '2', updatedAt: 'now' }] };
+    });
+
+    const write = store.patchRows([{ id: 'r500', title: '批量修改' }]);
+    await flush();
+    await store.refresh();
+    await flush();
+    expect(store.rowAt(500)?.title).toBe('批量修改');
+
+    release();
+    await vi.runAllTimersAsync();
+    expect(await write).toBe(true);
+    expect(store.rowAt(500)).toMatchObject({ title: '批量修改', revision: '2' });
   });
 
   it('keeps a row with a queued write through eviction and chains revisions', async () => {

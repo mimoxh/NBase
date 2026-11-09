@@ -733,7 +733,11 @@ export function evaluateView(rows: DatabaseRow[], properties: PropertyDefinition
 
 export interface AggregateItem { propertyId: string; fn: AggregateFunction }
 export interface DatabaseAggregateRequest extends Pick<DatabaseQueryRequest, 'filters' | 'context'> { items: AggregateItem[] }
-export interface DatabaseAggregateResponse { values: (number | string | null)[] }
+export interface DatabaseAggregateResponse {
+  values: (number | string | null)[];
+  /** The result uses a computed cache with pending work. */
+  computedStale?: boolean;
+}
 
 export function isDatabaseAggregateRequest(value: unknown): value is DatabaseAggregateRequest {
   if (!isRecord(value) || !hasOnly(value, ['filters', 'context', 'items']) || !Array.isArray(value.items) || value.items.length > databasePropertyLimit) return false;

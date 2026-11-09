@@ -38,7 +38,7 @@ export class RowStore {
 
   private readonly rows = new Map<string, DatabaseRow>();
   private readonly queues = new Map<string, Promise<unknown>>();
-  private readonly inFlight = new Set<string>();
+  private rowReads = { fresh: new Set<string>(), inFlight: new Set<string>() };
   private readonly listeners = new Set<() => void>();
   private readonly origin = Symbol('rows');
   private request: DatabaseQueryRequest | null = null;
@@ -66,6 +66,7 @@ export class RowStore {
       if (this.fetchTimer) clearTimeout(this.fetchTimer);
       if (this.refreshTimer) clearTimeout(this.refreshTimer);
       this.generation += 1;
+      this.rowReads = { fresh: new Set(), inFlight: new Set() };
     };
   }
 
@@ -108,6 +109,8 @@ export class RowStore {
       this.orderStale = false;
       this.computing = Boolean(result.computedStale) && this.usesComputed();
       if (this.computing) this.scheduleRefresh(computingPollMs);
+      // Keep cached rows visible, but only the bodies from this query are current.
+      this.rowReads = { fresh: new Set(), inFlight: new Set() };
       this.merge(result.rows);
     } catch (failure) {
       if (generation !== this.generation) return;
@@ -122,11 +125,18 @@ export class RowStore {
   private merge(rows: DatabaseRow[]): void {
     for (const row of rows) {
       const held = this.rows.get(row.id);
-      if (held && (this.queues.has(row.id) || newer(held.revision, row.revision))) continue;
+      if (this.queues.has(row.id)) continue;
+      this.rowReads.fresh.add(row.id);
+      if (held && newer(held.revision, row.revision)) continue;
       this.rows.delete(row.id);
       this.rows.set(row.id, row);
     }
     this.evict();
+  }
+
+  private dropRow(id: string): void {
+    this.rows.delete(id);
+    this.rowReads.fresh.delete(id);
   }
 
   private evict(): void {
@@ -134,12 +144,13 @@ export class RowStore {
     const visible = new Set([...this.order.slice(this.wanted[0], this.wanted[1]), ...this.wantedIds]);
     for (const id of this.rows.keys()) {
       if (this.rows.size <= cacheLimit) return;
-      if (!this.queues.has(id) && !visible.has(id)) this.rows.delete(id);
+      if (!this.queues.has(id) && !visible.has(id)) this.dropRow(id);
     }
   }
 
   ensure(start: number, end: number): void {
     this.wanted = [start, end];
+    this.wantedIds = [];
     this.scheduleFetch();
   }
 
@@ -164,24 +175,26 @@ export class RowStore {
 
   private scheduleFetch(): void {
     if (this.fetchTimer) clearTimeout(this.fetchTimer);
-    this.fetchTimer = setTimeout(() => { this.fetchTimer = null; void this.fetchMissing(); }, fetchDelayMs);
+    this.fetchTimer = setTimeout(() => { this.fetchTimer = null; void this.fetchWindow(); }, fetchDelayMs);
   }
 
-  private async fetchMissing(): Promise<void> {
-    const generation = this.generation;
-    const missing = [...this.order.slice(this.wanted[0], this.wanted[1]), ...this.wantedIds].filter(id => !this.rows.has(id) && !this.inFlight.has(id));
-    for (let index = 0; index < missing.length; index += databaseQueryWindow) {
-      const ids = missing.slice(index, index + databaseQueryWindow);
-      ids.forEach(id => this.inFlight.add(id));
+  private async fetchWindow(): Promise<void> {
+    const reads = this.rowReads;
+    const wanted = [...this.order.slice(this.wanted[0], this.wanted[1]), ...this.wantedIds];
+    for (let index = 0; index < wanted.length; index += databaseQueryWindow) {
+      const ids = wanted.slice(index, index + databaseQueryWindow)
+        .filter(id => !reads.fresh.has(id) && !reads.inFlight.has(id) && !this.queues.has(id));
+      if (!ids.length) continue;
+      ids.forEach(id => reads.inFlight.add(id));
       try {
         const rows = await this.source.readRows(this.databaseId, ids);
+        if (reads !== this.rowReads) return;
         this.merge(rows);
         this.emit();
       } catch (failure) {
-        this.source.notice(failureText(failure, '部分行暂时无法读取。'));
+        if (reads === this.rowReads) this.source.notice(failureText(failure, '部分行暂时无法读取。'));
         return;
-      } finally { ids.forEach(id => this.inFlight.delete(id)); }
-      if (generation !== this.generation) return;
+      } finally { ids.forEach(id => reads.inFlight.delete(id)); }
     }
   }
 
@@ -203,7 +216,12 @@ export class RowStore {
   /** Formula and rollup cells depend on the server, so a saved row is read back. */
   private refreshComputed(rowId: string): void {
     if (!this.computedIds.length) return;
-    this.source.readRows(this.databaseId, [rowId]).then(rows => { this.merge(rows); this.emit(); }).catch(() => undefined);
+    const reads = this.rowReads;
+    this.source.readRows(this.databaseId, [rowId]).then(rows => {
+      if (reads !== this.rowReads) return;
+      this.merge(rows);
+      this.emit();
+    }).catch(() => undefined);
   }
 
   private touchesView(patch: RowPatch): boolean {
@@ -219,6 +237,16 @@ export class RowStore {
     this.scheduleRefresh(0);
   }
 
+  private finishWrites(ids: string[], write: Promise<unknown>): void {
+    let needsFetch = false;
+    for (const id of ids) {
+      if (this.queues.get(id) !== write) continue;
+      this.queues.delete(id);
+      if (!this.rowReads.fresh.has(id)) needsFetch = true;
+    }
+    if (needsFetch) this.scheduleFetch();
+  }
+
   updateRow(rowId: string, patch: RowPatch): Promise<boolean> {
     const keys = [...(patch.title !== undefined ? [`${rowId}:title`] : []),
       ...Object.keys(patch.properties ?? {}).map(id => `${rowId}:${id}`)];
@@ -231,9 +259,9 @@ export class RowStore {
     this.emit();
     const previous = this.queues.get(rowId) ?? Promise.resolve();
     const run: Promise<boolean> = previous.catch(() => undefined).then(async () => {
-      const row = this.rows.get(rowId);
-      if (!row) return false;
       try {
+        const row = this.rows.get(rowId);
+        if (!row) return false;
         const saved = await this.source.updateRow(rowId, row.revision, patch);
         const latest = this.rows.get(rowId);
         if (latest) this.rows.set(rowId, { ...saved, title: latest.title, properties: latest.properties,
@@ -246,7 +274,7 @@ export class RowStore {
         return false;
       } finally {
         this.setPending(keys, false);
-        if (this.queues.get(rowId) === run) this.queues.delete(rowId);
+        this.finishWrites([rowId], run);
         this.emit();
       }
     });
@@ -309,8 +337,9 @@ export class RowStore {
   }
 
   /** Writes many rows at once. Hydrated rows change right away; a failure re-reads the view. */
-  async patchRows(items: BulkRowPatch[], onProgress?: (done: number) => void): Promise<boolean> {
-    await this.settled(items.map(item => item.id));
+  patchRows(items: BulkRowPatch[], onProgress?: (done: number) => void): Promise<boolean> {
+    const ids = items.map(item => item.id);
+    const previous = this.settled(ids);
     let stale = false;
     for (const item of items) {
       const current = this.rows.get(item.id);
@@ -319,19 +348,25 @@ export class RowStore {
       stale = stale || this.touchesView(item);
     }
     if (stale) this.orderStale = true;
+    const run = previous.then(async () => {
+      try {
+        await this.inChunks(items, async chunk => {
+          const result = await this.source.bulk(this.databaseId, { clientMutationId: crypto.randomUUID(), operation: 'patch', items: chunk });
+          for (const saved of result.rows) {
+            const current = this.rows.get(saved.id);
+            if (current && !newer(current.revision, saved.revision)) this.rows.set(saved.id, { ...current, revision: saved.revision, updatedAt: saved.updatedAt });
+          }
+        }, onProgress);
+        announceDatabaseChange(this.databaseId, this.origin);
+        if (this.computedIds.length) void this.refresh();
+        return true;
+      } catch (failure) { this.fail(failure, '批量修改未全部完成。'); return false; }
+      finally { this.finishWrites(ids, run); }
+    });
+    // The same per-row queue protects optimistic values from reads and orders subsequent writes.
+    for (const id of ids) this.queues.set(id, run);
     this.emit();
-    try {
-      await this.inChunks(items, async chunk => {
-        const result = await this.source.bulk(this.databaseId, { clientMutationId: crypto.randomUUID(), operation: 'patch', items: chunk });
-        for (const saved of result.rows) {
-          const current = this.rows.get(saved.id);
-          if (current) this.rows.set(saved.id, { ...current, revision: saved.revision, updatedAt: saved.updatedAt });
-        }
-      }, onProgress);
-      announceDatabaseChange(this.databaseId, this.origin);
-      if (this.computedIds.length) void this.refresh();
-      return true;
-    } catch (failure) { this.fail(failure, '批量修改未全部完成。'); return false; }
+    return run;
   }
 
   /**
@@ -361,7 +396,7 @@ export class RowStore {
     try {
       await this.inChunks(ids, async chunk => {
         const result = await this.source.bulk(this.databaseId, { clientMutationId: crypto.randomUUID(), operation: 'trash', ids: chunk });
-        for (const saved of result.rows) { gone.add(saved.id); this.rows.delete(saved.id); }
+        for (const saved of result.rows) { gone.add(saved.id); this.dropRow(saved.id); }
         this.order = this.order.filter(id => !gone.has(id));
         this.total = this.order.length;
         this.allRows -= result.rows.length;
@@ -401,7 +436,7 @@ export class RowStore {
     this.emit();
     // In a self-relation the other end is in this table too, so those rows are read again.
     if (result.otherDatabaseId === this.databaseId) {
-      for (const id of [...add, ...remove]) { if (id !== rowId && !this.queues.has(id)) this.rows.delete(id); }
+      for (const id of [...add, ...remove]) { if (id !== rowId && !this.queues.has(id)) this.dropRow(id); }
       this.scheduleFetch();
     }
     announceDatabaseChange(this.databaseId, this.origin);
@@ -416,7 +451,7 @@ export class RowStore {
       this.order = this.order.filter(id => id !== rowId);
       this.total -= 1;
       this.allRows -= 1;
-      this.rows.delete(rowId);
+      this.dropRow(rowId);
       this.emit();
       announceDatabaseChange(this.databaseId, this.origin);
     } catch (failure) { this.fail(failure, '删除未完成。'); }

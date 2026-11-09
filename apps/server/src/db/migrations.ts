@@ -387,4 +387,19 @@ ALTER TABLE databases ADD COLUMN computed_done_generation bigint NOT NULL DEFAUL
 ALTER TABLE databases ADD COLUMN computed_cursor uuid;
 `,
   },
+  {
+    version: 18,
+    name: 'database_computed_dirty_generation',
+    sql: `
+ALTER TABLE database_computed_dirty ADD COLUMN generation bigint NOT NULL DEFAULT 1;
+
+-- Rebuild any stale results whose invalidation was dropped before jobs had generations.
+UPDATE databases
+SET computed_generation = computed_generation + 1, computed_cursor = NULL
+WHERE EXISTS (
+  SELECT 1 FROM jsonb_array_elements(properties_json) AS def
+  WHERE def->>'type' IN ('formula', 'rollup') AND def->>'deletedAt' IS NULL
+);
+`,
+  },
 ];

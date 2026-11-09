@@ -5,6 +5,7 @@ import { databaseRow, loadDatabaseSchema, type RowRecord } from './schema.js';
 type Db = Pick<PoolClient, 'query'>;
 
 const batchSize = 200;
+const computedWorkerLockKey = '2026110901';
 /** More dependent rows than this are recalculated by a sweep rather than listed under the workspace lock. */
 const fanOutLimit = 200;
 
@@ -44,8 +45,9 @@ export async function computeValues(client: Db, workspaceId: string, properties:
 
 async function queueRows(client: Db, workspaceId: string, databaseId: string, rowIds: string[]): Promise<void> {
   if (!rowIds.length) return;
-  await client.query(`INSERT INTO database_computed_dirty (workspace_id, database_id, row_id)
-    SELECT $1, $2, id FROM unnest($3::uuid[]) AS v(id) ON CONFLICT DO NOTHING`, [workspaceId, databaseId, rowIds]);
+  await client.query(`INSERT INTO database_computed_dirty AS q (workspace_id, database_id, row_id)
+    SELECT DISTINCT $1::uuid, $2::uuid, id FROM unnest($3::uuid[]) AS v(id)
+    ON CONFLICT (workspace_id, row_id) DO UPDATE SET generation = q.generation + 1`, [workspaceId, databaseId, rowIds]);
 }
 
 export async function queueSweep(client: Db, workspaceId: string, databaseId: string): Promise<void> {
@@ -100,19 +102,29 @@ async function store(client: Db, workspaceId: string, databaseId: string, proper
   [workspaceId, databaseId, rows.map(row => row.id), rows.map(row => JSON.stringify(values.get(row.id) ?? {}))]);
 }
 
-/** Works through one batch without the workspace lock. Returns false when nothing is waiting. */
-export async function runComputedBatch(pool: Pool, limit = batchSize): Promise<boolean> {
+/** Works through one batch without the workspace lock. Returns false when no batch can be taken. */
+export async function runComputedBatch(pool: Pick<Pool, 'connect'>, limit = batchSize): Promise<boolean> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const dirty = await client.query<{ workspace_id: string; database_id: string; row_id: string }>(`SELECT workspace_id, database_id, row_id FROM database_computed_dirty
-      ORDER BY database_id LIMIT $1 FOR UPDATE SKIP LOCKED`, [limit]);
+    // Serialize cache writers, including sweeps, without holding dirty-row locks during computation.
+    const lock = await client.query<{ acquired: boolean }>('SELECT pg_try_advisory_xact_lock($1::bigint) AS acquired', [computedWorkerLockKey]);
+    if (!lock.rows[0]!.acquired) { await client.query('COMMIT'); return false; }
+    const dirty = await client.query<{ workspace_id: string; database_id: string; row_id: string; generation: string }>(`
+      SELECT workspace_id, database_id, row_id, generation::text FROM database_computed_dirty ORDER BY database_id LIMIT $1`, [limit]);
     if (dirty.rows[0]) {
       const { workspace_id: workspaceId, database_id: databaseId } = dirty.rows[0];
-      const ids = dirty.rows.filter(row => row.database_id === databaseId).map(row => row.row_id);
+      const jobs = dirty.rows.filter(row => row.workspace_id === workspaceId && row.database_id === databaseId);
+      const ids = jobs.map(row => row.row_id);
       const schema = await loadDatabaseSchema(client, workspaceId, databaseId);
       if (schema) await store(client, workspaceId, databaseId, schema.properties_json, await loadRows(client, workspaceId, ids));
-      await client.query('DELETE FROM database_computed_dirty WHERE workspace_id = $1 AND row_id = ANY($2::uuid[])', [workspaceId, ids]);
+      // An edit may have bumped this job's generation or still be holding its row lock. Leave both for another batch.
+      await client.query(`WITH finished AS (
+        SELECT q.row_id FROM database_computed_dirty q
+        JOIN unnest($2::uuid[], $3::bigint[]) AS v(id, generation) ON q.row_id = v.id AND q.generation = v.generation
+        WHERE q.workspace_id = $1 FOR UPDATE OF q SKIP LOCKED
+      ) DELETE FROM database_computed_dirty q USING finished f WHERE q.workspace_id = $1 AND q.row_id = f.row_id`,
+      [workspaceId, ids, jobs.map(row => row.generation)]);
       await client.query('COMMIT');
       return true;
     }

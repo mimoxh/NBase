@@ -12,7 +12,7 @@ function display(def: PropertyDefinition, fn: AggregateFunction, value: number |
 
 /** Statistics over every matching row. It sits outside the scrolling table so it stays on screen, and follows the table sideways. */
 export function AggregateBar({ source, databaseId, request, view, columns, canWrite, version, gutter, end, widthOf, frozen, barRef, onChange }: {
-  source: DatabaseDataSource; databaseId: string; request: DatabaseQueryRequest; view: View; columns: PropertyDefinition[]; canWrite: boolean;
+  source: Pick<DatabaseDataSource, 'aggregate'>; databaseId: string; request: DatabaseQueryRequest; view: View; columns: PropertyDefinition[]; canWrite: boolean;
   /** Changes when rows change, so totals are recalculated. */
   version: number; gutter: number; end: number; widthOf: (def: PropertyDefinition) => number;
   frozen: { count: number; leftOf: (index: number) => number }; barRef: RefObject<HTMLDivElement | null>;
@@ -26,11 +26,16 @@ export function AggregateBar({ source, databaseId, request, view, columns, canWr
   useEffect(() => {
     if (!items.length) { setValues({}); return; }
     let cancelled = false;
-    const timer = setTimeout(() => {
+    const load = () => {
       source.aggregate(databaseId, { filters: request.filters, ...(request.context ? { context: request.context } : {}), items })
-        .then(result => { if (!cancelled) setValues(Object.fromEntries(items.map((item, index) => [item.propertyId, result.values[index] ?? null]))); })
+        .then(result => {
+          if (cancelled) return;
+          if (result.computedStale) timer = setTimeout(load, 2000);
+          else setValues(Object.fromEntries(items.map((item, index) => [item.propertyId, result.values[index] ?? null])));
+        })
         .catch(() => undefined);
-    }, 300);
+    };
+    let timer = setTimeout(load, 300);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [key, version, source, databaseId]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!canWrite && !items.length) return null;
