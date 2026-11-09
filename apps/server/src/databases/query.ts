@@ -1,7 +1,8 @@
-import { localDay, resolveFilters, activeProperties, aggregatesFor, databaseQueryWindow, isGroupableProperty, type AggregateFunction, type DatabaseAggregateRequest,
+import { localDay, resolveFilters, activeProperties, aggregatesFor, databaseQueryWindow, effectiveType, isComputedProperty, isGroupableProperty, type AggregateFunction, type DatabaseAggregateRequest,
   type DatabaseAggregateResponse, type DatabaseRowGroup, type DatabaseQueryRequest, type DatabaseQueryResponse,
   type DatabaseRow, type PropertyDefinition, type QueryContext, type ResolvedCondition, type ViewSort } from '@nbase/contracts';
 import type { Pool, PoolClient } from 'pg';
+import { computeValues } from './computed.js';
 import { loadRelationCells } from './relations.js';
 import { databaseRow, type RowRecord } from './schema.js';
 
@@ -16,6 +17,8 @@ const rowColumns = `p.id, p.title, p.icon, p.row_properties, p.revision::text AS
 
 class Sql {
   readonly values: unknown[] = [];
+  /** Ids of formula and rollup properties, read from the cache instead of the row. */
+  computed = new Set<string>();
   add(value: unknown, cast: string): string {
     this.values.push(value);
     return `$${this.values.length}::${cast}`;
@@ -27,7 +30,12 @@ function optionIds(def: PropertyDefinition): string[] {
 }
 
 function jsonValue(sql: Sql, def: PropertyDefinition): string {
-  return `(p.row_properties -> ${sql.add(def.id, 'text')})`;
+  return sql.computed.has(def.id) ? `(c.values_json -> ${sql.add(def.id, 'text')})` : `(p.row_properties -> ${sql.add(def.id, 'text')})`;
+}
+
+/** Computed properties are filtered and sorted like a stored property of their result type. */
+function asValue(def: PropertyDefinition): PropertyDefinition {
+  return isComputedProperty(def) ? { id: def.id, name: def.name, type: effectiveType(def) } : def;
 }
 
 function textOf(sql: Sql, def: PropertyDefinition): string {
@@ -93,7 +101,8 @@ function emptyOf(sql: Sql, def: PropertyDefinition): string {
 const comparison: Record<string, string> = { equals: '=', not_equals: '<>', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
 function conditionSql(sql: Sql, condition: ResolvedCondition, timeZone: string): string {
-  const { def, operator: op, target, days } = condition;
+  const { operator: op, target, days } = condition;
+  const def = asValue(condition.def);
   if (op === 'is_empty') return emptyOf(sql, def);
   if (op === 'is_not_empty') return `NOT ${emptyOf(sql, def)}`;
   if (op === 'is_checked') return checkedOf(sql, def);
@@ -134,7 +143,8 @@ function conditionSql(sql: Sql, condition: ResolvedCondition, timeZone: string):
   }
 }
 
-function sortSql(sql: Sql, def: PropertyDefinition, direction: 'asc' | 'desc'): string {
+function sortSql(sql: Sql, rawDef: PropertyDefinition, direction: 'asc' | 'desc'): string {
+  const def = asValue(rawDef);
   const dir = direction === 'asc' ? 'ASC' : 'DESC';
   const nullsLast = (expression: string) => `${expression} ${dir} NULLS LAST`;
   switch (def.type) {
@@ -160,6 +170,7 @@ function groupKeySql(sql: Sql, def: PropertyDefinition): string {
 
 function compile(sql: Sql, properties: PropertyDefinition[], request: DatabaseQueryRequest, context: QueryContext, timeZone: string) {
   const active = new Map(activeProperties(properties).map(p => [p.id, p]));
+  sql.computed = new Set(activeProperties(properties).filter(isComputedProperty).map(p => p.id));
   const where = resolveFilters(request.filters, properties, context)
     .map(group => `(${group.map(condition => conditionSql(sql, condition, timeZone)).join(' OR ')})`);
   const order = request.sorts.flatMap((sort: ViewSort) => {
@@ -196,7 +207,11 @@ async function rowsById(client: Pick<PoolClient, 'query'>, workspaceId: string, 
     WHERE p.workspace_id = $1 AND p.parent_id = $2 AND p.id = ANY($3::uuid[]) AND p.deleted_at IS NULL AND p.kind = 'row'`,
   [workspaceId, databaseId, ids]);
   const cells = await loadRelationCells(client, workspaceId, properties, ids, relationPreview);
-  const byId = new Map(result.rows.map(row => [row.id, { ...databaseRow(row), ...(cells.has(row.id) ? { relations: cells.get(row.id)! } : {}) }]));
+  const plain = result.rows.map(databaseRow);
+  // Shown values are worked out on the spot, so a cell is never out of date even while the cache catches up.
+  const computed = await computeValues(client, workspaceId, properties, plain);
+  const byId = new Map(plain.map(row => [row.id, { ...row, ...(cells.has(row.id) ? { relations: cells.get(row.id)! } : {}),
+    ...(computed.has(row.id) ? { computed: computed.get(row.id)! } : {}) }]));
   return ids.flatMap(id => { const row = byId.get(id); return row ? [row] : []; });
 }
 
@@ -259,9 +274,14 @@ export function runDatabaseQuery(pool: Pool, workspaceId: string, actorId: strin
     const scope = `p.workspace_id = ${sql.add(workspaceId, 'uuid')} AND p.parent_id = ${sql.add(databaseId, 'uuid')}
       AND p.deleted_at IS NULL AND p.kind = 'row'`;
     const { where, order } = compile(sql, head.properties_json, request, context, timeZone);
+    const hasComputed = head.properties_json.some(p => isComputedProperty(p) && !p.deletedAt);
+    const computedJoin = hasComputed ? 'LEFT JOIN database_computed c ON c.workspace_id = p.workspace_id AND c.row_id = p.id' : '';
     const groupDef = request.groupBy ? activeProperties(head.properties_json).find(p => p.id === request.groupBy && isGroupableProperty(p)) : undefined;
     const groupColumn = groupDef ? `, ${groupKeySql(sql, groupDef)} AS group_key` : '';
-    const ordered = await client.query<{ id: string; group_key?: string | null }>(`SELECT p.id${groupColumn} FROM pages p WHERE ${scope} ${where} ORDER BY ${order}`, sql.values);
+    const ordered = await client.query<{ id: string; group_key?: string | null }>(`SELECT p.id${groupColumn} FROM pages p ${computedJoin} WHERE ${scope} ${where} ORDER BY ${order}`, sql.values);
+    const computedStale = hasComputed && (await client.query(`SELECT 1 FROM databases d WHERE d.workspace_id = $1 AND d.page_id = $2
+      AND (d.computed_done_generation < d.computed_generation OR EXISTS (SELECT 1 FROM database_computed_dirty x WHERE x.workspace_id = d.workspace_id AND x.database_id = d.page_id))`,
+    [workspaceId, databaseId])).rows.length > 0;
     const ids = ordered.rows.map(row => row.id);
     let groups: DatabaseRowGroup[] | undefined;
     if (groupDef) {
@@ -276,11 +296,12 @@ export function runDatabaseQuery(pool: Pool, workspaceId: string, actorId: strin
     const allRows = where ? (await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM pages
       WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL AND kind = 'row'`, [workspaceId, databaseId])).rows[0]!.n : ids.length;
     return { order: ids, total: ids.length, allRows, rows: await rowsById(client, workspaceId, databaseId, ids.slice(0, databaseQueryWindow), head.properties_json),
-      schemaRevision: head.schema_revision, ...(groups ? { groups } : {}) };
+      schemaRevision: head.schema_revision, ...(groups ? { groups } : {}), ...(computedStale ? { computedStale } : {}) };
   }));
 }
 
-function aggregateSql(sql: Sql, def: PropertyDefinition, fn: AggregateFunction): string {
+function aggregateSql(sql: Sql, rawDef: PropertyDefinition, fn: AggregateFunction): string {
+  const def = asValue(rawDef);
   if (!aggregatesFor(def.type).includes(fn)) return 'NULL';
   if (fn === 'count') return 'count(*)::int';
   if (fn === 'count_values') return `(count(*) FILTER (WHERE NOT ${emptyOf(sql, def)}))::int`;
@@ -308,7 +329,9 @@ export function runDatabaseAggregate(pool: Pool, workspaceId: string, actorId: s
       const def = active.get(item.propertyId);
       return `${def ? aggregateSql(sql, def, item.fn) : 'NULL'} AS a${index}`;
     });
-    const result = await client.query<Record<string, number | string | null>>(`SELECT ${columns.join(', ')} FROM pages p WHERE ${scope} ${where}`, sql.values);
+    const computedJoin = head.properties_json.some(p => isComputedProperty(p) && !p.deletedAt)
+      ? 'LEFT JOIN database_computed c ON c.workspace_id = p.workspace_id AND c.row_id = p.id' : '';
+    const result = await client.query<Record<string, number | string | null>>(`SELECT ${columns.join(', ')} FROM pages p ${computedJoin} WHERE ${scope} ${where}`, sql.values);
     return { values: request.items.map((_, index) => result.rows[0]?.[`a${index}`] ?? null) };
   }));
 }

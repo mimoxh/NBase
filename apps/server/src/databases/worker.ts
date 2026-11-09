@@ -1,6 +1,7 @@
 import type { PropertyDefinition, RowProperties } from '@nbase/contracts';
 import type { Pool, PoolClient } from 'pg';
 import { extractDocumentIndex } from '../pages/search-text.js';
+import { runComputedBatch } from './computed.js';
 import { rowIndexText } from './schema.js';
 
 const batchSize = 200;
@@ -94,7 +95,7 @@ export class DatabaseWorker {
     let delay = idleMs;
     try {
       // Yields between batches so request handlers get the pool and the event loop.
-      if (await runSearchBatch(this.pool)) delay = 10;
+      if (await runSearchBatch(this.pool) || await runComputedBatch(this.pool)) delay = 10;
     } catch (error) {
       this.onError(error);
       delay = failureMs;

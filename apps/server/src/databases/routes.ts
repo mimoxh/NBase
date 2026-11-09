@@ -12,6 +12,7 @@ import { isRevision, isUuid, PageError, type PgPageRepository } from '../pages/r
 import { sendError } from '../pages/routes.js';
 import { validatePageIcon } from '../pages/validate.js';
 import { applyBulk } from './bulk.js';
+import { markSchemaChanged } from './computed.js';
 import { changeRelation, createRelation, mirrorRelationDeletion, relationsUnchanged } from './relations.js';
 import { readDatabaseRows, runDatabaseAggregate, runDatabaseQuery } from './query.js';
 import { databaseRow, loadDatabaseSchema, searchProjection, type RowRecord } from './schema.js';
@@ -153,6 +154,7 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
       if (!isChangeRelationRequest(body)) requestError();
       const result = await pages.mutate<ChangeRelationResponse>(workspaceId, actorId, body.clientMutationId, 'database-relation-change', pageId, { rowId, propertyId, ...body },
         async client => ({ statusCode: 200, body: await changeRelation(client, workspaceId, actorId, pageId, rowId, propertyId, body, pages.snapshot.bind(pages)) }), response => response.pageId);
+      worker.nudge();
       return reply.code(result.statusCode).send(result.body);
     } catch (error) { return sendError(request, reply, error, secure); }
   });
@@ -182,6 +184,7 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
       const result = await pages.mutate<DatabaseBulkResponse>(workspaceId, actorId, body.clientMutationId, 'database-bulk', pageId, body,
         async client => ({ statusCode: 200, body: await applyBulk(client, workspaceId, actorId, pageId, body, pages.snapshot.bind(pages)) }),
         response => response.pageId);
+      worker.nudge();
       return reply.code(result.statusCode).send(result.body);
     } catch (error) { return sendError(request, reply, error, secure); }
   });
@@ -272,6 +275,10 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
           [workspaceId, pageId, JSON.stringify(properties), JSON.stringify(body.views)]);
           if (searchProjection(current.properties_json) !== searchProjection(properties)
             && await reindexRows(client, workspaceId, pageId, properties)) backgroundWork = true;
+          if (JSON.stringify(current.properties_json) !== JSON.stringify(properties)) {
+            await markSchemaChanged(client, workspaceId, pageId, properties);
+            backgroundWork = true;
+          }
           return { statusCode: 200, body: { pageId, properties, views: body.views,
             schemaRevision: updated.rows[0]!.revision } };
         }, response => response.pageId);

@@ -362,4 +362,29 @@ CREATE TABLE database_row_links (
 CREATE INDEX database_row_links_target_idx ON database_row_links (workspace_id, property_id, target_row_id, source_row_id);
 `,
   },
+  {
+    version: 17,
+    name: 'database_computed_cache',
+    sql: `
+-- Formula and rollup results used for filtering and sorting. Always recomputable from rows and schemas.
+CREATE TABLE database_computed (
+  workspace_id uuid NOT NULL,
+  database_id uuid NOT NULL,
+  row_id uuid NOT NULL,
+  values_json jsonb NOT NULL,
+  PRIMARY KEY (workspace_id, row_id),
+  FOREIGN KEY (workspace_id, row_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT
+);
+CREATE TABLE database_computed_dirty (
+  workspace_id uuid NOT NULL,
+  database_id uuid NOT NULL,
+  row_id uuid NOT NULL,
+  PRIMARY KEY (workspace_id, row_id),
+  FOREIGN KEY (workspace_id, row_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT
+);
+ALTER TABLE databases ADD COLUMN computed_generation bigint NOT NULL DEFAULT 0;
+ALTER TABLE databases ADD COLUMN computed_done_generation bigint NOT NULL DEFAULT 0;
+ALTER TABLE databases ADD COLUMN computed_cursor uuid;
+`,
+  },
 ];

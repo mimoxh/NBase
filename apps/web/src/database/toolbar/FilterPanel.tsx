@@ -1,4 +1,4 @@
-import { databaseConditionLimit, filterOperatorsFor, flatFilters, isFilterGroup, operatorNeedsValue, relativeDateTokens, type DatabaseView as View, type FilterOperator,
+import { databaseConditionLimit, effectiveType, filterOperatorsFor, flatFilters, isFilterGroup, operatorNeedsValue, relativeDateTokens, type DatabaseView as View, type FilterOperator,
   type PropertyDefinition, type ViewFilter, type ViewFilterEntry } from '@nbase/contracts';
 import { Icon } from '../../components/Icon';
 import { Popover } from '../../components/Popover';
@@ -19,14 +19,15 @@ function DateValue({ filter, onChange }: { filter: ViewFilter; onChange: (value:
 function FilterValue({ def, filter, onChange }: { def: PropertyDefinition; filter: ViewFilter; onChange: (value: string | number | null) => void }) {
   if (!operatorNeedsValue(filter.operator)) return null;
   const value = filter.value ?? '';
-  if (def.type === 'select' || def.type === 'multi_select') {
+  const kind = effectiveType(def);
+  if (kind === 'select' || kind === 'multi_select') {
     return <select className="nb-db-select" aria-label="筛选值" value={String(value)} onChange={event => onChange(event.target.value || null)}>
       <option value="">选择选项</option>
       {(def.options ?? []).map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
     </select>;
   }
-  if (['date', 'created_time', 'updated_time'].includes(def.type)) return <DateValue filter={filter} onChange={onChange} />;
-  const type = def.type === 'number' ? 'number' : 'text';
+  if (['date', 'created_time', 'updated_time'].includes(kind)) return <DateValue filter={filter} onChange={onChange} />;
+  const type = kind === 'number' ? 'number' : 'text';
   return <input className="nb-db-input" aria-label="筛选值" type={type} value={String(value)} placeholder="值"
     onChange={event => onChange(type === 'number' ? (event.target.value === '' ? null : Number(event.target.value))
       : event.target.value || null)} />;
@@ -40,11 +41,11 @@ function Condition({ filter, active, canWrite, onReplace }: {
   return <div className="nb-db-condition">
     <select className="nb-db-select" aria-label="筛选字段" value={def.id} disabled={!canWrite} onChange={event => {
       const nextDef = active.find(p => p.id === event.target.value)!;
-      onReplace({ propertyId: nextDef.id, operator: filterOperatorsFor(nextDef.type)[0]! });
+      onReplace({ propertyId: nextDef.id, operator: filterOperatorsFor(effectiveType(nextDef))[0]! });
     }}>{active.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
     <select className="nb-db-select" aria-label="筛选条件" value={filter.operator} disabled={!canWrite}
       onChange={event => onReplace({ ...filter, operator: event.target.value as FilterOperator })}>
-      {filterOperatorsFor(def.type).map(op => <option key={op} value={op}>{operatorLabel(def.type, op)}</option>)}
+      {filterOperatorsFor(effectiveType(def)).map(op => <option key={op} value={op}>{operatorLabel(effectiveType(def), op)}</option>)}
     </select>
     {canWrite && <FilterValue def={def} filter={filter} onChange={value => onReplace(value === null
       ? { propertyId: filter.propertyId, operator: filter.operator } : { ...filter, value })} />}
@@ -58,7 +59,7 @@ export function FilterPanel({ view, active, canWrite, open, onOpen, onClose, onU
 }) {
   const count = flatFilters(view.filters).length;
   const full = count + view.sorts.length >= databaseConditionLimit;
-  const blank = (): ViewFilter => { const def = active[0]!; return { propertyId: def.id, operator: filterOperatorsFor(def.type)[0]! }; };
+  const blank = (): ViewFilter => { const def = active[0]!; return { propertyId: def.id, operator: filterOperatorsFor(effectiveType(def))[0]! }; };
   const setEntries = (filters: ViewFilterEntry[]) => onUpdate({ filters });
   const replaceEntry = (index: number, next: ViewFilterEntry | null) =>
     setEntries(next ? view.filters.map((item, i) => i === index ? next : item) : view.filters.filter((_, i) => i !== index));

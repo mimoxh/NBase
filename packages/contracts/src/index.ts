@@ -27,6 +27,8 @@ export type {
   UpdatePageRequest,
 } from './pages.js';
 export * from './databases.js';
+export { computeRow, formulaFromDisplay, formulaFunctionNames, formulaLengthLimit, formulaToDisplay, parseFormula } from './formula.js';
+export type { FormulaResult, FormulaType, FormulaValue, RollupSource } from './formula.js';
 export type { FavoriteListResponse } from './favorites.js';
 export { pageBacklinkLimit, pageIdFromReferenceUrl, pageReferenceLabelLimit, pageReferenceUrl } from './pageReferences.js';
 export type { PageBacklink, PageBacklinksResponse, SerializedPageReference } from './pageReferences.js';

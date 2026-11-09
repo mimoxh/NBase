@@ -1,5 +1,5 @@
 import { lazy, Suspense, useMemo, useState, type ReactNode } from 'react';
-import { activeProperties, databasePropertyLimit, databaseViewLimit, isCalendarProperty, isFilterGroup, isGroupableProperty, localDay, operatorNeedsValue, viewColumns, type DatabaseQueryRequest, type DatabaseRow,
+import { activeProperties, databasePropertyLimit, databaseViewLimit, effectiveType, isCalendarProperty, isComputedProperty, isFilterGroup, isGroupableProperty, localDay, operatorNeedsValue, viewColumns, type DatabaseQueryRequest, type DatabaseRow,
   type DatabaseView as View, type DatabaseViewType, type PropertyDefinition, type PropertyType, type PropertyValue, type QueryContext, type RelativeDateToken, type RowProperties, type ViewFilter } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { AddRelationDialog } from './AddRelationDialog';
@@ -81,7 +81,8 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
     return { filters: view.filters, sorts: view.sorts, context: readerContext, ...(groupDef ? { groupBy: groupDef.id } : {}) };
   }, [view?.filters, view?.sorts, groupDef?.id, dateDef?.id, month]); // eslint-disable-line react-hooks/exhaustive-deps
   const titlePropertyId = doc?.properties.find(p => p.type === 'title')?.id ?? null;
-  const store = useRowStore(source, databaseId, request, titlePropertyId);
+  const computedIds = activeDefs.filter(isComputedProperty).map(p => p.id).join();
+  const store = useRowStore(source, databaseId, request, titlePropertyId, computedIds);
 
   if (state.loading && !doc) return <div className="nb-db nb-db-status" role="status">正在读取数据库…</div>;
   if (!doc || !view) return <div className="nb-db nb-db-status" role="alert">{state.error || '数据库暂时无法读取。'}
@@ -99,8 +100,12 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
 
   const addProperty = (type: PropertyType) => {
     if (active.length >= databasePropertyLimit) return;
+    const firstRelation = active.find(p => p.type === 'relation');
     const def: PropertyDefinition = { id: crypto.randomUUID(), name: uniqueName(typeLabels[type], active.map(p => p.name)), type,
-      ...(type === 'select' || type === 'multi_select' ? { options: [] } : {}) };
+      ...(type === 'select' || type === 'multi_select' ? { options: [] } : {}),
+      ...(type === 'formula' ? { formula: { expression: '', resultType: 'text' as const } } : {}),
+      // Starts as a count of linked rows, which needs no target field; the header menu refines it.
+      ...(type === 'rollup' && firstRelation ? { rollup: { relationPropertyId: firstRelation.id, targetPropertyId: firstRelation.id, fn: 'count' as const, resultType: 'number' as const } } : {}) };
     void save([...properties, def], doc.views.map(item => item.id === view.id
       ? { ...item, propertyOrder: [...columns.filter(p => p.type !== 'title').map(p => p.id), def.id] } : item));
     setPanel({ kind: 'header', id: def.id });
@@ -139,7 +144,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
     const optionName = def.options?.find(o => o.id === filter.value)?.name;
     const relative = typeof filter.value === 'string' && filter.value.startsWith('@') ? relativeDateLabels[filter.value.slice(1) as RelativeDateToken] : undefined;
     const valueText = operatorNeedsValue(filter.operator) ? (optionName ?? relative ?? (filter.value === undefined || filter.value === null || filter.value === '' ? '…' : String(filter.value))) : '';
-    return `${def.name} ${operatorLabel(def.type, filter.operator)} ${valueText}`.trim();
+    return `${def.name} ${operatorLabel(effectiveType(def), filter.operator)} ${valueText}`.trim();
   };
   const filterChips = view.filters.map((entry, index) => {
     const text = (isFilterGroup(entry) ? entry.any : [entry]).map(conditionText).filter(Boolean).join(' 或 ');
@@ -198,6 +203,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
       {canWrite && view.type === 'table' && <button className="nb-db-add-row" onClick={() => void addRow()}><Icon name="plus" size={14} />新建一行</button>}
       <span className="nb-db-count">{store.loading ? '正在读取…' : store.total === store.allRows ? `共 ${store.allRows} 行`
         : `显示 ${store.total} / ${store.allRows} 行`}</span>
+      {store.computing && <span role="status">公式和汇总计算中，结果可能暂时不准</span>}
       {store.orderStale && <button className="nb-btn nb-btn-quiet" onClick={() => void store.refresh()}>结果可能已变化，刷新</button>}
       {compact && store.total > limit && <button className="nb-btn nb-btn-quiet" onClick={() => setLimit(value => value + 200)}>
         再显示 {Math.min(200, store.total - limit)} 行</button>}

@@ -3,6 +3,7 @@ import { activeProperties, databaseRelationLimit, databaseRelationPreview, type 
   type DatabaseRow, type DatabaseSchemaResponse, type PropertyDefinition, type RelationCell, type RowProperties } from '@nbase/contracts';
 import type { PoolClient } from 'pg';
 import { PageError } from '../pages/repository.js';
+import { markRowsChanged } from './computed.js';
 import { databaseRow, loadDatabaseSchema, syncRelationLinks, type RowRecord } from './schema.js';
 
 type Snapshot = (client: PoolClient, workspaceId: string, ids: string[], actorId: string, operation: 'update') => Promise<void>;
@@ -145,6 +146,13 @@ export async function changeRelation(client: PoolClient, workspaceId: string, ac
   [workspaceId, updated.map(row => row.id), updated.map(row => JSON.stringify(row.values))]) : { rows: [] };
   await syncRelationLinks(client, workspaceId, ownerSchema.properties_json, updated);
   if (written.rows.length) await snapshot(client, workspaceId, written.rows.map(row => row.id), actorId, 'update');
+  // Rollups on both sides count these links.
+  const otherEnds = def.relation.owner ? [...add, ...remove] : [...updated.map(row => row.id)];
+  await markRowsChanged(client, workspaceId, databaseId, schema.properties_json, [rowId]);
+  if (otherDatabaseId !== databaseId || otherEnds.length) {
+    const otherSchema = otherDatabaseId === databaseId ? schema : await loadDatabaseSchema(client, workspaceId, otherDatabaseId);
+    if (otherSchema) await markRowsChanged(client, workspaceId, otherDatabaseId, otherSchema.properties_json, otherEnds);
+  }
 
   const record = await client.query<RowRecord>(`SELECT id, title, icon, row_properties, revision::text AS revision, created_at, updated_at FROM pages WHERE workspace_id = $1 AND id = $2`, [workspaceId, rowId]);
   const row: DatabaseRow = databaseRow(record.rows[0]!);

@@ -7,6 +7,7 @@ import { buildApp } from '../src/app.js';
 import { initializeOwner } from '../src/auth/initialize-owner.js';
 import { hashPassword } from '../src/auth/password.js';
 import { PgAuthRepository } from '../src/auth/repository.js';
+import { runComputedBatch } from '../src/databases/computed.js';
 import { runMigrations } from '../src/db/migrate.js';
 import { PgPageRepository } from '../src/pages/repository.js';
 
@@ -136,6 +137,60 @@ test('two-way relations stay consistent through edits, trash and history', {
     const reshape = await instance.inject({ method: 'PATCH', url: `${base}/databases/${customers.page.id}`, headers: write, payload: { clientMutationId: randomUUID(), expectedRevision: pairedAfter.schemaRevision,
       views: pairedAfter.views, properties: pairedAfter.properties.map(p => p.id === pairedId ? { ...p, relation: { ...p.relation!, databaseId: randomUUID() } } : p) } });
     assert.equal(reshape.statusCode, 422);
+
+    // Computed fields: a formula on orders and a rollup on customers, filterable through the background cache.
+    const restoreOwner = await (async () => {
+      const latest = (await instance.inject({ method: 'GET', url: `${base}/databases/${orders.page.id}?rows=none`, headers: { cookie } })).json() as DatabaseDocument;
+      const response = await instance.inject({ method: 'PATCH', url: `${base}/databases/${orders.page.id}`, headers: write, payload: { clientMutationId: randomUUID(), expectedRevision: latest.schemaRevision,
+        views: latest.views, properties: latest.properties.map(p => { if (p.id !== ownerField.id) return p; const { deletedAt: _d, ...rest } = p; void _d; return rest; }) } });
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json() as DatabaseSchemaResponse;
+    })();
+    const amountId = randomUUID();
+    const orderTitle = restoreOwner.properties.find(p => p.type === 'title')!;
+    const withFields = [...restoreOwner.properties, { id: amountId, name: '金额', type: 'number' as const },
+      { id: randomUUID(), name: '双倍', type: 'formula' as const, formula: { expression: `prop("${amountId}") * 2`, resultType: 'number' as const } }];
+    const doubleId = withFields.at(-1)!.id;
+    const savedOrders = await instance.inject({ method: 'PATCH', url: `${base}/databases/${orders.page.id}`, headers: write,
+      payload: { clientMutationId: randomUUID(), expectedRevision: restoreOwner.schemaRevision, views: restoreOwner.views, properties: withFields } });
+    assert.equal(savedOrders.statusCode, 200, savedOrders.body);
+    assert.ok(orderTitle);
+    const setAmount = async (id: string, value: number) => {
+      const current = (await pool!.query<{ revision: string }>('SELECT revision::text FROM pages WHERE id = $1', [id])).rows[0]!.revision;
+      const response = await instance.inject({ method: 'PATCH', url: `${base}/pages/${id}`, headers: write, payload: { clientMutationId: randomUUID(), expectedRevision: current, properties: { [amountId]: value } } });
+      assert.equal(response.statusCode, 200, response.body);
+    };
+    await setAmount(o1.id, 10);
+    await setAmount(o2.id, 3);
+    const drain = async () => { while (await runComputedBatch(pool!)) { /* until empty */ } };
+    assert.equal((await read(orders)).computedStale, true);
+    await drain();
+    assert.equal((await read(orders)).computedStale, undefined);
+    const orderRows = (await read(orders)).rows;
+    assert.equal(orderRows.find(row => row.id === o1.id)!.computed![doubleId], 20);
+    assert.deepEqual(await titlesOf(orders, [{ propertyId: doubleId, operator: 'gt', value: 10 }]), ['订单一']);
+    assert.deepEqual((await titlesOf(orders, [{ propertyId: doubleId, operator: 'is_not_empty' }], [{ propertyId: doubleId, direction: 'asc' }])), ['订单二', '订单一']);
+    const aggregate = await post(`/databases/${orders.page.id}/aggregate`, { filters: [], items: [{ propertyId: doubleId, fn: 'sum' }] });
+    assert.deepEqual(aggregate.json().values, [26]);
+
+    const customersNow = (await instance.inject({ method: 'GET', url: `${base}/databases/${customers.page.id}?rows=none`, headers: { cookie } })).json() as DatabaseDocument;
+    const rollupId = randomUUID();
+    const rollupProperties = [...customersNow.properties, { id: rollupId, name: '订单合计', type: 'rollup' as const,
+      rollup: { relationPropertyId: pairedId, targetPropertyId: amountId, fn: 'sum' as const, resultType: 'number' as const } }];
+    const savedCustomers = await instance.inject({ method: 'PATCH', url: `${base}/databases/${customers.page.id}`, headers: write,
+      payload: { clientMutationId: randomUUID(), expectedRevision: customersNow.schemaRevision, views: customersNow.views, properties: rollupProperties } });
+    assert.equal(savedCustomers.statusCode, 200, savedCustomers.body);
+    await drain();
+    const totalOf = async (id: string) => (await read(customers)).rows.find(row => row.id === id)!.computed?.[rollupId];
+    assert.equal(await totalOf(c1.id), 13);
+    assert.deepEqual(await titlesOf(customers, [{ propertyId: rollupId, operator: 'gte', value: 13 }]), ['张三']);
+    // Shown values are live; the filter waits for the cache, and the queue is drained after the linked row changes.
+    await setAmount(o2.id, 100);
+    assert.equal(await totalOf(c1.id), 110);
+    assert.equal((await read(customers)).computedStale, true);
+    assert.deepEqual(await titlesOf(customers, [{ propertyId: rollupId, operator: 'gte', value: 100 }]), []);
+    await drain();
+    assert.deepEqual(await titlesOf(customers, [{ propertyId: rollupId, operator: 'gte', value: 100 }]), ['张三']);
 
     // A database can relate to itself.
     const self = await post(`/databases/${customers.page.id}/relations`, { clientMutationId: randomUUID(), targetDatabaseId: customers.page.id, name: '上级', pairedName: '下级' });

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { databaseRowLimit, pageBacklinkLimit, type PageBacklinksResponse, type PageKind, type RowProperties } from '@nbase/contracts';
+import { markRowsChanged } from '../databases/computed.js';
 import { loadDatabaseSchema, mergeRowProperties, rowIndexText, syncRelationLinks } from '../databases/schema.js';
 import type { CreatePageRequest, FavoriteListResponse, PageCoverId, PageDocument, PageHistoryResponse, PageListResponse, PageStateRequest,
   PageSummary, PageTreeResponse, PageVersion, PageVersionOperation, PageVersionSummary, RestorePageVersionRequest,
@@ -499,6 +500,7 @@ export class PgPageRepository {
     if (body.tagIds?.length) page.tagIds = await this.replaceTags(client, workspaceId, page.id, body.tagIds);
     if (index.references.length) await replacePageLinks(client, workspaceId, page.id, index.references);
     await this.snapshot(client, workspaceId, [page.id], actorId, 'create');
+    if (kind === 'row' && body.parentId) await this.rowChanged(client, workspaceId, body.parentId, [page.id]);
     return { statusCode: 201, body: page };
   }
 
@@ -583,7 +585,13 @@ export class PgPageRepository {
     const tagIds = body.tagIds === undefined ? row.tag_ids : await this.replaceTags(client, workspaceId, pageId, body.tagIds);
     if (index) await replacePageLinks(client, workspaceId, pageId, index.references);
     await this.snapshot(client, workspaceId, [pageId], actorId, 'update');
+    if (row.kind === 'row' && row.parent_id && (body.properties || body.title !== undefined)) await this.rowChanged(client, workspaceId, row.parent_id, [pageId]);
     return { statusCode: 200, body: pageFromRow({ ...result.rows[0], tag_ids: tagIds ?? [] }) };
+  }
+
+  private async rowChanged(client: PoolClient, workspaceId: string, databaseId: string, rowIds: string[]): Promise<void> {
+    const schema = await loadDatabaseSchema(client, workspaceId, databaseId);
+    if (schema) await markRowsChanged(client, workspaceId, databaseId, schema.properties_json, rowIds);
   }
 
   async trash(workspaceId: string, actorId: string, pageId: string,
@@ -625,6 +633,7 @@ export class PgPageRepository {
       if (!root.rows[0]) throw new PageError(404, 'NOT_FOUND');
       await this.snapshot(client, workspaceId, deleted.rows.filter(item => item.kind !== 'row' || item.id === pageId).map(item => item.id),
         actorId, 'trash');
+      if (root.rows[0].kind === 'row' && root.rows[0].parent_id) await this.rowChanged(client, workspaceId, root.rows[0].parent_id, [pageId]);
       return { statusCode: 200, body: pageFromRow({ ...root.rows[0], tag_ids: row.tag_ids ?? [] }) };
     });
   }
@@ -669,6 +678,7 @@ export class PgPageRepository {
       if (!root.rows[0]) throw new PageError(404, 'NOT_FOUND');
       await this.snapshot(client, workspaceId, restored.rows.filter(item => item.kind !== 'row' || item.id === pageId).map(item => item.id),
         actorId, 'restore');
+      if (root.rows[0].kind === 'row' && root.rows[0].parent_id) await this.rowChanged(client, workspaceId, root.rows[0].parent_id, [pageId]);
       return { statusCode: 200, body: pageFromRow({ ...root.rows[0], tag_ids: row.tag_ids ?? [] }) };
     });
   }
@@ -711,7 +721,10 @@ export class PgPageRepository {
       await replacePageLinks(client, workspaceId, pageId, index.references);
       if (current.kind === 'row' && current.parent_id) {
         const schema = await loadDatabaseSchema(client, workspaceId, current.parent_id);
-        if (schema) await syncRelationLinks(client, workspaceId, schema.properties_json, [{ id: pageId, values: rowProperties ?? {} }]);
+        if (schema) {
+          await syncRelationLinks(client, workspaceId, schema.properties_json, [{ id: pageId, values: rowProperties ?? {} }]);
+          await markRowsChanged(client, workspaceId, current.parent_id, schema.properties_json, [pageId]);
+        }
       }
       await this.snapshot(client, workspaceId, [pageId], actorId, 'restore-version');
       return { statusCode: 200, body: pageFromRow({ ...result.rows[0]!, tag_ids: current.tag_ids ?? [] }) };

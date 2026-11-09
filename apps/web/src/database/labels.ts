@@ -1,14 +1,16 @@
-import type { AggregateFunction, FilterOperator, OptionColor, PropertyType, RelativeDateToken } from '@nbase/contracts';
+import type { AggregateFunction, FilterOperator, OptionColor, PropertyType, RelativeDateToken, RollupFunction } from '@nbase/contracts';
 
 export const typeLabels: Record<PropertyType, string> = {
   title: '标题', text: '文本', number: '数字', select: '单选', multi_select: '多选', date: '日期',
-  checkbox: '复选框', url: '网址', created_time: '创建时间', updated_time: '更新时间', relation: '关联',
+  checkbox: '复选框', url: '网址', created_time: '创建时间', updated_time: '更新时间', relation: '关联', formula: '公式', rollup: '汇总',
 };
+
+export const rollupLabels: Record<RollupFunction, string> = { count: '行数', count_values: '有值的行数', sum: '求和', avg: '平均', min: '最小', max: '最大' };
 
 /** Short glyphs, so the header stays readable without an icon font. */
 export const typeGlyphs: Record<PropertyType, string> = {
   title: 'Aa', text: '≡', number: '#', select: '◉', multi_select: '☷', date: '▦',
-  checkbox: '☑', url: '↗', created_time: '◷', updated_time: '↻', relation: '⇄',
+  checkbox: '☑', url: '↗', created_time: '◷', updated_time: '↻', relation: '⇄', formula: 'ƒ', rollup: 'Σ',
 };
 
 /** Types a user can add or switch to; title is fixed and only one exists. */

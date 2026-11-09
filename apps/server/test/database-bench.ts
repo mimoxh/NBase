@@ -9,6 +9,7 @@ import { buildApp } from '../src/app.js';
 import { initializeOwner } from '../src/auth/initialize-owner.js';
 import { hashPassword } from '../src/auth/password.js';
 import { PgAuthRepository } from '../src/auth/repository.js';
+import { runComputedBatch } from '../src/databases/computed.js';
 import { runMigrations } from '../src/db/migrate.js';
 import { PgPageRepository } from '../src/pages/repository.js';
 
@@ -146,8 +147,23 @@ try {
     probeTimes.push(await probing);
     await new Promise(resolve => setTimeout(resolve, 0));
   }
+  // A formula on the large table: recalculated in the background while a document save races it.
+  const latest = (await instance.inject({ method: 'GET', url: `${base}/databases/${db.page.id}?rows=none`, headers: read })).json() as DatabaseDocument;
+  const formula: PropertyDefinition = { id: randomUUID(), name: '两倍', type: 'formula', formula: { expression: `prop("${fields.number.id}") * 2`, resultType: 'number' } };
+  const added = await instance.inject({ method: 'PATCH', url: `${base}/databases/${db.page.id}`, headers: write,
+    payload: { clientMutationId: randomUUID(), expectedRevision: latest.schemaRevision, properties: [...latest.properties, formula], views: latest.views } });
+  assert.equal(added.statusCode, 200, added.body);
+  const sweepStart = performance.now();
+  const sweepProbes: number[] = [];
+  while (await runComputedBatch(pool)) {
+    if (sweepProbes.length < 40) sweepProbes.push(await probeWrite());
+  }
+  const sweepMs = Math.round(performance.now() - sweepStart);
+  const filtered = await query([{ propertyId: formula.id, operator: 'gt', value: 5000 }], [{ propertyId: formula.id, direction: 'desc' }]);
+  assert.equal(filtered.statusCode, 200, filtered.body);
   const percentile = (values: number[], p: number) => Math.round([...values].sort((a, b) => a - b)[Math.floor(values.length * p)]!);
   console.table(report);
+  console.log(`formula recompute ${rowCount} rows in ${sweepMs} ms; save during sweep p50 ${percentile(sweepProbes, 0.5)} max ${percentile(sweepProbes, 0.999)}; filter+sort on formula returned ${filtered.json().total} rows`);
   console.log(`import ${rowCount} rows in ${Math.round(performance.now() - importStart)} ms; chunk p50 ${percentile(chunkTimes, 0.5)} p95 ${percentile(chunkTimes, 0.95)}; save during import p50 ${percentile(probeTimes, 0.5)} p95 ${percentile(probeTimes, 0.95)} max ${percentile(probeTimes, 0.999)}`);
 } finally {
   await app?.close();

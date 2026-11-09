@@ -7,6 +7,7 @@ const cacheLimit = 3000;
 const fetchDelayMs = 30;
 const refreshDelayMs = 150;
 const queryDelayMs = 200;
+const computingPollMs = 2000;
 const bulkStartChunk = 200;
 const bulkMaxBytes = 1_500_000;
 const bulkFastMs = 200;
@@ -31,6 +32,8 @@ export class RowStore {
   error = '';
   /** An edit may have changed which rows match or where they sort. */
   orderStale = false;
+  /** The view depends on formulas or rollups that are still being recalculated. */
+  computing = false;
   pending: ReadonlySet<string> = new Set();
 
   private readonly rows = new Map<string, DatabaseRow>();
@@ -40,6 +43,7 @@ export class RowStore {
   private readonly origin = Symbol('rows');
   private request: DatabaseQueryRequest | null = null;
   private titlePropertyId: string | null = null;
+  private computedIds: string[] = [];
   private wanted: [number, number] = [0, databaseQueryWindow];
   private wantedIds: string[] = [];
   private generation = 0;
@@ -72,9 +76,10 @@ export class RowStore {
 
   rowById(id: string): DatabaseRow | undefined { return this.rows.get(id); }
 
-  setQuery(request: DatabaseQueryRequest, titlePropertyId: string | null, immediate: boolean): void {
+  setQuery(request: DatabaseQueryRequest, titlePropertyId: string | null, immediate: boolean, computedIds: string[] = []): void {
     this.request = request;
     this.titlePropertyId = titlePropertyId;
+    this.computedIds = computedIds;
     this.scheduleRefresh(immediate ? 0 : queryDelayMs);
   }
 
@@ -101,6 +106,8 @@ export class RowStore {
       this.allRows = result.allRows;
       this.error = '';
       this.orderStale = false;
+      this.computing = Boolean(result.computedStale) && this.usesComputed();
+      if (this.computing) this.scheduleRefresh(computingPollMs);
       this.merge(result.rows);
     } catch (failure) {
       if (generation !== this.generation) return;
@@ -184,9 +191,25 @@ export class RowStore {
     this.pending = next;
   }
 
+  private usedProperties(): Set<string> {
+    return new Set(this.request ? [...flatFilters(this.request.filters), ...this.request.sorts].map(item => item.propertyId) : []);
+  }
+
+  private usesComputed(): boolean {
+    const used = this.usedProperties();
+    return this.computedIds.some(id => used.has(id));
+  }
+
+  /** Formula and rollup cells depend on the server, so a saved row is read back. */
+  private refreshComputed(rowId: string): void {
+    if (!this.computedIds.length) return;
+    this.source.readRows(this.databaseId, [rowId]).then(rows => { this.merge(rows); this.emit(); }).catch(() => undefined);
+  }
+
   private touchesView(patch: RowPatch): boolean {
     if (!this.request) return false;
-    const used = new Set([...flatFilters(this.request.filters), ...this.request.sorts].map(item => item.propertyId));
+    const used = this.usedProperties();
+    if (this.usesComputed()) return true;
     return (patch.title !== undefined && !!this.titlePropertyId && used.has(this.titlePropertyId))
       || Object.keys(patch.properties ?? {}).some(id => used.has(id));
   }
@@ -213,8 +236,10 @@ export class RowStore {
       try {
         const saved = await this.source.updateRow(rowId, row.revision, patch);
         const latest = this.rows.get(rowId);
-        if (latest) this.rows.set(rowId, { ...saved, title: latest.title, properties: latest.properties });
+        if (latest) this.rows.set(rowId, { ...saved, title: latest.title, properties: latest.properties,
+          ...(latest.relations ? { relations: latest.relations } : {}), ...(latest.computed ? { computed: latest.computed } : {}) });
         announceDatabaseChange(this.databaseId, this.origin);
+        this.refreshComputed(rowId);
         return true;
       } catch (failure) {
         this.fail(failure, '修改未保存。');
@@ -304,6 +329,7 @@ export class RowStore {
         }
       }, onProgress);
       announceDatabaseChange(this.databaseId, this.origin);
+      if (this.computedIds.length) void this.refresh();
       return true;
     } catch (failure) { this.fail(failure, '批量修改未全部完成。'); return false; }
   }
@@ -399,7 +425,7 @@ export class RowStore {
 
 /** One store per database view; `request` is keyed by content, so an unchanged view does not re-query. */
 export function useRowStore(source: DatabaseDataSource, databaseId: string, request: DatabaseQueryRequest | null,
-  titlePropertyId: string | null): RowStore {
+  titlePropertyId: string | null, computedIds = ''): RowStore {
   const store = useMemo(() => new RowStore(source, databaseId), [source, databaseId]);
   useEffect(() => store.connect(), [store]);
   useSyncExternalStore(store.subscribe, store.getVersion);
@@ -407,8 +433,8 @@ export function useRowStore(source: DatabaseDataSource, databaseId: string, requ
   useEffect(() => {
     if (!request) return;
     // Typing in a filter should not query on every key; opening a view should not wait.
-    store.setQuery(request, titlePropertyId, store.loading);
+    store.setQuery(request, titlePropertyId, store.loading, computedIds ? computedIds.split(',') : []);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store, key, titlePropertyId]);
+  }, [store, key, titlePropertyId, computedIds]);
   return store;
 }

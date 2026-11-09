@@ -1,13 +1,14 @@
 import { useState } from 'react';
-import { databaseConditionLimit, evaluateView, filterOperatorsFor, flatFilters, operatorNeedsValue, retainFilters, viewColumns, type DatabaseView as View,
+import { databaseConditionLimit, evaluateView, filterOperatorsFor, flatFilters, isComputedProperty, operatorNeedsValue, retainFilters, viewColumns, type ComputedResultType, type DatabaseView as View,
   type PropertyDefinition, type PropertyType, type ViewFilter } from '@nbase/contracts';
 import { Popover } from '../components/Popover';
 import { creatableTypes, typeLabels } from './labels';
 import { OptionEditor } from './OptionEditor';
-import type { DatabaseState } from './source';
+import { FormulaEditor, RollupEditor } from './ComputedEditor';
+import type { DatabaseDataSource, DatabaseState } from './source';
 
-export function HeaderMenu({ def, view, state, onClose, onSaveProperties }: {
-  def: PropertyDefinition; view: View; state: DatabaseState; onClose: () => void;
+export function HeaderMenu({ def, view, state, source, onClose, onSaveProperties }: {
+  def: PropertyDefinition; view: View; state: DatabaseState; source: DatabaseDataSource; onClose: () => void;
   onSaveProperties: (next: PropertyDefinition[], views?: View[]) => void;
 }) {
   const doc = state.doc!;
@@ -40,6 +41,9 @@ export function HeaderMenu({ def, view, state, onClose, onSaveProperties }: {
       filters: retainFilters(item.filters, f => f.propertyId !== def.id || fits(f)) }));
     onSaveProperties(doc.properties.map(p => p.id === def.id ? next : p), views);
   };
+  /** When a computed field's result type changes, conditions written for the old type no longer apply. */
+  const retyped = (type: ComputedResultType) => doc.views.map(item => ({ ...item,
+    filters: retainFilters(item.filters, f => f.propertyId !== def.id || filterOperatorsFor(type).includes(f.operator)) }));
   const remove = () => {
     const views = doc.views.map(item => ({ ...item, filters: retainFilters(item.filters, f => f.propertyId !== def.id),
       sorts: item.sorts.filter(s => s.propertyId !== def.id) }));
@@ -55,7 +59,11 @@ export function HeaderMenu({ def, view, state, onClose, onSaveProperties }: {
     onClose={() => { commitName(); onClose(); }}>
     <input className="nb-db-input" aria-label="字段名称" value={name} maxLength={100} onChange={event => setName(event.target.value)}
       onBlur={commitName} onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { commitName(); onClose(); } }} />
-    {def.type !== 'title' && def.type !== 'relation' && <label className="nb-db-field-row">类型
+    {def.type === 'formula' && <FormulaEditor def={def} properties={doc.properties}
+      onSave={formula => onSaveProperties(doc.properties.map(p => p.id === def.id ? { ...p, formula } : p), retyped(formula.resultType))} />}
+    {def.type === 'rollup' && <RollupEditor def={def} properties={doc.properties} source={source}
+      onSave={rollup => onSaveProperties(doc.properties.map(p => p.id === def.id ? { ...p, rollup } : p), retyped(rollup.resultType))} />}
+    {def.type !== 'title' && def.type !== 'relation' && !isComputedProperty(def) && <label className="nb-db-field-row">类型
       <select className="nb-db-select" value={def.type} onChange={event => setType(event.target.value as PropertyType)}>
         {creatableTypes.map(type => <option key={type} value={type}>{typeLabels[type]}</option>)}
       </select></label>}

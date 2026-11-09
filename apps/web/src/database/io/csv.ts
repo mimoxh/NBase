@@ -1,4 +1,4 @@
-import { cellText, cellValue, type DatabaseRow, type PropertyDefinition } from '@nbase/contracts';
+import { cellText, cellValue, effectiveType, type DatabaseRow, type PropertyDefinition } from '@nbase/contracts';
 import { formatTimestamp } from '../labels';
 
 const formulaLead = /^[=+\-@\t\r]/;
@@ -17,10 +17,11 @@ function quote(field: string): string {
 }
 
 export function csvCell(row: DatabaseRow, def: PropertyDefinition): string {
-  if (def.type === 'number') { const value = cellValue(row, def); return value === undefined ? '' : String(value); }
-  if (def.type === 'checkbox') return cellValue(row, def) === true ? '✓' : '';
-  if (def.type === 'created_time' || def.type === 'updated_time') return formatTimestamp(String(cellValue(row, def) ?? ''));
-  if (def.type === 'date') return cellText(row, def);
+  const kind = effectiveType(def);
+  if (kind === 'number') { const value = cellValue(row, def); return value === undefined ? '' : String(value); }
+  if (kind === 'checkbox') return cellValue(row, def) === true ? '✓' : '';
+  if (kind === 'created_time' || kind === 'updated_time') return formatTimestamp(String(cellValue(row, def) ?? ''));
+  if (kind === 'date') return cellText(row, def);
   return guard(cellText(row, def));
 }
 

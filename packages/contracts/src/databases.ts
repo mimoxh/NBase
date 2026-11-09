@@ -8,7 +8,7 @@ export const pageKinds = ['document', 'database', 'row'] as const;
 export type PageKind = typeof pageKinds[number];
 
 export const propertyTypes = ['title', 'text', 'number', 'select', 'multi_select', 'date', 'checkbox', 'url',
-  'created_time', 'updated_time', 'relation'] as const;
+  'created_time', 'updated_time', 'relation', 'formula', 'rollup'] as const;
 export type PropertyType = typeof propertyTypes[number];
 
 /** Types whose value is stored in `row.properties`. Title lives in the page title; times come from the page. */
@@ -50,6 +50,26 @@ export interface PropertyDefinition {
   deletedAt?: string | null;
   /** Only for relation. The two sides of a link are a pair of properties; the owning side stores the row ids. */
   relation?: RelationConfig;
+  /** Only for formula. Field references are stored by id, so renaming a field cannot break it. */
+  formula?: { expression: string; resultType: ComputedResultType };
+  /** Only for rollup. */
+  rollup?: { relationPropertyId: string; targetPropertyId: string; fn: RollupFunction; resultType: ComputedResultType };
+}
+
+export const rollupFunctions = ['count', 'count_values', 'sum', 'avg', 'min', 'max'] as const;
+export type RollupFunction = typeof rollupFunctions[number];
+export type ComputedResultType = 'number' | 'text' | 'checkbox' | 'date';
+export const computedResultTypes = ['number', 'text', 'checkbox', 'date'] as const;
+
+export function isComputedProperty(def: PropertyDefinition): boolean {
+  return def.type === 'formula' || def.type === 'rollup';
+}
+
+/** The kind of value a property holds: computed properties behave like the type of their result. */
+export function effectiveType(def: PropertyDefinition): PropertyType {
+  if (def.type === 'formula') return def.formula?.resultType ?? 'text';
+  if (def.type === 'rollup') return def.rollup?.resultType ?? 'number';
+  return def.type;
 }
 
 export interface RelationConfig {
@@ -161,6 +181,8 @@ export interface DatabaseRow {
   updatedAt: string;
   /** Linked rows per relation property, only in responses that read rows of a database. */
   relations?: Record<string, RelationCell>;
+  /** Formula and rollup results; absent keys are empty. */
+  computed?: Record<string, string | number | boolean>;
 }
 
 export interface CreateRelationRequest {
@@ -285,7 +307,15 @@ export function isSelectOption(value: unknown): value is SelectOption {
 }
 
 export function isPropertyDefinition(value: unknown): value is PropertyDefinition {
-  if (!isRecord(value) || !hasOnly(value, ['id', 'name', 'type', 'options', 'deletedAt', 'relation'])) return false;
+  if (!isRecord(value) || !hasOnly(value, ['id', 'name', 'type', 'options', 'deletedAt', 'relation', 'formula', 'rollup'])) return false;
+  const result = (t: unknown) => (computedResultTypes as readonly unknown[]).includes(t);
+  if ((value.type === 'formula') !== (value.formula !== undefined)) return false;
+  if ((value.type === 'rollup') !== (value.rollup !== undefined)) return false;
+  if (value.formula !== undefined && !(isRecord(value.formula) && hasOnly(value.formula, ['expression', 'resultType'])
+    && typeof value.formula.expression === 'string' && value.formula.expression.length <= 4000 && result(value.formula.resultType))) return false;
+  if (value.rollup !== undefined && !(isRecord(value.rollup) && hasOnly(value.rollup, ['relationPropertyId', 'targetPropertyId', 'fn', 'resultType'])
+    && isDatabaseId(value.rollup.relationPropertyId) && isDatabaseId(value.rollup.targetPropertyId)
+    && (rollupFunctions as readonly unknown[]).includes(value.rollup.fn) && result(value.rollup.resultType))) return false;
   if (!isDatabaseId(value.id) || !isName(value.name) || !(propertyTypes as readonly unknown[]).includes(value.type)) return false;
   if (value.deletedAt !== undefined && value.deletedAt !== null && !isIsoTime(value.deletedAt)) return false;
   if ((value.type === 'relation') !== (value.relation !== undefined)) return false;
@@ -324,6 +354,9 @@ const operatorsByType: Record<PropertyType, readonly FilterOperator[]> = {
   updated_time: ['equals', 'gt', 'gte', 'lt', 'lte'],
   checkbox: ['is_checked', 'is_not_checked'],
   relation: ['contains', 'not_contains', 'is_empty', 'is_not_empty'],
+  // Computed properties use the operators of their result type; see effectiveType.
+  formula: [],
+  rollup: [],
 };
 
 export function filterOperatorsFor(type: PropertyType): readonly FilterOperator[] {
@@ -395,7 +428,7 @@ export function databaseSchemaProblem(properties: unknown, views: unknown): stri
   for (const view of list) {
     for (const filter of flatFilters(view.filters)) {
       const def = active.get(filter.propertyId);
-      if (!def || !operatorsByType[def.type].includes(filter.operator)) return 'view-filter';
+      if (!def || !operatorsByType[effectiveType(def)].includes(filter.operator)) return 'view-filter';
     }
     if (view.sorts.some(sort => !active.has(sort.propertyId))) return 'view-sort';
   }
@@ -446,6 +479,7 @@ export function viewColumns(properties: PropertyDefinition[], view: DatabaseView
 
 /** Raw comparable value for a property; undefined means empty. */
 export function cellValue(row: DatabaseRow, def: PropertyDefinition): PropertyValue | undefined {
+  if (isComputedProperty(def)) return row.computed?.[def.id];
   if (def.type === 'relation') {
     const cell = row.relations?.[def.id];
     return cell?.total ? cell.items.map(item => item.title) : undefined;
@@ -464,11 +498,11 @@ export function cellValue(row: DatabaseRow, def: PropertyDefinition): PropertyVa
 export function cellText(row: DatabaseRow, def: PropertyDefinition): string {
   const value = cellValue(row, def);
   if (value === undefined) return '';
+  if (typeof value === 'boolean') return value ? '✓' : '';
   if (def.type === 'select') return def.options?.find(option => option.id === value)?.name ?? '';
   if (def.type === 'multi_select') {
     return (value as string[]).map(id => def.options?.find(option => option.id === id)?.name).filter(Boolean).join(', ');
   }
-  if (def.type === 'checkbox') return value === true ? '✓' : '';
   if (def.type === 'relation') return (value as string[]).join(', ');
   return String(value);
 }
@@ -491,7 +525,7 @@ export function localDay(time: Date, timeZone?: string): string {
 
 /** Calendar day to compare. Page times are UTC instants, shown and filtered as the reader's local day. */
 function datePart(def: PropertyDefinition, value: PropertyValue, timeZone?: string): string {
-  if (def.type === 'date') return String(value);
+  if (effectiveType(def) === 'date') return String(value);
   const time = new Date(String(value));
   if (Number.isNaN(time.getTime())) return String(value).slice(0, 10);
   return localDay(time, timeZone);
@@ -540,7 +574,7 @@ export function resolveRelativeDate(token: string, today: string, weekStart: 0 |
 
 function isEmpty(row: DatabaseRow, def: PropertyDefinition): boolean {
   // Unchecked is a value of its own, so it follows the sort direction.
-  if (def.type === 'checkbox') return false;
+  if (effectiveType(def) === 'checkbox') return false;
   const value = cellValue(row, def);
   if (value === undefined) return true;
   if (def.type === 'select') return !def.options?.some(option => option.id === value);
@@ -567,15 +601,17 @@ export function resolveFilters(entries: readonly ViewFilterEntry[], properties: 
   const today = context.today ?? localDay(new Date(), context.timeZone);
   const resolve = (filter: ViewFilter): ResolvedCondition | null => {
     const def = active.get(filter.propertyId);
-    if (!def || !operatorsByType[def.type].includes(filter.operator)) return null;
+    if (!def) return null;
+    const kind = effectiveType(def);
+    if (!operatorsByType[kind].includes(filter.operator)) return null;
     if (!operatorNeedsValue(filter.operator)) return { def, operator: filter.operator };
     const value = filter.value;
     if (value === undefined || value === null || value === '') return null;
-    if (def.type === 'number') {
+    if (kind === 'number') {
       const target = Number(value);
       return Number.isFinite(target) ? { def, operator: filter.operator, target } : null;
     }
-    if (def.type === 'date' || def.type === 'created_time' || def.type === 'updated_time') {
+    if (kind === 'date' || kind === 'created_time' || kind === 'updated_time') {
       const text = String(value);
       if (!text.startsWith('@')) return { def, operator: filter.operator, target: text, days: { from: text, to: text } };
       const days = resolveRelativeDate(text.slice(1), today, context.weekStart);
@@ -596,7 +632,7 @@ function matches(row: DatabaseRow, condition: ResolvedCondition, context: QueryC
   if (op === 'is_checked') return cellValue(row, def) === true;
   if (op === 'is_not_checked') return cellValue(row, def) !== true;
   const value = cellValue(row, def);
-  switch (def.type) {
+  switch (effectiveType(def)) {
     case 'title': case 'text': case 'url': {
       const text = cellText(row, def).toLocaleLowerCase();
       const needle = String(target).toLocaleLowerCase();
@@ -643,7 +679,7 @@ function compare(a: DatabaseRow, b: DatabaseRow, def: PropertyDefinition): numbe
   const aEmpty = isEmpty(a, def);
   const bEmpty = isEmpty(b, def);
   if (aEmpty || bEmpty) return aEmpty === bEmpty ? 0 : aEmpty ? 1 : -1;
-  switch (def.type) {
+  switch (effectiveType(def)) {
     case 'number': return (av as number) - (bv as number);
     case 'checkbox': return Number(av === true) - Number(bv === true);
     case 'relation': return (a.relations?.[def.id]?.total ?? 0) - (b.relations?.[def.id]?.total ?? 0);
@@ -711,14 +747,14 @@ export function aggregateRows(rows: DatabaseRow[], properties: PropertyDefinitio
   const active = new Map(activeProperties(properties).map(p => [p.id, p]));
   return items.map(({ propertyId, fn }) => {
     const def = active.get(propertyId);
-    if (!def || !aggregatesFor(def.type).includes(fn)) return null;
+    if (!def || !aggregatesFor(effectiveType(def)).includes(fn)) return null;
     if (fn === 'count') return rows.length;
     const filled = rows.filter(row => !isEmpty(row, def));
     if (fn === 'count_values') return filled.length;
     if (fn === 'count_empty') return rows.length - filled.length;
     if (!filled.length) return null;
     const values = filled.map(row => cellValue(row, def)!);
-    if (def.type === 'number') {
+    if (effectiveType(def) === 'number') {
       const numbers = values as number[];
       if (fn === 'sum') return numbers.reduce((a, b) => a + b, 0);
       if (fn === 'avg') return numbers.reduce((a, b) => a + b, 0) / numbers.length;
@@ -778,6 +814,8 @@ export interface DatabaseQueryResponse {
   rows: DatabaseRow[];
   schemaRevision: string;
   groups?: DatabaseRowGroup[];
+  /** Formulas or rollups are still being recalculated, so filtering on them may be briefly out of date. */
+  computedStale?: boolean;
 }
 
 export interface BulkRowPatch {

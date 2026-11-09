@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { cellValue, isUrlValue, type DatabaseRow, type PropertyDefinition, type PropertyValue,
+import { cellValue, effectiveType, isComputedProperty, isUrlValue, type DatabaseRow, type PropertyDefinition, type PropertyValue,
   type SelectOption } from '@nbase/contracts';
 import { Popover } from '../components/Popover';
 import { formatNumber, formatTimestamp } from './labels';
@@ -12,8 +12,10 @@ export function OptionTag({ option }: { option: SelectOption }) {
 /** Read-only rendering of a cell, used both in the table and in the row property panel. */
 export function CellValue({ row, def }: { row: DatabaseRow; def: PropertyDefinition }) {
   const value = cellValue(row, def);
-  if (value === undefined) return def.type === 'checkbox' ? <span className="nb-db-check" aria-label="未勾选" /> : null;
-  switch (def.type) {
+  const kind = effectiveType(def);
+  if (value === undefined) return kind === 'checkbox' ? <span className="nb-db-check" aria-label="未勾选" /> : null;
+  if (kind === 'checkbox' && value !== true) return <span className="nb-db-check" aria-label="未勾选" />;
+  switch (kind) {
     case 'relation': {
       const cell = row.relations![def.id]!;
       return <span className="nb-db-tags">{cell.items.map(item => <span key={item.id} className="nb-db-tag nb-db-color-default">{item.title || '未命名'}</span>)}
@@ -133,7 +135,7 @@ export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOp
   const [editing, setEditing] = useState(false);
   const [invalid, setInvalid] = useState('');
   useEffect(() => { if (!invalid) return; const timer = setTimeout(() => setInvalid(''), 3000); return () => clearTimeout(timer); }, [invalid]);
-  const readOnlyType = def.type === 'created_time' || def.type === 'updated_time';
+  const readOnlyType = def.type === 'created_time' || def.type === 'updated_time' || isComputedProperty(def);
   const value = cellValue(row, def);
   if (!editable || readOnlyType || (def.type === 'relation' && !relationHost)) return <CellValue row={row} def={def} />;
   if (def.type === 'relation') {

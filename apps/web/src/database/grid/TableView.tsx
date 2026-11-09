@@ -80,7 +80,7 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
               {view.sorts.some(s => s.propertyId === def.id) && <span className="nb-db-sorted">
                 {view.sorts.find(s => s.propertyId === def.id)!.direction === 'asc' ? '↑' : '↓'}</span>}
             </button>
-            {panel?.kind === 'header' && panel.id === def.id && <HeaderMenu def={def} view={view} state={state}
+            {panel?.kind === 'header' && panel.id === def.id && <HeaderMenu def={def} view={view} state={state} source={source}
               onClose={() => setPanel(null)} onSaveProperties={onSave} />}
           </span>
           {canWrite && <span className="nb-db-resize" role="separator" aria-orientation="vertical" aria-label={`调整「${def.name}」列宽`}
@@ -93,7 +93,10 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
             {panel?.kind === 'add-property' && <Popover label="添加字段" className="nb-db-pop" portal width={200} onClose={() => setPanel(null)}>
               <div className="nb-db-menu">{creatableTypes.map(type => <button key={type} onClick={() => onAddProperty(type)}>
                 <span className="nb-db-glyph">{typeGlyphs[type]}</span>{typeLabels[type]}</button>)}
-                <button onClick={() => setPanel({ kind: 'add-relation' })}><span className="nb-db-glyph">{typeGlyphs.relation}</span>{typeLabels.relation}…</button></div>
+                <button onClick={() => setPanel({ kind: 'add-relation' })}><span className="nb-db-glyph">{typeGlyphs.relation}</span>{typeLabels.relation}…</button>
+                <button onClick={() => onAddProperty('formula')}><span className="nb-db-glyph">{typeGlyphs.formula}</span>{typeLabels.formula}</button>
+                <button disabled={!state.doc?.properties.some(p => p.type === 'relation' && !p.deletedAt)} title="需要先添加关联字段" onClick={() => onAddProperty('rollup')}>
+                  <span className="nb-db-glyph">{typeGlyphs.rollup}</span>{typeLabels.rollup}</button></div>
             </Popover>}
           </span>
         </th>}

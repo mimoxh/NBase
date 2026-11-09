@@ -1,5 +1,5 @@
 import { useEffect, useState, type RefObject } from 'react';
-import { aggregatesFor, type AggregateFunction, type AggregateItem, type DatabaseQueryRequest, type DatabaseView as View, type PropertyDefinition } from '@nbase/contracts';
+import { aggregatesFor, effectiveType, type AggregateFunction, type AggregateItem, type DatabaseQueryRequest, type DatabaseView as View, type PropertyDefinition } from '@nbase/contracts';
 import { Popover } from '../../components/Popover';
 import { aggregateLabels, formatNumber, formatTimestamp } from '../labels';
 import type { DatabaseDataSource } from '../source';
@@ -53,7 +53,7 @@ export function AggregateBar({ source, databaseId, request, view, columns, canWr
             {open === def.id && <Popover label={`${def.name}的统计`} className="nb-db-pop" portal width={160} onClose={() => setOpen(null)}>
               <div className="nb-db-menu">
                 <button onClick={() => set(def, null)}>不统计</button>
-                {aggregatesFor(def.type).map(item => <button key={item} onClick={() => set(def, item)}>{aggregateLabels[item]}</button>)}
+                {aggregatesFor(effectiveType(def)).map(item => <button key={item} onClick={() => set(def, item)}>{aggregateLabels[item]}</button>)}
               </div>
             </Popover>}
           </span>

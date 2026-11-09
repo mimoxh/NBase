@@ -1,4 +1,4 @@
-import { aggregateRows, databaseQueryWindow, databaseSchemaProblem, evaluateView, groupRows, isGroupableProperty, rowValueProblem, type DatabaseDocument, type DatabaseRow,
+import { aggregateRows, computeRow, isComputedProperty, type RollupSource, databaseQueryWindow, databaseSchemaProblem, evaluateView, groupRows, isGroupableProperty, rowValueProblem, type DatabaseDocument, type DatabaseRow,
   type DatabaseView, type PropertyDefinition, type PropertyValue, type RelationCell } from '@nbase/contracts';
 import { workspaceReducer, type Action, type Page, type Workspace } from '../workspace/model';
 import { DatabaseSourceError, type DatabaseDataSource } from './source';
@@ -49,7 +49,28 @@ export function createDemoSource(options: {
           && (p.properties?.[pairedPropertyId] as string[] | undefined)?.includes(page.id));
       if (others.length) relations[def.id] = { total: others.length, items: others.map(p => ({ id: p.id, title: p.title })) };
     }
-    return Object.keys(relations).length ? { ...result, relations } : result;
+    const withLinks = Object.keys(relations).length ? { ...result, relations } : result;
+    const properties = parent?.database?.properties ?? [];
+    if (!properties.some(p => isComputedProperty(p) && !p.deletedAt)) return withLinks;
+    return { ...withLinks, computed: computeRow(withLinks, properties, rollupSources(page, properties)) };
+  };
+  /** The linked rows each rollup of this row reads. */
+  const rollupSources = (page: Page, properties: PropertyDefinition[]) => {
+    const sources = new Map<string, RollupSource>();
+    for (const def of properties) {
+      if (def.type !== 'rollup' || def.deletedAt) continue;
+      const relation = properties.find(p => p.id === def.rollup!.relationPropertyId && !p.deletedAt);
+      const linkedSchema = relation?.relation && options.state.current.pages.find(p => p.id === relation.relation!.databaseId)?.database?.properties;
+      const target = linkedSchema?.find(p => p.id === def.rollup!.targetPropertyId && !p.deletedAt) ?? (def.rollup!.fn === 'count' ? relation : undefined);
+      if (!relation?.relation || !linkedSchema || !target) continue;
+      const { databaseId, pairedPropertyId, owner } = relation.relation;
+      const value = page.properties?.[relation.id];
+      const others = owner ? (Array.isArray(value) ? value : []).flatMap(id => activeRow(id) ?? [])
+        : options.state.current.pages.filter(p => p.parentId === databaseId && p.kind === 'row' && !p.deleted
+          && (p.properties?.[pairedPropertyId] as string[] | undefined)?.includes(page.id));
+      sources.set(def.id, { rows: others.map(rowOf), schema: linkedSchema, target });
+    }
+    return sources;
   };
   const rowsOf = (id: string) => options.state.current.pages.filter(p => p.parentId === id && !p.deleted && p.kind === 'row').map(withRelations);
   return {

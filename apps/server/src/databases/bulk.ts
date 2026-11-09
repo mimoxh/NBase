@@ -3,6 +3,7 @@ import { databaseRowLimit, type DatabaseBulkRequest, type DatabaseBulkResponse, 
 import type { PoolClient } from 'pg';
 import { extractDocumentIndex } from '../pages/search-text.js';
 import { PageError } from '../pages/repository.js';
+import { markRowsChanged } from './computed.js';
 import { loadDatabaseSchema, mergeRowProperties, RowPropertiesError, rowIndexText, syncRelationLinks } from './schema.js';
 
 type RowResult = DatabaseBulkResponse['rows'];
@@ -49,6 +50,7 @@ export async function applyBulk(client: PoolClient, workspaceId: string, actorId
     [workspaceId, databaseId, JSON.stringify(emptyContent), body.rows.map(() => randomUUID()), body.rows.map(row => row.title),
       values.map(value => rowIndexText('', properties, value)), values.map(value => JSON.stringify(value))]);
     await snapshot(client, workspaceId, inserted.rows.map(row => row.id), actorId, 'create');
+    await markRowsChanged(client, workspaceId, databaseId, properties, inserted.rows.map(row => row.id));
     return done(resultRows(inserted.rows));
   }
 
@@ -79,6 +81,7 @@ export async function applyBulk(client: PoolClient, workspaceId: string, actorId
       RETURNING p.id, p.revision::text AS revision, p.updated_at`,
     [workspaceId, databaseId, merged.map(row => row.id), merged.map(row => row.title), merged.map(row => JSON.stringify(row.values)), merged.map(row => row.search)]);
     await snapshot(client, workspaceId, updated.rows.map(row => row.id), actorId, 'update');
+    await markRowsChanged(client, workspaceId, databaseId, properties, updated.rows.map(row => row.id));
     return done(resultRows(updated.rows));
   }
 
@@ -89,6 +92,7 @@ export async function applyBulk(client: PoolClient, workspaceId: string, actorId
       WHERE workspace_id = $1 AND parent_id = $2 AND id = ANY($3::uuid[]) AND deleted_at IS NULL AND kind = 'row'
       RETURNING id, revision::text AS revision, updated_at`, [workspaceId, databaseId, body.ids]);
     await snapshot(client, workspaceId, trashed.rows.map(row => row.id), actorId, 'trash');
+    await markRowsChanged(client, workspaceId, databaseId, properties, trashed.rows.map(row => row.id));
     return done(resultRows(trashed.rows));
   }
 
@@ -114,5 +118,6 @@ export async function applyBulk(client: PoolClient, workspaceId: string, actorId
     [workspaceId, inserted.rows.map(row => row.id)]);
   await syncRelationLinks(client, workspaceId, properties, copied.rows.map(row => ({ id: row.id, values: row.row_properties })));
   await snapshot(client, workspaceId, inserted.rows.map(row => row.id), actorId, 'create');
+  await markRowsChanged(client, workspaceId, databaseId, properties, inserted.rows.map(row => row.id));
   return done(resultRows(inserted.rows));
 }

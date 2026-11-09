@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type CompositionEvent, type FormEvent, type KeyboardEvent, type MouseEvent, type RefObject } from 'react';
-import type { BulkRowPatch, DatabaseRow, PropertyDefinition, PropertyValue } from '@nbase/contracts';
+import { isComputedProperty, type BulkRowPatch, type DatabaseRow, type PropertyDefinition, type PropertyValue } from '@nbase/contracts';
 import { setCellEditSeed, type CellNavigation } from '../cells';
 import type { RowStore } from '../rowStore';
 import { cellClipboardText, parseCellText, parseTsv, toTsv } from './clipboard';
@@ -14,7 +14,7 @@ function rangeOf(anchor: GridPoint, focus: GridPoint): GridRange {
 }
 
 function isReadOnly(def: PropertyDefinition): boolean {
-  return def.type === 'created_time' || def.type === 'updated_time';
+  return def.type === 'created_time' || def.type === 'updated_time' || isComputedProperty(def);
 }
 
 /** Cells that take a value by paste or clear; a relation changes only through its picker. */
