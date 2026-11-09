@@ -8,13 +8,15 @@ import { DocumentEditor } from '../editor/DocumentEditor';
 import { placePage, type PagePlacement } from '../shell/pageOrder';
 import { readingMenuItems, useReadingPrefs } from '../shell/readingPrefs';
 import { SourceEditorDialog } from '../editor/SourceEditorDialog';
-import { createContentFromMarkdown, markdownFromContent, parseMarkdownImport } from '../editor/markdown';
+import { addMarkdownFrontMatter, createContentFromMarkdown, markdownFromContent, parseMarkdownImport } from '../editor/markdown';
 import type { AttachmentPickKind, DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
 import { ApiError, attachmentClient, loadPageTree, pageClient, tagClient } from './client';
+import { downloadBlob } from './fileDownload';
+import { packageFolderSubtree } from './folderExport';
 import type { PropertyValue } from '@nbase/contracts';
 import { LazyDatabaseView as DatabaseView, LazyRowPanel as RowPanel } from '../database/lazy';
 import { createPersistentSource, databaseClient, rowFromPage } from '../database/persistentSource';
-import { announceDatabaseChange } from '../database/source';
+import { announceDatabaseChange, requestDatabaseExport } from '../database/source';
 import { draftKey, draftVersion, localDrafts, sameDraftVersion,
   type LocalPageDraft, type LocalPendingAction, type LocalPendingCreate, type LocalPendingNoteWrite } from './drafts';
 import { useNoteWrites } from './useNoteWrites';
@@ -684,6 +686,17 @@ export function PersistentWorkspace() {
     trashRow: row => beginPageActionRef.current('trash', row.id, row.revision, row.title, undefined, true),
     onRowSaved: page => { if (docsRef.current.has(page.id)) upsertPage(page); },
     onRowsChanged: ids => { for (const id of ids) docsRef.current.delete(id); },
+    packageRows: async (doc, rows, csv) => {
+      const encoder = new TextEncoder();
+      const summaries: PageSummary[] = [doc.page, ...rows.map(row => ({ id: row.id, workspaceId: workspace.id, parentId: doc.page.id, title: row.title, icon: row.icon,
+        cover: null, kind: 'row' as const, revision: row.revision, createdAt: row.createdAt, updatedAt: row.updatedAt }))];
+      const blob = await packageFolderSubtree({ rootPageId: doc.page.id, pages: summaries,
+        fetchPage: id => pageClient.get(workspace.id, id), fetchAttachment: id => attachmentClient.download(workspace.id, id),
+        formatMarkdown: page => addMarkdownFrontMatter(markdownFromContent(page.content as DocumentContent), page.content, page.title || '未命名页面', []),
+        extraEntries: [{ name: 'rows.csv', bytes: encoder.encode(csv) }, { name: 'database.json',
+          bytes: encoder.encode(JSON.stringify({ properties: doc.properties, views: doc.views }, null, 2)) }] });
+      downloadBlob(doc.page.title || '未命名数据库', blob, '.zip');
+    },
   }) : null, [session, workspace, canWrite, readOnly]);
   const databaseEmbedding = useMemo(() => databaseSource ? {
     source: databaseSource, databases: databaseChoices,
@@ -894,6 +907,7 @@ export function PersistentWorkspace() {
   };
   const pageMenuItems: (MenuItem | 'divider')[] = current?.kind === 'database' ? [
     { key: 'move', label: '移动到…', icon: 'folder', disabled: currentLocked || !canWrite, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialog('move'); } },
+    { key: 'export', label: '导入导出…', icon: 'download', onSelect: () => requestDatabaseExport(current.id) },
     'divider',
     { key: 'trash', label: '移入回收站（含所有行）', icon: 'trash', danger: true, disabled: currentLocked || !canWrite, onSelect: () => setDialog('delete') },
   ] : current?.kind === 'row' ? [

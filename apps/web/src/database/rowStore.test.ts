@@ -135,6 +135,24 @@ describe('row store', () => {
     expect(store.rowAt(0)?.id).toBe('r2');
   });
 
+  it('resumes an import with the same mutation ids and does not resend finished chunks', async () => {
+    const { store, source } = setup(['a']);
+    store.setQuery(emptyRequest, titleId, true);
+    await flush();
+    const chunks = [[{ title: '一', properties: {} }], [{ title: '二', properties: {} }], [{ title: '三', properties: {} }]];
+    const ids = ['m1', 'm2', 'm3'];
+    source.bulk.mockClear();
+    source.bulk.mockImplementationOnce(async () => ({ pageId: 'db', rows: [] }));
+    source.bulk.mockRejectedValueOnce(new Error('lost'));
+    const first = store.importChunks(chunks, ids, 0, () => undefined);
+    await vi.runAllTimersAsync();
+    expect(await first).toBe(1);
+    const second = store.importChunks(chunks, ids, 1, () => undefined);
+    await vi.runAllTimersAsync();
+    expect(await second).toBe(3);
+    expect(source.bulk.mock.calls.map(call => (call[1] as unknown as { clientMutationId: string }).clientMutationId)).toEqual(['m1', 'm2', 'm2', 'm3']);
+  });
+
   it('reports a failed save and re-reads', async () => {
     const { store, source } = setup(['a']);
     store.setQuery(emptyRequest, titleId, true);

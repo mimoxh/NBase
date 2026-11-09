@@ -28,6 +28,8 @@ export interface DatabaseDataSource {
   updateRow(rowId: string, expectedRevision: string, patch: RowPatch): Promise<DatabaseRow>;
   moveRow(databaseId: string, rowId: string, afterRowId: string | null): Promise<void>;
   trashRow(row: DatabaseRow): Promise<void>;
+  /** Builds and downloads a ZIP of the rows' bodies with the given CSV. Absent where bodies cannot be packaged. */
+  packageRows?(doc: DatabaseDocument, rows: DatabaseRow[], csv: string): Promise<void>;
   openRow(rowId: string): void;
   openDatabase(databaseId: string): void;
   notice(text: string): void;
@@ -50,6 +52,20 @@ export function subscribeDatabase(databaseId: string, listener: Listener): () =>
   set.add(listener);
   listeners.set(databaseId, set);
   return () => { set.delete(listener); if (!set.size) listeners.delete(databaseId); };
+}
+
+const exportRequests = new Map<string, Set<() => void>>();
+
+/** Lets the page menu open the export menu of a database shown below it. */
+export function requestDatabaseExport(databaseId: string): void {
+  for (const listener of exportRequests.get(databaseId) ?? []) listener();
+}
+
+export function subscribeDatabaseExport(databaseId: string, listener: () => void): () => void {
+  const set = exportRequests.get(databaseId) ?? new Set();
+  set.add(listener);
+  exportRequests.set(databaseId, set);
+  return () => { set.delete(listener); if (!set.size) exportRequests.delete(databaseId); };
 }
 
 const conflictCodes = new Set(['REVISION_CONFLICT', 'MUTATION_CONFLICT']);

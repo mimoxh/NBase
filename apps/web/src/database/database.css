@@ -122,6 +122,11 @@
 .nb-db-color-grid { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 0; }
 .nb-db-color-grid button { border: 0; cursor: pointer; }
 .nb-db-color-grid button[aria-pressed="true"] { box-shadow: var(--nb-ring); }
+.nb-db-import { overflow: auto; max-height: 50vh; border: 1px solid var(--nb-line); border-radius: 6px; margin: 8px 0; }
+.nb-db-import-table { border-collapse: collapse; font-size: 13px; min-width: 100%; }
+.nb-db-import-table th, .nb-db-import-table td { padding: 4px 8px; border-bottom: 1px solid var(--nb-line); text-align: left; min-width: 130px; max-width: 240px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
+.nb-db-import-head { font-weight: 600; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; }
 .nb-db-invalid-note { color: var(--nb-danger); font-size: 12px; margin: 2px; }
 .nb-db-table .nb-db-cell-inner { overflow: hidden; }
 .nb-db-table .nb-db-tags { flex-wrap: nowrap; overflow: hidden; }

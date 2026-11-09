@@ -5,6 +5,7 @@ import { Icon } from '../components/Icon';
 import { BulkBar } from './BulkBar';
 import { OptionTag } from './cells';
 import { TableView } from './grid/TableView';
+import { DataMenu } from './io/DataMenu';
 import { nextOptionColor, operatorLabel, typeLabels } from './labels';
 import type { Panel } from './panel';
 import { useRowStore } from './rowStore';
@@ -79,6 +80,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
   const updateView = (patch: Partial<View>) => save(properties, doc.views.map(item => item.id === view.id ? { ...item, ...patch } : item));
   const selectView = (id: string) => { setLocalViewId(id); setSelectedRows(new Set()); onViewChange?.(id); };
   const closePanel = () => setPanel(null);
+  const openData = () => setPanel({ kind: 'data' });
 
   const addProperty = (type: PropertyType) => {
     if (active.length >= databasePropertyLimit) return;
@@ -139,6 +141,8 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
           onOpen={() => setPanel({ kind: 'props' })} onClose={closePanel} onUpdate={patch => void updateView(patch)}
           onRestore={id => void save(properties.map(p => p.id === id ? { id: p.id, name: p.name, type: p.type,
             ...(p.options ? { options: p.options } : {}) } : p))} />
+        {!compact && <DataMenu source={source} state={state} store={store} doc={doc} view={view} databaseId={databaseId} canWrite={canWrite}
+          open={panel?.kind === 'data'} onOpen={openData} onClose={closePanel} />}
         {canWrite && <button className="nb-btn nb-btn-primary nb-db-new" onClick={() => void addRow()}><Icon name="plus" size={14} />新建</button>}
       </div>
     </div>

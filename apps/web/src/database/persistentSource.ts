@@ -59,6 +59,8 @@ export interface PersistentSourceOptions {
   onRowSaved?: (page: PageDocument) => void;
   /** Bulk writes only report revisions, so cached pages of these rows are dropped. */
   onRowsChanged?: (rowIds: string[]) => void;
+  /** The workspace owns attachment access and Markdown formatting for the ZIP export. */
+  packageRows?: (doc: DatabaseDocument, rows: DatabaseRow[], csv: string) => Promise<void>;
 }
 
 export function createPersistentSource(options: PersistentSourceOptions): DatabaseDataSource {
@@ -90,6 +92,7 @@ export function createPersistentSource(options: PersistentSourceOptions): Databa
     },
     moveRow: (_databaseId, rowId, afterRowId) => pageClient.setPosition(workspaceId, rowId, afterRowId, csrfToken),
     trashRow: row => options.trashRow(row),
+    ...(options.packageRows ? { packageRows: options.packageRows } : {}),
     openRow: rowId => options.openPage(rowId),
     openDatabase: databaseId => options.openPage(databaseId),
     notice: options.notice,

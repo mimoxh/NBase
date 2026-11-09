@@ -284,6 +284,27 @@ export class RowStore {
     } catch (failure) { this.fail(failure, '批量修改未全部完成。'); return false; }
   }
 
+  /**
+   * Creates rows from fixed chunks with fixed mutation ids, so resuming after a failure cannot create a row
+   * twice. Returns how many chunks are done.
+   */
+  async importChunks(chunks: { title: string; properties: RowProperties }[][], mutationIds: string[], from: number,
+    onProgress: (done: number) => void): Promise<number> {
+    let done = from;
+    try {
+      for (; done < chunks.length; done += 1) {
+        await this.source.bulk(this.databaseId, { clientMutationId: mutationIds[done]!, operation: 'create', rows: chunks[done]! });
+        onProgress(done + 1);
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+    } catch (failure) {
+      this.source.notice(failureText(failure, '导入中断。'));
+    }
+    await this.refresh();
+    announceDatabaseChange(this.databaseId, this.origin);
+    return done;
+  }
+
   async trashRows(ids: string[], onProgress?: (done: number) => void): Promise<boolean> {
     await this.settled(ids);
     const gone = new Set<string>();

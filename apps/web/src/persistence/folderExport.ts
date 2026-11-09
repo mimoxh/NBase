@@ -12,6 +12,8 @@ interface FolderExportOptions {
   fetchPage: (id: string) => Promise<PageDocument>;
   fetchAttachment: (id: string) => Promise<Blob>;
   formatMarkdown: (page: PageDocument) => string | Promise<string>;
+  /** Extra files for the root of the package, such as a database's rows.csv. */
+  extraEntries?: ZipEntry[];
 }
 
 function exportPagePath(id: string): string {
@@ -95,6 +97,7 @@ export async function packageFolderSubtree(options: FolderExportOptions): Promis
     manifest.pages.push({ path, parentPath: page.id === options.rootPageId || !page.parentId ? null : paths.get(page.parentId) ?? null,
       title: page.title, ...(hasAttachmentPresentation(presentations) ? { presentations } : {}) });
   }
+  for (const entry of options.extraEntries ?? []) add(entry.name, entry.bytes);
   add('manifest.json', encoder.encode(JSON.stringify(manifest, null, 2)));
   return zipEntries(entries);
 }

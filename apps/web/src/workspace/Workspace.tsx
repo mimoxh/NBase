@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type Cha
 import { defaultDatabaseSchema, type PageCoverId, type PageSummary } from '@nbase/contracts';
 import { LazyDatabaseView as DatabaseView, LazyRowPanel as RowPanel } from '../database/lazy';
 import { createDemoSource } from '../database/demoSource';
-import { announceDatabaseChange } from '../database/source';
+import { announceDatabaseChange, requestDatabaseExport } from '../database/source';
 import { DocumentEditor } from '../editor/DocumentEditor';
 import { SourceEditorDialog } from '../editor/SourceEditorDialog';
 import { createContentFromMarkdown, parseMarkdownImport } from '../editor/markdown';
@@ -294,6 +294,7 @@ export function WorkspaceApp() {
   const target = dialogFor ? state.pages.find(p => p.id === dialogFor) : undefined;
   const pageMenuItems: (MenuItem | 'divider')[] = current?.kind === 'database' ? [
     { key: 'move', label: '移动到…', icon: 'folder', onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialogFor(current.id); setDialog('move'); } },
+    { key: 'export', label: '导入导出…', icon: 'download', onSelect: () => requestDatabaseExport(current.id) },
     'divider',
     { key: 'trash', label: '移入回收站（含所有行）', icon: 'trash', danger: true, onSelect: () => { setDialogFor(current.id); setDialog('delete'); } },
   ] : current ? [
