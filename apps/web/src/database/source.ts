@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { DatabaseAggregateRequest, DatabaseAggregateResponse, DatabaseBulkRequest, DatabaseBulkResponse, DatabaseDocument, DatabaseQueryRequest, DatabaseQueryResponse, DatabaseRow, DatabaseSchemaResponse, DatabaseView,
+import type { ChangeRelationRequest, ChangeRelationResponse, CreateRelationRequest, DatabaseOption, DatabaseAggregateRequest, DatabaseAggregateResponse, DatabaseBulkRequest, DatabaseBulkResponse, DatabaseDocument, DatabaseQueryRequest, DatabaseQueryResponse, DatabaseRow, DatabaseSchemaResponse, DatabaseView,
   PropertyDefinition, PropertyValue, RowProperties } from '@nbase/contracts';
 
 export interface RowPatch {
@@ -21,7 +21,10 @@ export interface DatabaseDataSource {
   /** Schema and views; rows come from `query`. */
   load(databaseId: string, signal?: AbortSignal): Promise<DatabaseDocument>;
   query(databaseId: string, request: DatabaseQueryRequest): Promise<DatabaseQueryResponse>;
-  readRows(databaseId: string, ids: string[]): Promise<DatabaseRow[]>;
+  readRows(databaseId: string, ids: string[], relationPreview?: number): Promise<DatabaseRow[]>;
+  listDatabases(): Promise<DatabaseOption[]>;
+  createRelation(databaseId: string, request: CreateRelationRequest): Promise<DatabaseSchemaResponse>;
+  changeRelation(databaseId: string, rowId: string, propertyId: string, request: ChangeRelationRequest): Promise<ChangeRelationResponse>;
   bulk(databaseId: string, request: DatabaseBulkRequest): Promise<DatabaseBulkResponse>;
   aggregate(databaseId: string, request: DatabaseAggregateRequest): Promise<DatabaseAggregateResponse>;
   saveSchema(databaseId: string, schema: DatabaseSchema, expectedRevision: string): Promise<DatabaseSchemaResponse>;

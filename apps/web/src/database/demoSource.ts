@@ -1,5 +1,5 @@
 import { aggregateRows, databaseQueryWindow, databaseSchemaProblem, evaluateView, groupRows, isGroupableProperty, rowValueProblem, type DatabaseDocument, type DatabaseRow,
-  type DatabaseView, type PropertyValue } from '@nbase/contracts';
+  type DatabaseView, type PropertyDefinition, type PropertyValue, type RelationCell } from '@nbase/contracts';
 import { workspaceReducer, type Action, type Page, type Workspace } from '../workspace/model';
 import { DatabaseSourceError, type DatabaseDataSource } from './source';
 
@@ -34,9 +34,62 @@ export function createDemoSource(options: {
     if (!page?.parentId) throw new DatabaseSourceError('NOT_FOUND', '这一行已不存在。');
     return page;
   };
-  const rowsOf = (id: string) => options.state.current.pages.filter(p => p.parentId === id && !p.deleted && p.kind === 'row').map(rowOf);
+  const activeRow = (id: string) => options.state.current.pages.find(p => p.id === id && !p.deleted && p.kind === 'row');
+  /** Rows with their linked rows; the demo has no link table, so the paired side is found by scanning. */
+  const withRelations = (page: Page): DatabaseRow => {
+    const result = rowOf(page);
+    const parent = options.state.current.pages.find(p => p.id === page.parentId);
+    const relations: Record<string, RelationCell> = {};
+    for (const def of parent?.database?.properties ?? []) {
+      if (def.type !== 'relation' || def.deletedAt || !def.relation) continue;
+      const { databaseId, pairedPropertyId, owner } = def.relation;
+      const value = page.properties?.[def.id];
+      const others = owner ? (Array.isArray(value) ? value : []).flatMap(id => activeRow(id) ?? [])
+        : options.state.current.pages.filter(p => p.parentId === databaseId && p.kind === 'row' && !p.deleted
+          && (p.properties?.[pairedPropertyId] as string[] | undefined)?.includes(page.id));
+      if (others.length) relations[def.id] = { total: others.length, items: others.map(p => ({ id: p.id, title: p.title })) };
+    }
+    return Object.keys(relations).length ? { ...result, relations } : result;
+  };
+  const rowsOf = (id: string) => options.state.current.pages.filter(p => p.parentId === id && !p.deleted && p.kind === 'row').map(withRelations);
   return {
     canWrite: true,
+    listDatabases: async () => options.state.current.pages.filter(p => p.kind === 'database' && !p.deleted).map(p => ({ id: p.id, title: p.title, icon: p.icon })),
+    createRelation: async (id, request) => {
+      const target = request.targetDatabaseId;
+      const ownerId = crypto.randomUUID();
+      const pairedId = crypto.randomUUID();
+      const owner: PropertyDefinition = { id: ownerId, name: request.name, type: 'relation', relation: { databaseId: target, pairedPropertyId: pairedId, owner: true } };
+      const paired: PropertyDefinition = { id: pairedId, name: request.pairedName, type: 'relation', relation: { databaseId: id, pairedPropertyId: ownerId, owner: false } };
+      if (target !== id) {
+        const other = database(target).schema;
+        apply({ type: 'db-schema', id: target, properties: [...other.properties, paired], views: other.views });
+      }
+      const { schema } = database(id);
+      const properties = [...schema.properties, owner, ...(target === id ? [paired] : [])];
+      apply({ type: 'db-schema', id, properties, views: schema.views });
+      return { pageId: id, properties, views: schema.views, schemaRevision: String(schema.revision + 1) };
+    },
+    changeRelation: async (id, rowId, propertyId, request) => {
+      const def = database(id).schema.properties.find(p => p.id === propertyId);
+      if (!def?.relation) throw new DatabaseSourceError('PROPERTY_INVALID', '字段不存在。');
+      const now = new Date().toISOString();
+      const edit = (ownerId: string, key: string, add: string[], remove: string[]) => {
+        const page = row(ownerId);
+        const ids = new Set((page.properties?.[key] as string[] | undefined) ?? []);
+        remove.forEach(item => ids.delete(item));
+        add.forEach(item => ids.add(item));
+        apply({ type: 'row-update', id: ownerId, at: now, properties: { [key]: ids.size ? [...ids] : null } });
+      };
+      if (def.relation.owner) edit(rowId, def.id, request.add, request.remove);
+      else {
+        request.add.forEach(ownerId => edit(ownerId, def.relation!.pairedPropertyId, [rowId], []));
+        request.remove.forEach(ownerId => edit(ownerId, def.relation!.pairedPropertyId, [], [rowId]));
+      }
+      const touched = (def.relation.owner ? [rowId] : [...request.add, ...request.remove])
+        .map(item => ({ id: item, revision: String(row(item).revision ?? 1), updatedAt: now }));
+      return { pageId: id, row: withRelations(row(rowId)), touched, otherDatabaseId: def.relation.databaseId };
+    },
     query: async (id, request) => {
       const { schema } = database(id);
       const all = rowsOf(id);

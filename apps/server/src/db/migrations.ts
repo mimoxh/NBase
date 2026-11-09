@@ -345,4 +345,21 @@ ALTER TABLE databases ADD COLUMN search_cursor uuid;
 CREATE COLLATION nbase_zh (provider = icu, locale = 'zh-Hans-CN-u-kn-true-ks-level1', deterministic = false);
 `,
   },
+  {
+    version: 16,
+    name: 'database_row_links',
+    sql: `
+-- Derived from the owning row's row_properties, like page_links from page content.
+CREATE TABLE database_row_links (
+  workspace_id uuid NOT NULL,
+  property_id uuid NOT NULL,
+  source_row_id uuid NOT NULL,
+  target_row_id uuid NOT NULL,
+  PRIMARY KEY (workspace_id, property_id, source_row_id, target_row_id),
+  FOREIGN KEY (workspace_id, source_row_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT,
+  FOREIGN KEY (workspace_id, target_row_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT
+);
+CREATE INDEX database_row_links_target_idx ON database_row_links (workspace_id, property_id, target_row_id, source_row_id);
+`,
+  },
 ];

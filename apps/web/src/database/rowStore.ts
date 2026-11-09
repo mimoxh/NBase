@@ -362,6 +362,26 @@ export class RowStore {
     return created;
   }
 
+  /** Links or unlinks rows from either side of a relation. Throws so the picker can report a failure. */
+  async changeRelation(rowId: string, propertyId: string, add: string[], remove: string[]): Promise<void> {
+    await this.settled([rowId]);
+    const result = await this.source.changeRelation(this.databaseId, rowId, propertyId, { clientMutationId: crypto.randomUUID(), add, remove });
+    this.rows.set(rowId, result.row);
+    for (const saved of result.touched) {
+      const current = this.rows.get(saved.id);
+      if (current && saved.id !== rowId) this.rows.set(saved.id, { ...current, revision: saved.revision, updatedAt: saved.updatedAt });
+    }
+    if (this.request && [...flatFilters(this.request.filters), ...this.request.sorts].some(item => item.propertyId === propertyId)) this.orderStale = true;
+    this.emit();
+    // In a self-relation the other end is in this table too, so those rows are read again.
+    if (result.otherDatabaseId === this.databaseId) {
+      for (const id of [...add, ...remove]) { if (id !== rowId && !this.queues.has(id)) this.rows.delete(id); }
+      this.scheduleFetch();
+    }
+    announceDatabaseChange(this.databaseId, this.origin);
+    if (result.otherDatabaseId !== this.databaseId) announceDatabaseChange(result.otherDatabaseId);
+  }
+
   async trashRow(rowId: string): Promise<void> {
     const row = this.rows.get(rowId);
     if (!row) return;

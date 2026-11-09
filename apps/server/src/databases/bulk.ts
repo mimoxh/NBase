@@ -3,7 +3,7 @@ import { databaseRowLimit, type DatabaseBulkRequest, type DatabaseBulkResponse, 
 import type { PoolClient } from 'pg';
 import { extractDocumentIndex } from '../pages/search-text.js';
 import { PageError } from '../pages/repository.js';
-import { loadDatabaseSchema, mergeRowProperties, RowPropertiesError, rowIndexText } from './schema.js';
+import { loadDatabaseSchema, mergeRowProperties, RowPropertiesError, rowIndexText, syncRelationLinks } from './schema.js';
 
 type RowResult = DatabaseBulkResponse['rows'];
 type Snapshot = (client: PoolClient, workspaceId: string, ids: string[], actorId: string, operation: 'create' | 'update' | 'trash') => Promise<void>;
@@ -109,6 +109,10 @@ export async function applyBulk(client: PoolClient, workspaceId: string, actorId
   await client.query(`INSERT INTO page_links (workspace_id, source_page_id, target_page_id, occurrence, snippet)
     SELECT l.workspace_id, v.copy, l.target_page_id, l.occurrence, l.snippet FROM unnest($2::uuid[], $3::uuid[]) AS v(source, copy)
     JOIN page_links l ON l.workspace_id = $1 AND l.source_page_id = v.source JOIN pages p ON p.workspace_id = $1 AND p.id = v.copy`, [workspaceId, sources, copies]);
+  // A copy points at the same rows as its source; paired fields are not copied, since they belong to the other side.
+  const copied = await client.query<{ id: string; row_properties: RowProperties }>(`SELECT id, row_properties FROM pages WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
+    [workspaceId, inserted.rows.map(row => row.id)]);
+  await syncRelationLinks(client, workspaceId, properties, copied.rows.map(row => ({ id: row.id, values: row.row_properties })));
   await snapshot(client, workspaceId, inserted.rows.map(row => row.id), actorId, 'create');
   return done(resultRows(inserted.rows));
 }

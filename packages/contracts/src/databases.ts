@@ -8,7 +8,7 @@ export const pageKinds = ['document', 'database', 'row'] as const;
 export type PageKind = typeof pageKinds[number];
 
 export const propertyTypes = ['title', 'text', 'number', 'select', 'multi_select', 'date', 'checkbox', 'url',
-  'created_time', 'updated_time'] as const;
+  'created_time', 'updated_time', 'relation'] as const;
 export type PropertyType = typeof propertyTypes[number];
 
 /** Types whose value is stored in `row.properties`. Title lives in the page title; times come from the page. */
@@ -24,6 +24,10 @@ export const databaseViewLimit = 20;
 export const databaseConditionLimit = 20;
 export const databaseRowLimit = 30000;
 export const databaseBulkLimit = 500;
+/** Rows one relation cell of the owning side may point to. */
+export const databaseRelationLimit = 500;
+/** Related rows returned with each row; `total` tells how many there are. */
+export const databaseRelationPreview = 5;
 export const databaseNameLimit = 100;
 export const databaseTextValueLimit = 2000;
 export const databaseUrlValueLimit = 2048;
@@ -44,6 +48,19 @@ export interface PropertyDefinition {
   options?: SelectOption[];
   /** Soft delete keeps row values so the property can be restored. */
   deletedAt?: string | null;
+  /** Only for relation. The two sides of a link are a pair of properties; the owning side stores the row ids. */
+  relation?: RelationConfig;
+}
+
+export interface RelationConfig {
+  databaseId: string;
+  pairedPropertyId: string;
+  owner: boolean;
+}
+
+export interface RelationCell {
+  items: { id: string; title: string }[];
+  total: number;
 }
 
 export type PropertyValue = string | number | boolean | string[];
@@ -142,6 +159,49 @@ export interface DatabaseRow {
   revision: string;
   createdAt: string;
   updatedAt: string;
+  /** Linked rows per relation property, only in responses that read rows of a database. */
+  relations?: Record<string, RelationCell>;
+}
+
+export interface CreateRelationRequest {
+  clientMutationId: string;
+  targetDatabaseId: string;
+  name: string;
+  pairedName: string;
+}
+
+export interface ChangeRelationRequest {
+  clientMutationId: string;
+  add: string[];
+  remove: string[];
+}
+
+export interface ChangeRelationResponse {
+  pageId: string;
+  /** The edited row, with its relation cell re-read. */
+  row: DatabaseRow;
+  /** Owning rows whose revision changed. */
+  touched: { id: string; revision: string; updatedAt: string }[];
+  /** Other database affected, for refreshing its open views. */
+  otherDatabaseId: string;
+}
+
+export interface DatabaseOption { id: string; title: string; icon: string | null }
+
+function isRelationConfig(value: unknown): value is RelationConfig {
+  return isRecord(value) && hasOnly(value, ['databaseId', 'pairedPropertyId', 'owner']) && isDatabaseId(value.databaseId)
+    && isDatabaseId(value.pairedPropertyId) && typeof value.owner === 'boolean';
+}
+
+export function isCreateRelationRequest(value: unknown): value is CreateRelationRequest {
+  return isRecord(value) && hasOnly(value, ['clientMutationId', 'targetDatabaseId', 'name', 'pairedName'])
+    && isDatabaseId(value.clientMutationId) && isDatabaseId(value.targetDatabaseId) && isName(value.name) && isName(value.pairedName);
+}
+
+export function isChangeRelationRequest(value: unknown): value is ChangeRelationRequest {
+  if (!isRecord(value) || !hasOnly(value, ['clientMutationId', 'add', 'remove']) || !isDatabaseId(value.clientMutationId)) return false;
+  const list = (ids: unknown) => Array.isArray(ids) && ids.length <= 100 && ids.every(isDatabaseId);
+  return list(value.add) && list(value.remove) && ((value.add as string[]).length + (value.remove as string[]).length > 0);
 }
 
 export interface DatabaseDocument {
@@ -225,9 +285,11 @@ export function isSelectOption(value: unknown): value is SelectOption {
 }
 
 export function isPropertyDefinition(value: unknown): value is PropertyDefinition {
-  if (!isRecord(value) || !hasOnly(value, ['id', 'name', 'type', 'options', 'deletedAt'])) return false;
+  if (!isRecord(value) || !hasOnly(value, ['id', 'name', 'type', 'options', 'deletedAt', 'relation'])) return false;
   if (!isDatabaseId(value.id) || !isName(value.name) || !(propertyTypes as readonly unknown[]).includes(value.type)) return false;
   if (value.deletedAt !== undefined && value.deletedAt !== null && !isIsoTime(value.deletedAt)) return false;
+  if ((value.type === 'relation') !== (value.relation !== undefined)) return false;
+  if (value.relation !== undefined && !isRelationConfig(value.relation)) return false;
   if (value.options === undefined) return true;
   if (!Array.isArray(value.options) || value.options.length > databaseOptionLimit) return false;
   if (!value.options.every(isSelectOption)) return false;
@@ -261,6 +323,7 @@ const operatorsByType: Record<PropertyType, readonly FilterOperator[]> = {
   created_time: ['equals', 'gt', 'gte', 'lt', 'lte'],
   updated_time: ['equals', 'gt', 'gte', 'lt', 'lte'],
   checkbox: ['is_checked', 'is_not_checked'],
+  relation: ['contains', 'not_contains', 'is_empty', 'is_not_empty'],
 };
 
 export function filterOperatorsFor(type: PropertyType): readonly FilterOperator[] {
@@ -383,6 +446,10 @@ export function viewColumns(properties: PropertyDefinition[], view: DatabaseView
 
 /** Raw comparable value for a property; undefined means empty. */
 export function cellValue(row: DatabaseRow, def: PropertyDefinition): PropertyValue | undefined {
+  if (def.type === 'relation') {
+    const cell = row.relations?.[def.id];
+    return cell?.total ? cell.items.map(item => item.title) : undefined;
+  }
   if (def.type === 'title') return row.title.trim() ? row.title : undefined;
   if (def.type === 'created_time') return row.createdAt;
   if (def.type === 'updated_time') return row.updatedAt;
@@ -402,6 +469,7 @@ export function cellText(row: DatabaseRow, def: PropertyDefinition): string {
     return (value as string[]).map(id => def.options?.find(option => option.id === id)?.name).filter(Boolean).join(', ');
   }
   if (def.type === 'checkbox') return value === true ? '✓' : '';
+  if (def.type === 'relation') return (value as string[]).join(', ');
   return String(value);
 }
 
@@ -553,6 +621,11 @@ function matches(row: DatabaseRow, condition: ResolvedCondition, context: QueryC
       const has = Array.isArray(value) && value.includes(String(target));
       return op === 'contains' ? has : op === 'not_contains' ? !has : true;
     }
+    case 'relation': {
+      const needle = String(target).toLocaleLowerCase();
+      const has = Array.isArray(value) && value.some(title => title.toLocaleLowerCase().includes(needle));
+      return op === 'contains' ? has : !has;
+    }
     case 'date': case 'created_time': case 'updated_time': {
       if (value === undefined) return false;
       const day = datePart(def, value, context.timeZone);
@@ -573,6 +646,7 @@ function compare(a: DatabaseRow, b: DatabaseRow, def: PropertyDefinition): numbe
   switch (def.type) {
     case 'number': return (av as number) - (bv as number);
     case 'checkbox': return Number(av === true) - Number(bv === true);
+    case 'relation': return (a.relations?.[def.id]?.total ?? 0) - (b.relations?.[def.id]?.total ?? 0);
     case 'select': case 'multi_select': {
       const rank = (value: PropertyValue | undefined) => {
         const first = Array.isArray(value) ? value[0] : value;

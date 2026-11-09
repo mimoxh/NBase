@@ -17,6 +17,11 @@ function isReadOnly(def: PropertyDefinition): boolean {
   return def.type === 'created_time' || def.type === 'updated_time';
 }
 
+/** Cells that take a value by paste or clear; a relation changes only through its picker. */
+function acceptsValue(def: PropertyDefinition): boolean {
+  return !isReadOnly(def) && def.type !== 'relation';
+}
+
 /** Spreadsheet-style cursor and range. Keys, IME text and clipboard all land in one hidden input that follows the cursor. */
 export function useGrid({ store, columns, rowCount, canWrite, notice, rootRef, bodyRef }: {
   store: RowStore; columns: PropertyDefinition[]; rowCount: number; canWrite: boolean; notice: (text: string) => void;
@@ -105,7 +110,7 @@ export function useGrid({ store, columns, rowCount, canWrite, notice, rootRef, b
     const cells: { row: number; col: number; value: null }[] = [];
     for (let row = range.top; row <= range.bottom; row += 1) {
       editableColumns(range.left, range.right).forEach((def, offset) => {
-        if (!isReadOnly(def)) cells.push({ row, col: range.left + offset, value: null });
+        if (acceptsValue(def)) cells.push({ row, col: range.left + offset, value: null });
       });
     }
     writeCells(cells);
@@ -144,7 +149,7 @@ export function useGrid({ store, columns, rowCount, canWrite, notice, rootRef, b
         const col = range.left + x;
         const def = columns[col];
         if (row >= rowCount || !def) { clipped += 1; continue; }
-        if (isReadOnly(def)) { invalid += 1; continue; }
+        if (!acceptsValue(def)) { invalid += 1; continue; }
         if (def.type === 'title') { cells.push({ row, col, value: text }); continue; }
         const parsed = parseCellText(def, text);
         if (parsed.ok) cells.push({ row, col, value: parsed.value }); else invalid += 1;

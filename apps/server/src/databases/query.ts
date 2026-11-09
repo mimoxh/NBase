@@ -2,6 +2,7 @@ import { localDay, resolveFilters, activeProperties, aggregatesFor, databaseQuer
   type DatabaseAggregateResponse, type DatabaseRowGroup, type DatabaseQueryRequest, type DatabaseQueryResponse,
   type DatabaseRow, type PropertyDefinition, type QueryContext, type ResolvedCondition, type ViewSort } from '@nbase/contracts';
 import type { Pool, PoolClient } from 'pg';
+import { loadRelationCells } from './relations.js';
 import { databaseRow, type RowRecord } from './schema.js';
 
 /**
@@ -73,6 +74,7 @@ function dayOf(sql: Sql, def: PropertyDefinition, timeZone: string): string {
 
 function emptyOf(sql: Sql, def: PropertyDefinition): string {
   switch (def.type) {
+    case 'relation': return `NOT EXISTS ${relationSubquery(sql, def, '1')}`;
     case 'title': case 'text': case 'url': return `(${textOf(sql, def)} IS NULL)`;
     case 'number': return `(${numberOf(sql, def)} IS NULL)`;
     case 'date': return `(${dateValueOf(sql, def)} IS NULL)`;
@@ -97,6 +99,10 @@ function conditionSql(sql: Sql, condition: ResolvedCondition, timeZone: string):
   if (op === 'is_checked') return checkedOf(sql, def);
   if (op === 'is_not_checked') return `NOT ${checkedOf(sql, def)}`;
   switch (def.type) {
+    case 'relation': {
+      const has = `EXISTS ${relationSubquery(sql, def, '1', ` AND position(lower(${sql.add(target, 'text')}) in lower(o.title)) > 0`)}`;
+      return op === 'contains' ? has : `NOT ${has}`;
+    }
     case 'title': case 'text': case 'url': {
       const text = `lower(COALESCE(${textOf(sql, def)}, ''))`;
       const needle = `lower(${sql.add(target, 'text')})`;
@@ -133,6 +139,7 @@ function sortSql(sql: Sql, def: PropertyDefinition, direction: 'asc' | 'desc'): 
   const nullsLast = (expression: string) => `${expression} ${dir} NULLS LAST`;
   switch (def.type) {
     case 'number': return nullsLast(numberOf(sql, def));
+    case 'relation': return nullsLast(`NULLIF(${relationSubquery(sql, def, 'count(*)')}, 0)`);
     case 'checkbox': return `${checkedOf(sql, def)} ${dir}`;
     case 'date': return nullsLast(`(${dateValueOf(sql, def)} COLLATE "C")`);
     case 'created_time': return `date_trunc('milliseconds', p.created_at) ${dir}`;
@@ -183,13 +190,22 @@ async function resolveZone(client: Pick<PoolClient, 'query'>, workspaceId: strin
   return row.rows[0]?.zone ?? 'UTC';
 }
 
-async function rowsById(client: Pick<PoolClient, 'query'>, workspaceId: string, databaseId: string, ids: string[]): Promise<DatabaseRow[]> {
+async function rowsById(client: Pick<PoolClient, 'query'>, workspaceId: string, databaseId: string, ids: string[], properties: PropertyDefinition[], relationPreview?: number): Promise<DatabaseRow[]> {
   if (!ids.length) return [];
   const result = await client.query<RowRecord>(`SELECT ${rowColumns} FROM pages p
     WHERE p.workspace_id = $1 AND p.parent_id = $2 AND p.id = ANY($3::uuid[]) AND p.deleted_at IS NULL AND p.kind = 'row'`,
   [workspaceId, databaseId, ids]);
-  const byId = new Map(result.rows.map(row => [row.id, databaseRow(row)]));
+  const cells = await loadRelationCells(client, workspaceId, properties, ids, relationPreview);
+  const byId = new Map(result.rows.map(row => [row.id, { ...databaseRow(row), ...(cells.has(row.id) ? { relations: cells.get(row.id)! } : {}) }]));
   return ids.flatMap(id => { const row = byId.get(id); return row ? [row] : []; });
+}
+
+function relationSubquery(sql: Sql, def: PropertyDefinition, select: string, extra = ''): string {
+  const relation = def.relation!;
+  const propertyId = sql.add(relation.owner ? def.id : relation.pairedPropertyId, 'uuid');
+  const [self, other] = relation.owner ? ['source_row_id', 'target_row_id'] : ['target_row_id', 'source_row_id'];
+  return `(SELECT ${select} FROM database_row_links l JOIN pages o ON o.workspace_id = l.workspace_id AND o.id = l.${other} AND o.deleted_at IS NULL
+    WHERE l.workspace_id = p.workspace_id AND l.property_id = ${propertyId} AND l.${self} = p.id${extra})`;
 }
 
 /** Keeps a few heavy reads from taking every pooled connection that document saves also need. */
@@ -259,7 +275,7 @@ export function runDatabaseQuery(pool: Pool, workspaceId: string, actorId: strin
     }
     const allRows = where ? (await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM pages
       WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL AND kind = 'row'`, [workspaceId, databaseId])).rows[0]!.n : ids.length;
-    return { order: ids, total: ids.length, allRows, rows: await rowsById(client, workspaceId, databaseId, ids.slice(0, databaseQueryWindow)),
+    return { order: ids, total: ids.length, allRows, rows: await rowsById(client, workspaceId, databaseId, ids.slice(0, databaseQueryWindow), head.properties_json),
       schemaRevision: head.schema_revision, ...(groups ? { groups } : {}) };
   }));
 }
@@ -297,9 +313,9 @@ export function runDatabaseAggregate(pool: Pool, workspaceId: string, actorId: s
   }));
 }
 
-export function readDatabaseRows(pool: Pool, workspaceId: string, actorId: string, databaseId: string, ids: string[]): Promise<DatabaseRow[] | null> {
+export function readDatabaseRows(pool: Pool, workspaceId: string, actorId: string, databaseId: string, ids: string[], relationPreview?: number): Promise<DatabaseRow[] | null> {
   return readTransaction(pool, async client => {
     const head = await loadHead(client, workspaceId, actorId, databaseId);
-    return head ? rowsById(client, workspaceId, databaseId, ids) : null;
+    return head ? rowsById(client, workspaceId, databaseId, ids, head.properties_json, relationPreview) : null;
   });
 }

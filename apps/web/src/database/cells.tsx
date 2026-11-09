@@ -3,6 +3,7 @@ import { cellValue, isUrlValue, type DatabaseRow, type PropertyDefinition, type 
   type SelectOption } from '@nbase/contracts';
 import { Popover } from '../components/Popover';
 import { formatNumber, formatTimestamp } from './labels';
+import { RelationEditor, type RelationHost } from './RelationEditor';
 
 export function OptionTag({ option }: { option: SelectOption }) {
   return <span className={`nb-db-tag nb-db-color-${option.color}`}>{option.name}</span>;
@@ -13,6 +14,11 @@ export function CellValue({ row, def }: { row: DatabaseRow; def: PropertyDefinit
   const value = cellValue(row, def);
   if (value === undefined) return def.type === 'checkbox' ? <span className="nb-db-check" aria-label="未勾选" /> : null;
   switch (def.type) {
+    case 'relation': {
+      const cell = row.relations![def.id]!;
+      return <span className="nb-db-tags">{cell.items.map(item => <span key={item.id} className="nb-db-tag nb-db-color-default">{item.title || '未命名'}</span>)}
+        {cell.total > cell.items.length && <span className="nb-db-muted">+{cell.total - cell.items.length}</span>}</span>;
+    }
     case 'title': return <span className="nb-db-title-text">{String(value)}</span>;
     case 'number': return <span className="nb-db-number">{formatNumber(value as number)}</span>;
     case 'checkbox': return <span className="nb-db-check checked" aria-label="已勾选">✓</span>;
@@ -37,7 +43,7 @@ let editSeed: string | null = null;
 /** Text typed on a selected cell, picked up by the editor that opens next. */
 export function setCellEditSeed(text: string): void { editSeed = text; }
 
-function takeCellEditSeed(): string | null {
+export function takeCellEditSeed(): string | null {
   const seed = editSeed;
   editSeed = null;
   return seed;
@@ -116,8 +122,9 @@ export function SelectEditor({ def, value, multiple, onChange, onCreateOption, o
  * Click-to-edit cell. Checkbox toggles at once; text-like types use an inline input; select
  * types open a picker. Values reach `onChange` already typed; null clears the cell.
  */
-export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOption, onNavigate }: {
+export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOption, onNavigate, relationHost }: {
   row: DatabaseRow; def: PropertyDefinition; editable: boolean;
+  relationHost?: RelationHost | undefined;
   onChange: (value: PropertyValue | null) => void;
   onTitle: (title: string) => void;
   onCreateOption?: ((name: string) => Promise<string | null>) | undefined;
@@ -128,7 +135,13 @@ export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOp
   useEffect(() => { if (!invalid) return; const timer = setTimeout(() => setInvalid(''), 3000); return () => clearTimeout(timer); }, [invalid]);
   const readOnlyType = def.type === 'created_time' || def.type === 'updated_time';
   const value = cellValue(row, def);
-  if (!editable || readOnlyType) return <CellValue row={row} def={def} />;
+  if (!editable || readOnlyType || (def.type === 'relation' && !relationHost)) return <CellValue row={row} def={def} />;
+  if (def.type === 'relation') {
+    return <>
+      <button className="nb-db-cell-button" aria-label={`编辑${def.name}`} onClick={() => setEditing(true)}><CellValue row={row} def={def} /></button>
+      {editing && <RelationEditor row={row} def={def} host={relationHost!} onClose={() => { setEditing(false); onNavigate?.('stay'); }} />}
+    </>;
+  }
   if (def.type === 'checkbox') {
     return <button className="nb-db-cell-button" role="checkbox" aria-checked={value === true} aria-label={def.name}
       onClick={() => onChange(value === true ? null : true)}><CellValue row={row} def={def} /></button>;

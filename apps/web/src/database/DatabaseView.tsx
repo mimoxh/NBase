@@ -2,6 +2,7 @@ import { lazy, Suspense, useMemo, useState, type ReactNode } from 'react';
 import { activeProperties, databasePropertyLimit, databaseViewLimit, isCalendarProperty, isFilterGroup, isGroupableProperty, localDay, operatorNeedsValue, viewColumns, type DatabaseQueryRequest, type DatabaseRow,
   type DatabaseView as View, type DatabaseViewType, type PropertyDefinition, type PropertyType, type PropertyValue, type QueryContext, type RelativeDateToken, type RowProperties, type ViewFilter } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
+import { AddRelationDialog } from './AddRelationDialog';
 import { BulkBar } from './BulkBar';
 import { OptionTag } from './cells';
 import { TableView } from './grid/TableView';
@@ -9,7 +10,7 @@ import { DataMenu } from './io/DataMenu';
 import { monthBounds, nextOptionColor, operatorLabel, relativeDateLabels, typeLabels } from './labels';
 import type { Panel } from './panel';
 import { useRowStore } from './rowStore';
-import { useDatabase, type DatabaseDataSource } from './source';
+import { announceDatabaseChange, useDatabase, type DatabaseDataSource } from './source';
 import { FieldsPanel } from './toolbar/FieldsPanel';
 import { FilterPanel } from './toolbar/FilterPanel';
 import { SortPanel } from './toolbar/SortPanel';
@@ -169,7 +170,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
         <FieldsPanel view={view} properties={properties} active={active} canWrite={canWrite} open={panel?.kind === 'props'}
           onOpen={() => setPanel({ kind: 'props' })} onClose={closePanel} onUpdate={patch => void updateView(patch)}
           onRestore={id => void save(properties.map(p => p.id === id ? { id: p.id, name: p.name, type: p.type,
-            ...(p.options ? { options: p.options } : {}) } : p))} />
+            ...(p.options ? { options: p.options } : {}), ...(p.relation ? { relation: p.relation } : {}) } : p))} />
         {!compact && <DataMenu source={source} state={state} store={store} doc={doc} view={view} databaseId={databaseId} canWrite={canWrite}
           open={panel?.kind === 'data'} onOpen={openData} onClose={closePanel} />}
         {canWrite && <button className="nb-btn nb-btn-primary nb-db-new" onClick={() => void addRow()}><Icon name="plus" size={14} />新建</button>}
@@ -188,6 +189,11 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
       rowCount={compact ? Math.min(limit, store.total) : store.total} windowed={!compact} canAddProperty={active.length < databasePropertyLimit}
       panel={panel} setPanel={setPanel} selected={selectedRows} onSelect={setSelectedRows} onUpdateView={patch => void updateView(patch)}
       onSave={(next, views) => void save(next, views)} onAddProperty={addProperty} onCell={setCell} onCreateOption={createOption} />}
+    {panel?.kind === 'add-relation' && <AddRelationDialog source={source} doc={doc} onClose={closePanel} onCreated={other => {
+      closePanel();
+      void state.reload().then(() => { void store.refresh(); });
+      announceDatabaseChange(other);
+    }} />}
     <div className="nb-db-foot">
       {canWrite && view.type === 'table' && <button className="nb-db-add-row" onClick={() => void addRow()}><Icon name="plus" size={14} />新建一行</button>}
       <span className="nb-db-count">{store.loading ? '正在读取…' : store.total === store.allRows ? `共 ${store.allRows} 行`

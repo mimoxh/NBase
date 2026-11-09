@@ -92,7 +92,8 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
               onClick={() => setPanel({ kind: 'add-property' })}><Icon name="plus" size={14} /></button>
             {panel?.kind === 'add-property' && <Popover label="添加字段" className="nb-db-pop" portal width={200} onClose={() => setPanel(null)}>
               <div className="nb-db-menu">{creatableTypes.map(type => <button key={type} onClick={() => onAddProperty(type)}>
-                <span className="nb-db-glyph">{typeGlyphs[type]}</span>{typeLabels[type]}</button>)}</div>
+                <span className="nb-db-glyph">{typeGlyphs[type]}</span>{typeLabels[type]}</button>)}
+                <button onClick={() => setPanel({ kind: 'add-relation' })}><span className="nb-db-glyph">{typeGlyphs.relation}</span>{typeLabels.relation}…</button></div>
             </Popover>}
           </span>
         </th>}
@@ -136,6 +137,7 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
               className={`nb-db-cell nb-db-type-${def.type} ${frozenClass(col)} ${store.pending.has(pendingKey) ? 'pending' : ''} ${inRange(index, col) ? 'nb-db-in-range' : ''} ${cursor ? 'nb-db-cursor' : ''}`}>
               <span className="nb-db-anchor nb-db-cell-inner">
                 <EditableCell row={row} def={def} editable={canWrite} onNavigate={grid.navigate}
+                  relationHost={{ source, databaseId: store.databaseId, change: (add, remove) => store.changeRelation(row.id, def.id, add, remove) }}
                   onChange={value => onCell(row, def, value)}
                   onTitle={title => void store.updateRow(row.id, { title: title.slice(0, 255) })}
                   onCreateOption={canWrite ? onCreateOption(def) : undefined} />

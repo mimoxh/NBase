@@ -55,7 +55,7 @@ export function HeaderMenu({ def, view, state, onClose, onSaveProperties }: {
     onClose={() => { commitName(); onClose(); }}>
     <input className="nb-db-input" aria-label="字段名称" value={name} maxLength={100} onChange={event => setName(event.target.value)}
       onBlur={commitName} onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) { commitName(); onClose(); } }} />
-    {def.type !== 'title' && <label className="nb-db-field-row">类型
+    {def.type !== 'title' && def.type !== 'relation' && <label className="nb-db-field-row">类型
       <select className="nb-db-select" value={def.type} onChange={event => setType(event.target.value as PropertyType)}>
         {creatableTypes.map(type => <option key={type} value={type}>{typeLabels[type]}</option>)}
       </select></label>}

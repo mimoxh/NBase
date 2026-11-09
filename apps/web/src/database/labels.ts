@@ -2,13 +2,13 @@ import type { AggregateFunction, FilterOperator, OptionColor, PropertyType, Rela
 
 export const typeLabels: Record<PropertyType, string> = {
   title: '标题', text: '文本', number: '数字', select: '单选', multi_select: '多选', date: '日期',
-  checkbox: '复选框', url: '网址', created_time: '创建时间', updated_time: '更新时间',
+  checkbox: '复选框', url: '网址', created_time: '创建时间', updated_time: '更新时间', relation: '关联',
 };
 
 /** Short glyphs, so the header stays readable without an icon font. */
 export const typeGlyphs: Record<PropertyType, string> = {
   title: 'Aa', text: '≡', number: '#', select: '◉', multi_select: '☷', date: '▦',
-  checkbox: '☑', url: '↗', created_time: '◷', updated_time: '↻',
+  checkbox: '☑', url: '↗', created_time: '◷', updated_time: '↻', relation: '⇄',
 };
 
 /** Types a user can add or switch to; title is fixed and only one exists. */

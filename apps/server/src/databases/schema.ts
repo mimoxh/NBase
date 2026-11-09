@@ -30,6 +30,25 @@ export class RowPropertiesError extends Error {
   constructor(public readonly reason: string) { super('PROPERTY_INVALID'); }
 }
 
+/** Rebuilds the derived link rows of owning rows from their stored id arrays, dropping ids that no longer exist. */
+export async function syncRelationLinks(client: Pick<PoolClient, 'query'>, workspaceId: string, properties: PropertyDefinition[],
+  rows: { id: string; values: RowProperties }[]): Promise<void> {
+  for (const def of properties) {
+    if (def.type !== 'relation' || !def.relation?.owner) continue;
+    const pairs = rows.flatMap(row => {
+      const value = row.values[def.id];
+      return (Array.isArray(value) ? value : []).map(target => ({ source: row.id, target }));
+    });
+    await client.query('DELETE FROM database_row_links WHERE workspace_id = $1 AND property_id = $2 AND source_row_id = ANY($3::uuid[])',
+      [workspaceId, def.id, rows.map(row => row.id)]);
+    if (!pairs.length) continue;
+    await client.query(`INSERT INTO database_row_links (workspace_id, property_id, source_row_id, target_row_id)
+      SELECT $1, $2, v.source, v.target FROM unnest($3::uuid[], $4::uuid[]) AS v(source, target)
+      JOIN pages t ON t.workspace_id = $1 AND t.id = v.target AND t.parent_id = $5 AND t.kind = 'row' ON CONFLICT DO NOTHING`,
+    [workspaceId, def.id, pairs.map(pair => pair.source), pairs.map(pair => pair.target), def.relation.databaseId]);
+  }
+}
+
 /** Validates a patch against the current schema and returns the merged values. */
 export function mergeRowProperties(properties: PropertyDefinition[], current: RowProperties,
   patch: Record<string, PropertyValue | null>): RowProperties {

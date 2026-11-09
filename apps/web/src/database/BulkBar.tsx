@@ -5,7 +5,7 @@ import { Popover } from '../components/Popover';
 import { EditableCell } from './cells';
 import type { RowStore } from './rowStore';
 
-const editable = (def: PropertyDefinition) => def.type !== 'created_time' && def.type !== 'updated_time';
+const editable = (def: PropertyDefinition) => def.type !== 'created_time' && def.type !== 'updated_time' && def.type !== 'relation';
 
 /** Actions for the rows ticked in the table. */
 export function BulkBar({ store, properties, selected, onClear, canSort, notice }: {

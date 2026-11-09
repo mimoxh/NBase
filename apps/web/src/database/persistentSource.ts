@@ -1,7 +1,7 @@
-import { databaseSchemaProblem, type CreateDatabaseRequest, type DatabaseAggregateResponse, type DatabaseBulkResponse, type DatabaseDocument, type DatabaseQueryRequest, type DatabaseQueryResponse, type DatabaseRow,
+import { databaseSchemaProblem, type ChangeRelationResponse, type CreateDatabaseRequest, type DatabaseAggregateResponse, type DatabaseBulkResponse, type DatabaseDocument, type DatabaseQueryRequest, type DatabaseQueryResponse, type DatabaseRow,
   type DatabaseRowsResponse, type DatabaseSchemaResponse, type PageDocument, type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
 import { createContentFromMarkdown } from '../editor/markdown';
-import { ApiError, pageClient, request, workspacePath } from '../persistence/client';
+import { ApiError, loadPageTree, pageClient, request, workspacePath } from '../persistence/client';
 import type { DatabaseDataSource, RowPatch } from './source';
 
 function isDatabaseDocument(value: unknown): value is DatabaseDocument {
@@ -36,8 +36,9 @@ export const databaseClient = {
   },
   query: (workspaceId: string, databaseId: string, body: DatabaseQueryRequest, csrfToken: string) =>
     request<DatabaseQueryResponse>(`${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/query`, 'POST', body, csrfToken),
-  readRows: async (workspaceId: string, databaseId: string, ids: string[], csrfToken: string) =>
-    (await request<DatabaseRowsResponse>(`${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/rows/read`, 'POST', { ids }, csrfToken)).rows,
+  readRows: async (workspaceId: string, databaseId: string, ids: string[], csrfToken: string, relationPreview?: number) =>
+    (await request<DatabaseRowsResponse>(`${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/rows/read`, 'POST',
+      { ids, ...(relationPreview ? { relationPreview } : {}) }, csrfToken)).rows,
   create: (workspaceId: string, body: CreateDatabaseRequest, csrfToken: string) =>
     withReceipt(workspaceId, body.clientMutationId, () =>
       request<DatabaseDocument>(`${workspacePath(workspaceId)}/databases`, 'POST', body, csrfToken)),
@@ -69,7 +70,16 @@ export function createPersistentSource(options: PersistentSourceOptions): Databa
     canWrite: options.canWrite,
     load: (databaseId, signal) => databaseClient.get(workspaceId, databaseId, signal),
     query: (databaseId, body) => databaseClient.query(workspaceId, databaseId, body, csrfToken),
-    readRows: (databaseId, ids) => databaseClient.readRows(workspaceId, databaseId, ids, csrfToken),
+    readRows: (databaseId, ids, relationPreview) => databaseClient.readRows(workspaceId, databaseId, ids, csrfToken, relationPreview),
+    listDatabases: async () => (await loadPageTree(workspaceId)).filter(page => page.kind === 'database').map(page => ({ id: page.id, title: page.title, icon: page.icon })),
+    createRelation: (databaseId, body) => withReceipt(workspaceId, body.clientMutationId, () => request<DatabaseSchemaResponse>(
+      `${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/relations`, 'POST', body, csrfToken)),
+    changeRelation: async (databaseId, rowId, propertyId, body) => {
+      const result = await withReceipt(workspaceId, body.clientMutationId, () => request<ChangeRelationResponse>(
+        `${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/rows/${encodeURIComponent(rowId)}/relations/${encodeURIComponent(propertyId)}`, 'POST', body, csrfToken));
+      options.onRowsChanged?.(result.touched.map(row => row.id));
+      return result;
+    },
     aggregate: (databaseId, body) => request<DatabaseAggregateResponse>(
       `${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/aggregate`, 'POST', body, csrfToken),
     bulk: async (databaseId, body) => {

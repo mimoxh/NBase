@@ -173,6 +173,7 @@
 .nb-db-more { border: 0; background: transparent; color: var(--nb-faint); font-size: 12px; cursor: pointer; padding: 0 4px; }
 .nb-db-day-list { display: flex; flex-direction: column; gap: 3px; max-height: 240px; overflow-y: auto; }
 @container (max-width: 720px) { .nb-db-day { min-height: 56px; } .nb-db-event { font-size: 11px; padding: 0 3px; } .nb-db-board-column { flex-basis: 220px; } }
+.nb-db-form-row { display: grid; grid-template-columns: 100px minmax(0, 1fr); align-items: center; gap: 8px; margin: 8px 0; color: var(--nb-muted); font-size: 13px; }
 .nb-db-invalid-note { color: var(--nb-danger); font-size: 12px; margin: 2px; }
 .nb-db-table .nb-db-cell-inner { overflow: hidden; }
 .nb-db-table .nb-db-tags { flex-wrap: nowrap; overflow: hidden; }

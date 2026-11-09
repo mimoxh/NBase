@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { databaseQueryWindow, databaseSchemaProblem, defaultDatabaseSchema, isDatabaseAggregateRequest, isDatabaseBulkRequest, isDatabaseQueryRequest, type CreateDatabaseRequest,
+import { databaseQueryWindow, databaseRelationLimit, databaseSchemaProblem, defaultDatabaseSchema, isChangeRelationRequest, isCreateRelationRequest, isDatabaseAggregateRequest, isDatabaseBulkRequest, isDatabaseQueryRequest,
+  type ChangeRelationResponse, type CreateDatabaseRequest,
   type DatabaseBulkResponse, type DatabaseDocument, type DatabaseSchemaResponse, type DatabaseView, type PageSummary, type PropertyDefinition,
   type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -11,6 +12,7 @@ import { isRevision, isUuid, PageError, type PgPageRepository } from '../pages/r
 import { sendError } from '../pages/routes.js';
 import { validatePageIcon } from '../pages/validate.js';
 import { applyBulk } from './bulk.js';
+import { changeRelation, createRelation, mirrorRelationDeletion, relationsUnchanged } from './relations.js';
 import { readDatabaseRows, runDatabaseAggregate, runDatabaseQuery } from './query.js';
 import { databaseRow, loadDatabaseSchema, searchProjection, type RowRecord } from './schema.js';
 import { DatabaseWorker, selectRowsForIndex, writeRowSearchText } from './worker.js';
@@ -125,6 +127,36 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
     } catch (error) { return sendError(request, reply, error, secure); }
   });
 
+  app.post<{ Params: DatabaseParams }>(`${base}/:pageId/relations`, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId } = request.params;
+      const actorId = await authorize(request, workspaceId, true);
+      if (!isUuid(request.params.pageId)) throw new PageError(404, 'NOT_FOUND');
+      const pageId = request.params.pageId.toLowerCase();
+      const body = request.body;
+      if (!isCreateRelationRequest(body)) requestError();
+      const result = await pages.mutate<DatabaseSchemaResponse>(workspaceId, actorId, body.clientMutationId, 'database-relation-create', pageId, body,
+        async client => ({ statusCode: 200, body: await createRelation(client, workspaceId, pageId, body) }), response => response.pageId);
+      return reply.code(result.statusCode).send(result.body);
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.post<{ Params: DatabaseParams & { rowId: string; propertyId: string } }>(`${base}/:pageId/rows/:rowId/relations/:propertyId`, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId } = request.params;
+      const actorId = await authorize(request, workspaceId, true);
+      if (![request.params.pageId, request.params.rowId, request.params.propertyId].every(isUuid)) throw new PageError(404, 'NOT_FOUND');
+      const [pageId, rowId, propertyId] = [request.params.pageId, request.params.rowId, request.params.propertyId].map(id => id.toLowerCase()) as [string, string, string];
+      const body = request.body;
+      if (!isChangeRelationRequest(body)) requestError();
+      const result = await pages.mutate<ChangeRelationResponse>(workspaceId, actorId, body.clientMutationId, 'database-relation-change', pageId, { rowId, propertyId, ...body },
+        async client => ({ statusCode: 200, body: await changeRelation(client, workspaceId, actorId, pageId, rowId, propertyId, body, pages.snapshot.bind(pages)) }), response => response.pageId);
+      return reply.code(result.statusCode).send(result.body);
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
   app.post<{ Params: DatabaseParams }>(`${base}/:pageId/aggregate`, async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     try {
@@ -162,7 +194,9 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
       if (!isUuid(pageId)) throw new PageError(404, 'NOT_FOUND');
       const body = request.body;
       if (!object(body) || !Array.isArray(body.ids) || body.ids.length > databaseQueryWindow || !body.ids.every(isUuid)) requestError();
-      const rows = await readDatabaseRows(pool, workspaceId, actorId, pageId.toLowerCase(), (body.ids as string[]).map(id => id.toLowerCase()));
+      const preview = body.relationPreview;
+      if (preview !== undefined && !(Number.isInteger(preview) && (preview as number) >= 1 && (preview as number) <= databaseRelationLimit)) requestError();
+      const rows = await readDatabaseRows(pool, workspaceId, actorId, pageId.toLowerCase(), (body.ids as string[]).map(id => id.toLowerCase()), preview as number | undefined);
       if (!rows) throw new PageError(404, 'NOT_FOUND');
       return reply.send({ rows });
     } catch (error) { return sendError(request, reply, error, secure); }
@@ -230,13 +264,15 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
               throw new PageError(422, 'DATABASE_SCHEMA_INVALID');
             }
           }
+          if (!relationsUnchanged(current.properties_json, body.properties)) throw new PageError(422, 'DATABASE_SCHEMA_INVALID');
+          const properties = await mirrorRelationDeletion(client, workspaceId, current.properties_json, body.properties);
           const updated = await client.query<{ revision: string }>(`UPDATE databases SET properties_json = $3::jsonb,
             views_json = $4::jsonb, revision = revision + 1, updated_at = now()
             WHERE workspace_id = $1 AND page_id = $2 RETURNING revision::text AS revision`,
-          [workspaceId, pageId, JSON.stringify(body.properties), JSON.stringify(body.views)]);
-          if (searchProjection(current.properties_json) !== searchProjection(body.properties)
-            && await reindexRows(client, workspaceId, pageId, body.properties)) backgroundWork = true;
-          return { statusCode: 200, body: { pageId, properties: body.properties, views: body.views,
+          [workspaceId, pageId, JSON.stringify(properties), JSON.stringify(body.views)]);
+          if (searchProjection(current.properties_json) !== searchProjection(properties)
+            && await reindexRows(client, workspaceId, pageId, properties)) backgroundWork = true;
+          return { statusCode: 200, body: { pageId, properties, views: body.views,
             schemaRevision: updated.rows[0]!.revision } };
         }, response => response.pageId);
       if (backgroundWork) worker.nudge();

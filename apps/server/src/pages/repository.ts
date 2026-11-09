@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { databaseRowLimit, pageBacklinkLimit, type PageBacklinksResponse, type PageKind, type RowProperties } from '@nbase/contracts';
-import { loadDatabaseSchema, mergeRowProperties, rowIndexText } from '../databases/schema.js';
+import { loadDatabaseSchema, mergeRowProperties, rowIndexText, syncRelationLinks } from '../databases/schema.js';
 import type { CreatePageRequest, FavoriteListResponse, PageCoverId, PageDocument, PageHistoryResponse, PageListResponse, PageStateRequest,
   PageSummary, PageTreeResponse, PageVersion, PageVersionOperation, PageVersionSummary, RestorePageVersionRequest,
   SearchResponse, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest } from '@nbase/contracts';
@@ -709,6 +709,10 @@ export class PgPageRepository {
       [workspaceId, pageId, version.title, JSON.stringify(content), searchText,
         rowProperties ? JSON.stringify(rowProperties) : null]);
       await replacePageLinks(client, workspaceId, pageId, index.references);
+      if (current.kind === 'row' && current.parent_id) {
+        const schema = await loadDatabaseSchema(client, workspaceId, current.parent_id);
+        if (schema) await syncRelationLinks(client, workspaceId, schema.properties_json, [{ id: pageId, values: rowProperties ?? {} }]);
+      }
       await this.snapshot(client, workspaceId, [pageId], actorId, 'restore-version');
       return { statusCode: 200, body: pageFromRow({ ...result.rows[0]!, tag_ids: current.tag_ids ?? [] }) };
     });

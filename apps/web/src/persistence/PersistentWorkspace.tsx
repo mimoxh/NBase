@@ -685,7 +685,13 @@ export function PersistentWorkspace() {
     notice: setNotice,
     trashRow: row => beginPageActionRef.current('trash', row.id, row.revision, row.title, undefined, true),
     onRowSaved: page => { if (docsRef.current.has(page.id)) upsertPage(page); },
-    onRowsChanged: ids => { for (const id of ids) docsRef.current.delete(id); },
+    onRowsChanged: ids => {
+      // An open row page keeps editing, so it needs the new revision; cached ones are simply re-read later.
+      for (const id of ids) {
+        if (activeIdRef.current === id) void pageClient.get(workspace.id, id).then(upsertPage).catch(() => undefined);
+        else docsRef.current.delete(id);
+      }
+    },
     packageRows: async (doc, rows, csv) => {
       const encoder = new TextEncoder();
       const summaries: PageSummary[] = [doc.page, ...rows.map(row => ({ id: row.id, workspaceId: workspace.id, parentId: doc.page.id, title: row.title, icon: row.icon,

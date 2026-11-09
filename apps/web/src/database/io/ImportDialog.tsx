@@ -33,7 +33,7 @@ export default function ImportDialog({ store, state, properties, onClose }: {
   const [run, setRun] = useState<Run | null>(null);
   const [finished, setFinished] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const fields = useMemo(() => activeProperties(properties).filter(p => p.type !== 'created_time' && p.type !== 'updated_time'), [properties]);
+  const fields = useMemo(() => activeProperties(properties).filter(p => !['created_time', 'updated_time', 'relation'].includes(p.type)), [properties]);
 
   const pick = async (selected: File | undefined) => {
     if (!selected) return;
