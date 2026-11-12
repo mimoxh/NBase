@@ -13,6 +13,9 @@ import { registerTemplateRoutes, renderNoteTemplate } from './notes/templates.js
 import { registerTagRoutes } from './notes/tags.js';
 import { registerDailyRoutes } from './notes/daily.js';
 import { registerDatabaseRoutes } from './databases/routes.js';
+import { registerGraphRoutes } from './graph/routes.js';
+import { registerLinkPreviewRoutes } from './linkPreview/routes.js';
+import { registerPinyinIndexWorker } from './search/worker.js';
 
 interface AuthOptions {
   repository: AuthRepository;
@@ -56,11 +59,14 @@ export async function buildApp(options: AppOptions = {}) {
   if (options.auth) {
     registerAuthRoutes(app, options.auth.repository, options.auth.publicOrigin);
     if (options.pages) registerPageRoutes(app, options.pages, options.auth.repository, options.auth.publicOrigin);
+    if (options.pages) registerLinkPreviewRoutes(app, options.auth.repository, options.auth.publicOrigin);
     if (options.pages && options.notesPool) {
       registerTagRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
       registerTemplateRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
       registerDailyRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin, renderNoteTemplate);
       registerDatabaseRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
+      registerGraphRoutes(app, options.notesPool, options.auth.repository, options.auth.publicOrigin);
+      registerPinyinIndexWorker(app, options.notesPool);
     }
     if (options.attachments) registerAttachmentRoutes(app, options.attachments,
       options.auth.repository, options.auth.publicOrigin);

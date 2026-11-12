@@ -13,6 +13,7 @@
 | katex | 0.19.1 | MIT；公式本地渲染，字体随构建打包，不产生外部请求 |
 | yaml | 2.9.1 | ISC，解析和导出 Markdown front matter |
 | mermaid | 12.3.0 | MIT，自部署流程图与时序图的按需渲染 |
+| pinyin-pro | 3.29.5 | MIT，仅服务端（`apps/server`）；生成页面搜索的拼音键和解析拼音查询，不进入网页包 |
 
 版本、许可和兼容条件以 npm 官方 registry 元数据及实际安装包的 package.json / LICENSE 核对。Lexical React 包要求 React >=18、TypeScript >=5.2；当前 React 19 / TypeScript 5.9 满足。jsdom 的 Node 24 条件为 >=24.15，当前 Node 24.19 满足。直接依赖锁定精确版本，完整传递依赖见 package-lock.json。
 
@@ -29,3 +30,5 @@ P2 的 `pg` 版本与许可见 [npm 包](https://www.npmjs.com/package/pg)及[�
 安装提示 esbuild 的 postinstall 未获脚本白名单批准，本次没有扩大脚本执行许可。能否运行由实际类型检查、测试和构建结果记录，不凭安装成功推断。
 
 2026-11-03 P3-06 复核：`npm audit` 报告 `@fastify/static 10.1.7 → glob 13.0.6 → minimatch 10.2.6` 共 3 项 moderate（GHSA-3g3m-2fjr-6pw4、GHSA-g3hv-75wg-m249）。glob 只在 `wildcard: false` 时以固定模式枚举静态目录，本项目使用默认 wildcard，该代码路径不执行。npm 建议的大版本降级不采用；修复版本发布不足 7 天且超出上游声明的 `glob ^13` 范围，也不使用 overrides。结论是记录并接受当前风险，待 @fastify/static 更新依赖后再升级。本轮没有新增依赖。
+
+2026-11-12 新增 `pinyin-pro` 3.29.5（发布于 2026-10-10，npm registry 与安装包 LICENSE 均为 MIT，版权 zh-lx，无运行时依赖，解包约 950 KB）。只由服务端 `apps/server/src/search/` 调用：按词典的词语读音给汉字注音，多音字另保留最多两个常见读音；可解析的拼音音节表在首次查询时从该包对 CJK 基本区的读音推导，源码里不放字典或音节表。网页的斜杠命令只用静态拼音别名，不引用此包。版本精确锁定在 `apps/server/package.json` 与 package-lock.json。[npm 包](https://www.npmjs.com/package/pinyin-pro) · [源码与许可](https://github.com/zh-lx/pinyin-pro)

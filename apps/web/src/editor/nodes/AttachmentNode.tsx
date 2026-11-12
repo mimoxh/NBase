@@ -9,7 +9,7 @@ import {
   DecoratorNode, KEY_BACKSPACE_COMMAND, KEY_DELETE_COMMAND,
 } from 'lexical';
 import type { LexicalEditor, LexicalNode, NodeKey, SerializedLexicalNode, Spread } from 'lexical';
-import { attachmentPresentationOf, isAttachmentPresentation, type AttachmentAlign, type AttachmentMetadata, type AttachmentPresentation } from '@nbase/contracts';
+import { attachmentPresentationOf, attachmentPreviewKind, isAttachmentPresentation, type AttachmentAlign, type AttachmentMetadata, type AttachmentPresentation } from '@nbase/contracts';
 import { ImageControls, ImageLightbox, ResizeHandle } from './AttachmentImageControls';
 
 export const AttachmentWorkspaceContext = createContext<string | null>(null);
@@ -130,11 +130,23 @@ function AttachmentView({ nodeKey, id, alt, fileName, mediaType, presentation }:
     {controls && <ImageControls value={presentation} onChange={present} onZoom={() => setZoomed(true)} />}
     {zoomed && source && <ImageLightbox source={source} alt={alt || fileName} onClose={closeZoom} />}
     {!image && <span className="nbase-attachment-name">附件：{fileName}</span>}
+    <MediaPreview kind={attachmentPreviewKind(mediaType)} url={attachmentUrl(workspaceId, id)} fileName={fileName} />
     {failure && <span className="nbase-attachment-error" role="status">{failure}</span>}
     <button type="button" className="nbase-attachment-download" disabled={busy} onClick={() => void download()}>
       {busy ? '正在下载…' : `下载${image ? '图片' : '附件'}`}
     </button>
   </span>;
+}
+
+/** Audio, video and PDF stream from the same authorized URL; the browser sends the session cookie and byte ranges. */
+function MediaPreview({ kind, url, fileName }: { kind: ReturnType<typeof attachmentPreviewKind>; url: string; fileName: string }) {
+  const [open, setOpen] = useState(kind !== 'pdf');
+  if (kind === 'audio') return <audio className="nbase-attachment-media" controls preload="metadata" src={url} aria-label={fileName} />;
+  if (kind === 'video') return <video className="nbase-attachment-media is-video" controls preload="metadata" src={url} aria-label={fileName} />;
+  if (kind !== 'pdf') return null;
+  // A PDF viewer is heavy, so it loads only when asked for.
+  return open ? <iframe className="nbase-attachment-pdf" src={url} title={fileName} loading="lazy" />
+    : <button type="button" className="nbase-attachment-download" onClick={() => setOpen(true)}>预览 PDF</button>;
 }
 
 function applyPresentation(element: HTMLElement, { width, align }: AttachmentPresentation): void {

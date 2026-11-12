@@ -73,7 +73,7 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
   const activate = (index: number) => {
     const item = flat[index];
     if (!item) return;
-    if ('result' in item) onOpen(item.result, phrase);
+    if ('result' in item) onOpen(item.result, item.result.highlight ?? phrase);
     else if ('page' in item) {
       const summary = item.page;
       onOpen({ pageId: summary.id, title: summary.title, icon: summary.icon, parentId: summary.parentId,
@@ -171,9 +171,9 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
             className={`nb-pal-item ${position === active ? 'sel' : ''}`} key={result.pageId}
             onMouseEnter={() => setSelected(position)} onClick={() => activate(position)}>
             <PageIcon page={result} /><span className="nb-pal-main">
-              <span className="nb-pal-title">{marked(result.title || '未命名页面', phrase)}</span>
+              <span className="nb-pal-title">{marked(result.title || '未命名页面', result.highlight ?? phrase)}</span>
               <span className="nb-pal-path">{pathOf(result.pageId)}</span>
-              {result.snippet && result.snippet !== '仅标题匹配' && <span className="nb-pal-snip">{marked(result.snippet, phrase)}</span>}
+              {result.snippet && result.snippet !== '仅标题匹配' && <span className="nb-pal-snip">{marked(result.snippet, result.highlight ?? phrase)}</span>}
             </span>
           </button>;
         })}
@@ -186,7 +186,7 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
             <PageIcon page={result} /><span className="nb-pal-main">
               <span className="nb-pal-title">{result.title || '未命名页面'}</span>
               <span className="nb-pal-path">{pathOf(result.pageId)}</span>
-              <span className="nb-pal-snip">{marked(result.snippet, phrase)}</span>
+              <span className="nb-pal-snip">{marked(result.snippet, result.highlight ?? phrase)}</span>
             </span>
           </button>;
         })}

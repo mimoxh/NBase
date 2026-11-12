@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { attachmentPreviewKind } from '@nbase/contracts';
 import type { AuthRepository } from '../auth/repository.js';
 import { clearSessionCookie, publicOriginConfig } from '../auth/session.js';
 import { authorizeWorkspace, WorkspaceRouteError } from '../auth/workspace.js';
@@ -23,6 +24,17 @@ function failure(request: FastifyRequest, reply: FastifyReply, error: unknown, s
   if (error instanceof AttachmentError) return reply.code(error.statusCode).send({ error: error.code });
   request.log.error({ err: error }, 'Attachment request unavailable');
   return reply.code(503).send({ error: 'SERVICE_UNAVAILABLE' });
+}
+
+/** One `bytes=a-b`, `a-` or `-n` range; anything else is served whole, as RFC 9110 allows. */
+export function parseRange(header: string | undefined, size: number): { start: number; end: number } | 'invalid' | null {
+  const match = header ? /^bytes=(\d*)-(\d*)$/.exec(header.trim()) : null;
+  if (!match || (!match[1] && !match[2])) return null;
+  let start: number, end: number;
+  if (!match[1]) { start = Math.max(0, size - Number(match[2])); end = size - 1; }
+  else { start = Number(match[1]); end = match[2] ? Math.min(Number(match[2]), size - 1) : size - 1; }
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start >= size) return 'invalid';
+  return { start, end };
 }
 
 function contentDisposition(name: string, inline: boolean): string {
@@ -83,10 +95,24 @@ export function registerAttachmentRoutes(app: FastifyInstance, attachments: PgAt
         await authorizeWorkspace(request, auth, origin, secure, request.params.workspaceId, false);
         const attachment = await attachments.get(request.params.workspaceId, request.params.attachmentId);
         if (!attachment) return reply.code(404).send({ error: 'NOT_FOUND' });
-        const bytes = await attachments.bytes(request.params.workspaceId, attachment);
-        const inline = attachment.mediaType.startsWith('image/') && request.query.download !== '1';
+        const inline = attachmentPreviewKind(attachment.mediaType) !== null && request.query.download !== '1';
         reply.header('Content-Type', inline ? attachment.mediaType : 'application/octet-stream');
         reply.header('Content-Disposition', contentDisposition(attachment.fileName, inline));
+        // Only this page may frame a PDF preview; previews never run scripts of their own.
+        reply.header('X-Frame-Options', 'SAMEORIGIN');
+        reply.header('Accept-Ranges', 'bytes');
+        const range = parseRange(request.headers.range, attachment.byteSize);
+        if (range === 'invalid') {
+          reply.header('Content-Range', `bytes */${attachment.byteSize}`);
+          return reply.code(416).send({ error: 'RANGE_NOT_SATISFIABLE' });
+        }
+        if (range) {
+          const stream = await attachments.range(request.params.workspaceId, attachment, range.start, range.end);
+          reply.header('Content-Range', `bytes ${range.start}-${range.end}/${attachment.byteSize}`);
+          reply.header('Content-Length', range.end - range.start + 1);
+          return reply.code(206).send(stream);
+        }
+        const bytes = await attachments.bytes(request.params.workspaceId, attachment);
         reply.header('Content-Length', bytes.length);
         return reply.send(bytes);
       } catch (error) { return failure(request, reply, error, secure); }

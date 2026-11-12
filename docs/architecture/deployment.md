@@ -31,6 +31,7 @@ docker compose --env-file .env.docker up -d --wait nbase
 | `NBASE_DB_PASSWORD_SOURCE` | 宿主数据库密码文件；Compose 只传文件路径，应用通过 secret 挂载读取，无需 URL 转义 |
 | `NBASE_OWNER_PASSWORD_SOURCE` | 初始化/重置时读取的 owner 密码文件；修改此文件本身不会修改数据库密码或 owner 密码 |
 | `NBASE_OWNER_LOGIN` | 初始化账号名，也用于维护时核对现有 instance owner；不用于创建任意新账号 |
+| `NBASE_LINK_PREVIEW` | 设为 `off` 时关闭网页书签的服务端抓取，书签只显示网址。默认开启：只抓取 http/https 默认端口的公网地址，解析后拒绝回环、私有、链路本地等地址并固定连接到已检查的地址，每次重定向重新检查，6 秒超时、最多读 512 KB、只解析标题/简介/站点名，不下载图片；每个账号每分钟 30 次 |
 | `<project>_postgres_data` | PostgreSQL 18 的命名卷，挂到 `/var/lib/postgresql`；容器内 PGDATA 为版本目录 |
 | `<project>_attachments` | 应用附件命名卷，挂到 `/data/attachments`；空卷复制镜像目录的 node 用户权限 |
 

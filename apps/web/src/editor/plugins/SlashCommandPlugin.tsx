@@ -12,6 +12,8 @@ import { $applyBlockStyle } from '../blockStyles';
 import type { BlockStyle } from '../blockStyles';
 import { $createEquationNode, $insertEquationNode, $requestEquationEdit } from '../nodes/EquationNode';
 import { $applyCallout, calloutLabels } from '../nodes/CalloutNode';
+import { $applyToggle } from '../nodes/ToggleNode';
+import { REQUEST_BOOKMARK_COMMAND } from '../nodes/BookmarkNode';
 import { INSERT_MERMAID_COMMAND } from '../nodes/MermaidNode';
 import { REQUEST_DATABASE_VIEW_COMMAND, useDatabaseEmbedding } from '../nodes/DatabaseViewNode';
 import { calloutKinds, type CalloutKind } from '@nbase/contracts';
@@ -22,6 +24,8 @@ type SlashAction =
   | { kind: 'hr' }
   | { kind: 'table' }
   | { kind: 'mermaid' }
+  | { kind: 'toggle' }
+  | { kind: 'bookmark' }
   | { kind: 'database'; mode: 'new' | 'link' }
   | { kind: 'attachment'; value: AttachmentPickKind }
   | { kind: 'callout'; value: CalloutKind }
@@ -32,30 +36,32 @@ type SlashCommand = {
 };
 
 const COMMANDS: SlashCommand[] = [
-  { key: 'paragraph', label: '正文', hint: '普通段落', keywords: ['text', 'paragraph', 'p', '正文', '段落'], action: { kind: 'block', value: 'paragraph' } },
-  { key: 'h1', label: '标题 1', hint: '# 大标题', keywords: ['h1', 'heading1', 'heading', '标题', '一级标题'], action: { kind: 'block', value: 'h1' } },
-  { key: 'h2', label: '标题 2', hint: '## 小节标题', keywords: ['h2', 'heading2', 'heading', '标题', '二级标题'], action: { kind: 'block', value: 'h2' } },
-  { key: 'h3', label: '标题 3', hint: '### 子标题', keywords: ['h3', 'heading3', 'heading', '标题', '三级标题'], action: { kind: 'block', value: 'h3' } },
-  { key: 'bullet', label: '项目列表', hint: '- 无序列表', keywords: ['ul', 'bullet', 'list', '列表', '无序列表'], action: { kind: 'block', value: 'bullet' } },
-  { key: 'number', label: '编号列表', hint: '1. 有序列表', keywords: ['ol', 'number', 'numbered', 'list', '列表', '有序列表', '编号'], action: { kind: 'block', value: 'number' } },
-  { key: 'check', label: '待办列表', hint: '[ ] 任务清单', keywords: ['todo', 'check', 'task', '待办', '任务'], action: { kind: 'block', value: 'check' } },
-  { key: 'quote', label: '引用', hint: '> 引用文字', keywords: ['quote', 'blockquote', '引用'], action: { kind: 'block', value: 'quote' } },
-  { key: 'code', label: '代码块', hint: '``` 代码', keywords: ['code', 'codeblock', '代码'], action: { kind: 'block', value: 'code' } },
-  { key: 'hr', label: '分割线', hint: '--- 水平线', keywords: ['hr', 'divider', 'line', '分割线', '分隔线'], action: { kind: 'hr' } },
-  { key: 'table', label: '表格', hint: '3 × 3 表格', keywords: ['table', '表格'], action: { kind: 'table' }, hideInTable: true },
-  { key: 'mermaid', label: '图表', hint: 'Mermaid 流程图或时序图', keywords: ['mermaid', 'diagram', '图表', '流程图', '时序图'], action: { kind: 'mermaid' }, hideInTable: true },
-  { key: 'database', label: '数据库', hint: '新建多维表格并插入视图', keywords: ['database', 'db', 'table', '数据库', '多维表格', '表格视图'],
+  { key: 'paragraph', label: '正文', hint: '普通段落', keywords: ['text', 'paragraph', 'p', '正文', '段落', 'zhengwen', 'zw', 'duanluo', 'dl'], action: { kind: 'block', value: 'paragraph' } },
+  { key: 'h1', label: '标题 1', hint: '# 大标题', keywords: ['h1', 'heading1', 'heading', '标题', '一级标题', 'biaoti', 'bt', 'bt1', 'yijibiaoti', 'yjbt'], action: { kind: 'block', value: 'h1' } },
+  { key: 'h2', label: '标题 2', hint: '## 小节标题', keywords: ['h2', 'heading2', 'heading', '标题', '二级标题', 'biaoti', 'bt', 'bt2', 'erjibiaoti', 'ejbt'], action: { kind: 'block', value: 'h2' } },
+  { key: 'h3', label: '标题 3', hint: '### 子标题', keywords: ['h3', 'heading3', 'heading', '标题', '三级标题', 'biaoti', 'bt', 'bt3', 'sanjibiaoti', 'sjbt'], action: { kind: 'block', value: 'h3' } },
+  { key: 'bullet', label: '项目列表', hint: '- 无序列表', keywords: ['ul', 'bullet', 'list', '列表', '无序列表', 'xiangmuliebiao', 'xmlb', 'liebiao', 'lb', 'wuxuliebiao', 'wxlb'], action: { kind: 'block', value: 'bullet' } },
+  { key: 'number', label: '编号列表', hint: '1. 有序列表', keywords: ['ol', 'number', 'numbered', 'list', '列表', '有序列表', '编号', 'bianhaoliebiao', 'bhlb', 'liebiao', 'lb', 'youxuliebiao', 'yxlb', 'bianhao', 'bh'], action: { kind: 'block', value: 'number' } },
+  { key: 'check', label: '待办列表', hint: '[ ] 任务清单', keywords: ['todo', 'check', 'task', '待办', '任务', 'daiban', 'daibanliebiao', 'renwu', 'rw'], action: { kind: 'block', value: 'check' } },
+  { key: 'quote', label: '引用', hint: '> 引用文字', keywords: ['quote', 'blockquote', '引用', 'yinyong', 'yy'], action: { kind: 'block', value: 'quote' } },
+  { key: 'code', label: '代码块', hint: '``` 代码', keywords: ['code', 'codeblock', '代码', 'daima', 'dm', 'daimakuai', 'dmk'], action: { kind: 'block', value: 'code' } },
+  { key: 'hr', label: '分割线', hint: '--- 水平线', keywords: ['hr', 'divider', 'line', '分割线', '分隔线', 'fengexian', 'fgx'], action: { kind: 'hr' } },
+  { key: 'table', label: '表格', hint: '3 × 3 表格', keywords: ['table', '表格', 'biaoge', 'bg'], action: { kind: 'table' }, hideInTable: true },
+  { key: 'toggle', label: '折叠块', hint: '可展开和收起的内容', keywords: ['toggle', 'details', 'collapse', 'fold', '折叠', '折叠块', '收起', 'zhedie', 'zhediekuai', 'zd', 'zdk'], action: { kind: 'toggle' }, hideInTable: true },
+  { key: 'bookmark', label: '网页书签', hint: '网址卡片，显示标题和简介', keywords: ['bookmark', 'link', 'url', 'web', '书签', '网页', '链接卡片', 'shuqian', 'sq', 'wangye', 'wy'], action: { kind: 'bookmark' }, hideInTable: true },
+  { key: 'mermaid', label: '图表', hint: 'Mermaid 流程图或时序图', keywords: ['mermaid', 'diagram', '图表', '流程图', '时序图', 'tubiao', 'tb', 'liuchengtu', 'lct', 'shixutu', 'sxt'], action: { kind: 'mermaid' }, hideInTable: true },
+  { key: 'database', label: '数据库', hint: '新建多维表格并插入视图', keywords: ['database', 'db', 'table', '数据库', '多维表格', '表格视图', 'shujuku', 'sjk', 'duoweibiaoge', 'dwbg'],
     action: { kind: 'database', mode: 'new' }, hideInTable: true },
-  { key: 'database-link', label: '关联数据库', hint: '插入已有数据库的视图', keywords: ['database', 'link', 'db', '数据库', '关联', '多维表格'],
+  { key: 'database-link', label: '关联数据库', hint: '插入已有数据库的视图', keywords: ['database', 'link', 'db', '数据库', '关联', '多维表格', 'guanlianshujuku', 'glsjk', 'shujuku', 'sjk', 'guanlian', 'gl'],
     action: { kind: 'database', mode: 'link' }, hideInTable: true },
-  { key: 'image', label: '图片', hint: '上传图片', keywords: ['image', 'img', 'picture', 'photo', '图片', '图像', '照片'], action: { kind: 'attachment', value: 'image' } },
-  { key: 'attachment', label: '附件', hint: '上传文件', keywords: ['file', 'attachment', 'upload', '附件', '文件', '上传'], action: { kind: 'attachment', value: 'file' } },
+  { key: 'image', label: '图片', hint: '上传图片', keywords: ['image', 'img', 'picture', 'photo', '图片', '图像', '照片', 'tupian', 'tp', 'tuxiang', 'zhaopian'], action: { kind: 'attachment', value: 'image' } },
+  { key: 'attachment', label: '附件', hint: '上传文件', keywords: ['file', 'attachment', 'upload', '附件', '文件', '上传', 'fujian', 'fj', 'wenjian', 'wj', 'shangchuan', 'sc'], action: { kind: 'attachment', value: 'file' } },
   ...calloutKinds.map((kind): SlashCommand => ({
     key: 'callout-' + kind, label: '提示 · ' + calloutLabels[kind], hint: '提示块',
-    keywords: ['提示', 'callout', kind], action: { kind: 'callout', value: kind }, hideInTable: true,
+    keywords: ['提示', 'callout', kind, 'tishi', 'ts'], action: { kind: 'callout', value: kind }, hideInTable: true,
   })),
-  { key: 'equation-block', label: '块级公式', hint: '$$ LaTeX', keywords: ['math', 'equation', 'formula', 'latex', 'block', '公式', '块级公式'], action: { kind: 'equation', inline: false }, hideInTable: true },
-  { key: 'equation-inline', label: '行内公式', hint: '$ LaTeX', keywords: ['inline', 'math', 'equation', 'formula', 'latex', '公式', '行内公式'], action: { kind: 'equation', inline: true } },
+  { key: 'equation-block', label: '块级公式', hint: '$$ LaTeX', keywords: ['math', 'equation', 'formula', 'latex', 'block', '公式', '块级公式', 'gongshi', 'gs', 'kuaijigongshi', 'kjgs'], action: { kind: 'equation', inline: false }, hideInTable: true },
+  { key: 'equation-inline', label: '行内公式', hint: '$ LaTeX', keywords: ['inline', 'math', 'equation', 'formula', 'latex', '公式', '行内公式', 'gongshi', 'gs', 'hangneigongshi', 'hngs'], action: { kind: 'equation', inline: true } },
 ];
 
 class SlashOption extends MenuOption {
@@ -177,6 +183,8 @@ export function SlashCommandPlugin({ onPickAttachment }: { onPickAttachment?: ((
       else if (action.kind === 'mermaid') editor.dispatchCommand(INSERT_MERMAID_COMMAND, undefined);
       else if (action.kind === 'database') editor.dispatchCommand(REQUEST_DATABASE_VIEW_COMMAND, action.mode);
       else if (action.kind === 'callout') $applyCallout(action.value);
+      else if (action.kind === 'toggle') $applyToggle();
+      else if (action.kind === 'bookmark') editor.dispatchCommand(REQUEST_BOOKMARK_COMMAND, undefined);
       else if (action.kind === 'attachment') { /* The file picker opens after this update. */ }
       else $requestEquationEdit($insertEquationNode('', false));
       closeMenu();

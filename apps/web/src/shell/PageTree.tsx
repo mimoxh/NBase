@@ -19,7 +19,7 @@ export interface TreeRowActions {
 type DropZone = 'before' | 'inside' | 'after';
 
 export function PageIcon({ page, size = 17 }: { page: { icon: string | null; kind?: string | undefined }; size?: number }) {
-  return <span className="nb-page-icon" aria-hidden="true">{page.icon ?? (page.kind === 'database' ? '🗃️' : '📄')}</span>;
+  return <span className="nb-page-icon" aria-hidden="true">{page.icon ?? (page.kind === 'database' ? '🗃️' : page.kind === 'whiteboard' ? '🎨' : '📄')}</span>;
 }
 
 /** Memoized tree; callbacks stay stable from the workspace. */
@@ -54,8 +54,8 @@ export const PageTree = memo(function PageTree({ pages, activeId, favorites, act
   };
   const dropAllowed = (page: PageSummary, zone: DropZone) => {
     const id = dragged.current;
-    // A database's children are its rows; pages cannot be dropped into one.
-    if (zone === 'inside' && page.kind === 'database') return false;
+    // A database's children are its rows and whiteboards hold no pages; neither accepts drops.
+    if (zone === 'inside' && (page.kind === 'database' || page.kind === 'whiteboard')) return false;
     return Boolean(id) && !isSelfOrAncestor(pages, id!, zone === 'inside' ? page.id : page.parentId) && id !== page.id;
   };
   const branch = (parentId: string | null, depth: number): ReactNode => (childrenByParent.get(parentId) ?? []).map(page => {
@@ -100,12 +100,12 @@ export const PageTree = memo(function PageTree({ pages, activeId, favorites, act
           {favorite && <Icon name="star-filled" size={11} />}
         </button>
         <span className="nb-tree-actions">
-          {page.kind !== 'database' && <button className="nb-tree-act" aria-label={`在「${page.title || '未命名页面'}」下新建子页面`}
+          {page.kind !== 'database' && page.kind !== 'whiteboard' && <button className="nb-tree-act" aria-label={`在「${page.title || '未命名页面'}」下新建子页面`}
             onClick={() => actions.onAddChild(page.id)}><Icon name="plus" size={14} /></button>}
           <Menu label={`「${page.title || '未命名页面'}」页面操作`} align="end"
             trigger={<Icon name="more" size={14} />} items={[
               { key: 'fav', label: favorite ? '取消收藏' : '收藏', icon: 'star', onSelect: () => actions.onFavorite(page.id) },
-              ...(page.kind !== 'database' ? [{ key: 'child', label: '添加子页面', icon: 'plus' as const, onSelect: () => actions.onAddChild(page.id) },
+              ...(page.kind !== 'database' && page.kind !== 'whiteboard' ? [{ key: 'child', label: '添加子页面', icon: 'plus' as const, onSelect: () => actions.onAddChild(page.id) },
                 ...(actions.onAddDatabase ? [{ key: 'database', label: '添加数据库', icon: 'table' as const,
                   onSelect: () => actions.onAddDatabase?.(page.id) }] : [])] : []),
               { key: 'move', label: '移动到…', icon: 'folder', onSelect: () => actions.onMove(page.id) },

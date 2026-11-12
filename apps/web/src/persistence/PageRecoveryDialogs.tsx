@@ -1,5 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import type { PageSummary, PageVersion, PageVersionSummary, StoredDocumentContent, TrashedPageDocument, TrashedPageSummary } from '@nbase/contracts';
+import { isWhiteboardContent, type PageSummary, type PageVersion, type PageVersionSummary, type StoredDocumentContent, type TrashedPageDocument,
+  type TrashedPageSummary } from '@nbase/contracts';
+import { LazyWhiteboard } from '../whiteboard/lazy';
+import { attachmentContentUrl } from '../whiteboard/host';
 import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { DocumentEditor } from '../editor/DocumentEditor';
@@ -21,7 +24,10 @@ function Preview({ id, title, content, workspaceId, pageReferences }: { id: stri
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   return <div className="nbase-history-preview"><h3 className="nb-preview-title" data-nbase-find-title>{title || '未命名页面'}</h3>
-    {content.schemaVersion === 1 ? <DocumentEditor key={id} documentId={id} title={title} initialContent={content as DocumentContent}
+    {isWhiteboardContent(content) ? <div className="wb-preview"><LazyWhiteboard key={id} boardId={id} content={content} readOnly title={title}
+      pages={pageReferences?.pages ?? []} onChange={() => {}} onOpenPage={() => {}} onNotice={() => {}}
+      imageUrl={attachmentId => attachmentContentUrl(workspaceId, attachmentId)} /></div>
+    : content.schemaVersion === 1 ? <DocumentEditor key={id} documentId={id} title={title} initialContent={content as DocumentContent}
       workspaceId={workspaceId} pageReferences={pageReferences} readOnly onChange={() => {}} />
       : <div role="alert"><p>暂不支持此版本的正文预览，原始数据仍保留。</p><button className="nb-btn" onClick={downloadRaw}>下载原始 JSON</button></div>}
   </div>;
@@ -118,6 +124,7 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
   const index = versions.findIndex(item => item.revision === selected);
   const hasOlder = index >= 0 && (index < versions.length - 1 || Boolean(next));
   const diff = showDiff && preview && older && preview.content.schemaVersion === 1 && older.content.schemaVersion === 1
+    && !isWhiteboardContent(preview.content) && !isWhiteboardContent(older.content)
     ? diffVersions(older.content as DocumentContent, preview.content as DocumentContent) : null;
   const titleChanged = showDiff && preview && older && preview.title !== older.title;
 

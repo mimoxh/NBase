@@ -24,7 +24,7 @@ const attachmentPattern = /(?<!(?<!\\)(?:\\\\)*\\)(!?)\[((?:\\.|[^\]\\\r\n])*)\]
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const elementDefaults: Record<string, unknown> = { direction: null, format: '', indent: 0, textFormat: 0, textStyle: '' };
 const textDefaults: Record<string, unknown> = { detail: 0, format: 0, mode: 'normal', style: '' };
-const elementTypes = new Set(['root', 'paragraph', 'heading', 'quote', 'callout', 'list', 'listitem', 'code', 'link', 'autolink', 'table', 'tablerow', 'tablecell', 'footnote-definition']);
+const elementTypes = new Set(['root', 'paragraph', 'heading', 'quote', 'callout', 'toggle', 'list', 'listitem', 'code', 'link', 'autolink', 'table', 'tablerow', 'tablecell', 'footnote-definition']);
 const textTypes = new Set(['text', 'code-highlight', 'tab', 'image-reference']);
 
 function unique(diagnostics: string[]): string[] { return [...new Set(diagnostics)]; }

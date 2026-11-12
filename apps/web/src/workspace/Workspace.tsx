@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type ChangeEvent } from 'react';
-import { defaultDatabaseSchema, type PageCoverId, type PageSummary } from '@nbase/contracts';
+import { defaultDatabaseSchema, whiteboardContent, whiteboardSearchText, type PageCoverId, type PageSummary } from '@nbase/contracts';
+import { LazyWhiteboard } from '../whiteboard/lazy';
+import { demoImageUrl, demoUploadImages } from '../whiteboard/host';
+import { downloadBlob } from '../persistence/fileDownload';
 import { LazyDatabaseView as DatabaseView, LazyRowPanel as RowPanel } from '../database/lazy';
 import { createDemoSource } from '../database/demoSource';
+import { createDemoGraphSource } from '../graph/demoSource';
+import { LazyGraphDialog, useGraphShortcut } from '../graph/lazy';
 import { announceDatabaseChange, requestDatabaseExport } from '../database/source';
 import { DocumentEditor } from '../editor/DocumentEditor';
 import { SourceEditorDialog } from '../editor/SourceEditorDialog';
@@ -65,7 +70,7 @@ function DemoSearch({ pages, recentIds, onOpen, onCommand, onClose }: {
   const q = query.trim();
   const titleItems: PalItem[] = []; const bodyItems: PalItem[] = [];
   if (q) for (const page of pages.filter(p => !p.deleted)) {
-    const body = page.snapshot?.plainText ?? page.markdown;
+    const body = page.board ? whiteboardSearchText(page.board.board) : page.snapshot?.plainText ?? page.markdown;
     const titleHit = (page.title || '未命名页面').toLocaleLowerCase().includes(q.toLocaleLowerCase());
     const bodyHit = body.toLocaleLowerCase().includes(q.toLocaleLowerCase());
     if (titleHit) titleItems.push(bodyHit ? { kind: 'title', page, snippet: snippet(body, q) } : { kind: 'title', page });
@@ -155,15 +160,16 @@ function DemoTrash({ pages, onRestore, onClose }: { pages: Page[]; onRestore: (i
           <div className="nb-trash-body-head"><h3 data-nbase-find-title style={{ margin: 0 }}>{page.title || '未命名页面'}</h3>
             <button className="nb-btn nb-btn-primary" onClick={() => onRestore(page.id)}>恢复</button></div>
           <p className="dialog-description">{pathOf(page)} · 会话内删除</p>
-          <DocumentEditor documentId={`demo-trash:${page.id}`} title={page.title} initialContent={page.snapshot?.content}
-            initialMarkdown={page.markdown} readOnly onChange={() => {}} />
+          {page.kind === 'whiteboard' ? <p className="nb-pal-msg">白板恢复后即可查看。</p>
+            : <DocumentEditor documentId={`demo-trash:${page.id}`} title={page.title} initialContent={page.snapshot?.content}
+              initialMarkdown={page.markdown} readOnly onChange={() => {}} />}
         </> : <p className="nb-pal-msg">选择左侧页面查看内容</p>}
       </div>
     </div>
   </Modal>;
 }
 
-type Dialog = 'search' | 'source' | 'move' | 'delete' | 'import' | 'trash' | null;
+type Dialog = 'search' | 'source' | 'move' | 'delete' | 'import' | 'trash' | 'graph' | null;
 
 export function WorkspaceApp() {
   const [state, dispatch] = useReducer(workspaceReducer, undefined, initialWorkspace);
@@ -193,6 +199,8 @@ export function WorkspaceApp() {
   }, []);
   const openPage = useCallback((id: string) => { flush(); dispatch({ type: 'open', id }); setDialog(null); setMobileOpen(false); mainRef.current?.scrollTo({ top: 0 }); }, [flush]);
   const openPageRef = useRef(openPage);
+  const graphSource = useMemo(() => createDemoGraphSource(() => stateRef.current.pages), []);
+  useGraphShortcut(() => { flush(); setDialog('graph'); }, dialog !== null);
   openPageRef.current = openPage;
   const newPage = (parentId: string | null = null) => {
     flush(); dispatch({ type: 'create', page: { id: crypto.randomUUID(), title: '未命名页面', parentId, markdown: '', starred: false, deleted: false, dirty: true, icon: null, cover: null } });
@@ -206,6 +214,13 @@ export function WorkspaceApp() {
     setDialog(null); setReadOnly(false); setMobileOpen(false); notice('已在当前会话中新建数据库，刷新后会重置。');
     requestAnimationFrame(() => { const title = document.querySelector<HTMLInputElement>('[aria-label="数据库标题"]'); title?.focus(); title?.select(); });
   };
+  const newWhiteboard = (parentId: string | null = null) => {
+    flush();
+    dispatch({ type: 'create', page: { id: crypto.randomUUID(), title: '未命名白板', parentId, markdown: '', starred: false,
+      deleted: false, dirty: true, icon: null, cover: null, kind: 'whiteboard', board: whiteboardContent([]) } });
+    setDialog(null); setReadOnly(false); setMobileOpen(false); notice('已在当前会话中新建白板，刷新后会重置。');
+  };
+  const onBoardChange = useCallback((id: string, content: ReturnType<typeof whiteboardContent>) => dispatch({ type: 'board', id, content }), []);
   const demoSource = useMemo(() => createDemoSource({ state: stateRef, dispatch,
     openPage: id => openPageRef.current(id), notice }), [notice]);
   const restorePage = (id: string) => {
@@ -252,7 +267,23 @@ export function WorkspaceApp() {
     window.addEventListener('beforeunload', handler); return () => window.removeEventListener('beforeunload', handler);
   }, []);
   const currentMarkdown = () => current ? `# ${current.title || '未命名页面'}\n\n${flush()?.markdown ?? current.markdown}` : '';
-  const exportCurrent = () => { if (current) { download(current.title, currentMarkdown()); notice('已发起 Markdown 下载，请检查浏览器下载记录。'); } };
+  const exportCurrent = () => {
+    if (current?.kind === 'whiteboard') { downloadBlob(`${current.title || '未命名白板'}-白板数据`, new Blob([JSON.stringify(current.board, null, 2)], { type: 'application/json' }), '.json'); notice('已发起白板数据下载；图片可在白板中导出 PNG/SVG。'); return; }
+    if (current) { download(current.title, currentMarkdown()); notice('已发起 Markdown 下载，请检查浏览器下载记录。'); }
+  };
+  // The demo has no uploaded files, so HTML / Word exports only carry text, diagrams and placeholders.
+  const exportCurrentAs = async (format: 'html' | 'docx') => {
+    if (!current) return;
+    const name = current.title || '未命名页面';
+    try {
+      const content = flush()?.content ?? current.snapshot?.content ?? createContentFromMarkdown(current.markdown);
+      const { exportPageFile } = await import('../export/browser');
+      const result = await exportPageFile({ title: name, content, format, onProgress: notice,
+        pageTitle: id => stateRef.current.pages.find(page => page.id === id)?.title });
+      downloadBlob(name, result.blob, result.extension);
+      notice(`已发起${format === 'docx' ? ' Word' : ' HTML'} 下载，请检查浏览器下载记录。`);
+    } catch { notice('导出失败，页面内容没有改变。'); }
+  };
   const importFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]; event.target.value = ''; if (!file) return;
     if (!/\.md$/i.test(file.name)) { notice('请选择 .md 格式的文件。'); return; }
@@ -297,6 +328,12 @@ export function WorkspaceApp() {
     { key: 'export', label: '导入导出…', icon: 'download', onSelect: () => requestDatabaseExport(current.id) },
     'divider',
     { key: 'trash', label: '移入回收站（含所有行）', icon: 'trash', danger: true, onSelect: () => { setDialogFor(current.id); setDialog('delete'); } },
+  ] : current?.kind === 'whiteboard' ? [
+    { key: 'mode', label: readOnly ? '切换到编辑' : '切换到只读', icon: 'page', onSelect: () => setReadOnly(!readOnly) },
+    { key: 'download', label: '下载白板数据 (JSON)', icon: 'download', onSelect: exportCurrent },
+    { key: 'move', label: '移动到…', icon: 'folder', onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialogFor(current.id); setDialog('move'); } },
+    'divider',
+    { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, onSelect: () => { setDialogFor(current.id); setDialog('delete'); } },
   ] : current ? [
     ...readingMenuItems(readingPrefs, setReadingPrefs),
     'divider',
@@ -306,6 +343,8 @@ export function WorkspaceApp() {
       if (snapshot) { setSourceSession({ pageId: current.id, instanceId: crypto.randomUUID(), content: snapshot.content }); setDialog('source'); }
     } },
     { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
+    { key: 'download-html', label: '下载为 HTML', icon: 'download', onSelect: () => void exportCurrentAs('html') },
+    { key: 'download-docx', label: '下载为 Word', icon: 'download', onSelect: () => void exportCurrentAs('docx') },
     ...(current.originalMarkdown !== undefined ? [{ key: 'raw', label: '下载导入原文', icon: 'download' as const, onSelect: () => download(`${current.title}-原始文件`, current.originalMarkdown ?? '') }] : []),
     'divider',
     ...(current.kind === 'row' ? [
@@ -324,7 +363,8 @@ export function WorkspaceApp() {
     <Sidebar workspaceName="演示空间" loginName="演示会话" accountLabel="演示模式 · 未登录" theme={theme} onTheme={setTheme}
       onLogout={() => notice('演示模式没有账号；刷新页面即可重置。')}
       onSearch={() => { flush(); setDialog('search'); }} onTrash={() => setDialog('trash')}
-      onNewPage={() => newPage()} onNewDatabase={() => newDatabase()} onImport={() => fileRef.current?.click()}
+      noteActions={<button className="nb-nav-row" onClick={() => { flush(); setDialog('graph'); }}><Icon name="link" size={15} /><span>关系图</span></button>}
+      onNewPage={() => newPage()} onNewDatabase={() => newDatabase()} onNewWhiteboard={() => newWhiteboard()} onImport={() => fileRef.current?.click()}
       createBusy={false} pages={summaries} activeId={isDocument ? current.id : null}
       favorites={favoriteSet} favoritePages={favoritePages} recentPages={recentPages}
       treeLoading={false} treeError="" onTreeRetry={() => undefined}
@@ -344,7 +384,16 @@ export function WorkspaceApp() {
       <NoticeBar tone="info">演示模式 · 内容仅保留在当前会话，刷新后重置
         <button onClick={isDocument ? exportCurrent : () => notice('打开需要保留的页面，再从页面菜单下载 Markdown。')}>{isDocument ? '下载此页' : '如何保留内容'}</button></NoticeBar>
       <main ref={mainRef} className="nb-scroll" tabIndex={-1}>
-        {isDocument && current.kind === 'database' ? <>
+        {isDocument && current.kind === 'whiteboard' && current.board ? <div className="wb-host">
+          <div className="wb-host-head"><span className="nb-page-icon" aria-hidden="true">{current.icon ?? '🎨'}</span>
+            {readOnly ? <h1 className="wb-title" data-nbase-find-title>{current.title || '未命名白板'}</h1>
+              : <input className="wb-title page-title" data-nbase-find-title aria-label="白板标题" value={current.title} placeholder="未命名白板"
+                onChange={event => dispatch({ type: 'rename', id: current.id, title: event.target.value })}
+                onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.currentTarget.blur(); }} />}
+            <span className="wb-host-note">演示 · 刷新后重置</span></div>
+          <LazyWhiteboard key={current.id} boardId={current.id} content={current.board} readOnly={readOnly} title={current.title}
+            pages={summaries} onChange={onBoardChange} onOpenPage={openPage} imageUrl={demoImageUrl} onUploadImages={demoUploadImages} onNotice={notice} />
+        </div> : isDocument && current.kind === 'database' ? <>
           <div className="nb-doc-wide-head">
             <PageHeader icon={current.icon ?? '🗃️'} cover={current.cover} editable={!readOnly}
               onIcon={icon => dispatch({ type: 'icon', id: current.id, icon })}
@@ -400,6 +449,8 @@ export function WorkspaceApp() {
     <input ref={fileRef} type="file" accept=".md,text/markdown" className="visually-hidden" aria-label="选择 Markdown 文件" onChange={event => { void importFile(event); }} />
     {toast && <Toast text={toast} onClose={() => setToast('')} />}
     {dialog === 'search' && <DemoSearch pages={state.pages} recentIds={state.recent} onOpen={openPage} onCommand={onCommand} onClose={() => setDialog(null)} />}
+    {dialog === 'graph' && <LazyGraphDialog source={graphSource} currentPageId={isDocument ? current.id : null} defaultTreeEdges
+      onOpen={openPage} onClose={() => setDialog(null)} />}
     {dialog === 'trash' && <DemoTrash pages={state.pages} onRestore={restorePage} onClose={() => setDialog(null)} />}
     {dialog === 'source' && sourceSession && <SourceEditorDialog key={sourceSession.instanceId}
       scope={{ userId: 'demo', workspaceId: 'demo', pageId: sourceSession.pageId, instanceId: sourceSession.instanceId, baseRevision: 'session' }}

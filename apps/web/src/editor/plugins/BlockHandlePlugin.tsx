@@ -4,7 +4,7 @@ import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext
 import { useLexicalEditable } from '@lexical/react/useLexicalEditable';
 import { mergeRegister } from '@lexical/utils';
 import {
-  $getNearestNodeFromDOMNode, $getNodeByKey, $getSelection, $isRangeSelection, COMMAND_PRIORITY_HIGH,
+  $getNearestNodeFromDOMNode, $getNodeByKey, $isElementNode, $getSelection, $isRangeSelection, COMMAND_PRIORITY_HIGH,
   KEY_ARROW_DOWN_COMMAND, KEY_ARROW_UP_COMMAND, KEY_DOWN_COMMAND,
 } from 'lexical';
 import type { LexicalNode, NodeKey } from 'lexical';
@@ -13,11 +13,12 @@ import {
   $topLevelBlock, type BlockPlacement,
 } from '../blockActions';
 import { $applyBlockStyle, type BlockStyle } from '../blockStyles';
+import { copyBlockReference } from './BlockReferencePlugin';
 import './blockHandle.css';
 
-type Props = { onBeforeMove?: ((element: HTMLElement) => void) | undefined };
+type Props = { onBeforeMove?: ((element: HTMLElement) => void) | undefined; documentId?: string | undefined; onNotice?: ((message: string) => void) | undefined };
 type Hover = { key: NodeKey; top: number };
-type Menu = { key: NodeKey; top: number; canConvert: boolean; canCopy: boolean };
+type Menu = { key: NodeKey; top: number; canConvert: boolean; canCopy: boolean; canReference: boolean };
 type DropTarget = { key: NodeKey; placement: BlockPlacement; top: number };
 
 const styles: [BlockStyle, string][] = [
@@ -26,7 +27,7 @@ const styles: [BlockStyle, string][] = [
 ];
 
 /** A hover handle for top-level blocks: drag to reorder, click for the block menu. */
-export function BlockHandlePlugin({ onBeforeMove }: Props) {
+export function BlockHandlePlugin({ onBeforeMove, documentId, onNotice }: Props) {
   const [editor] = useLexicalComposerContext();
   const editable = useLexicalEditable();
   const [hover, setHover] = useState<Hover | null>(null);
@@ -191,7 +192,7 @@ export function BlockHandlePlugin({ onBeforeMove }: Props) {
     if (!hover) return;
     const info = editor.read('latest', () => {
       const block = $getNodeByKey(hover.key);
-      return block ? { canConvert: $canConvertBlock(block), canCopy: $canDuplicateBlock(block) } : null;
+      return block ? { canConvert: $canConvertBlock(block), canCopy: $canDuplicateBlock(block), canReference: $isElementNode(block) } : null;
     });
     if (info) setMenu({ ...hover, ...info });
   };
@@ -236,6 +237,12 @@ export function BlockHandlePlugin({ onBeforeMove }: Props) {
       <button type="button" role="menuitem" onClick={() => moveMenuBlock(1)}>下移</button>
       <button type="button" role="menuitem" disabled={!menu.canCopy}
         title={menu.canCopy ? undefined : '脚注定义不能复制'} onClick={() => run(block => { $duplicateBlock(block); })}>复制</button>
+      {documentId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(documentId) && menu.canReference && <button type="button" role="menuitem" onClick={() => {
+        const key = menu.key;
+        setMenu(null); setHover(null);
+        void copyBlockReference(editor, key, documentId).then(copied =>
+          onNotice?.(copied ? '已复制块引用，在任意页面粘贴即可引用此块。' : '无法写入剪贴板，请重试。'));
+      }}>复制块引用</button>}
       <button type="button" role="menuitem" className="is-danger" onClick={() => run($deleteBlock)}>删除</button>
       {menu.canConvert && <>
         <div className="nbase-block-menu-label">转换为</div>

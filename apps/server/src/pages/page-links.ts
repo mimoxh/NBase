@@ -35,7 +35,7 @@ export async function backfillPageLinks(client: PoolClient): Promise<void> {
     const batch: QueryResult<SavedPage> = await client.query<SavedPage>(`
       SELECT id, workspace_id, content_json FROM pages
       WHERE ($1::uuid IS NULL OR id > $1) AND content_schema_version = 1
-        AND content_json @? '$.editorState.root.** ? (@.type == "page-reference")'
+        AND content_json @? '$.editorState.root.** ? (@.type == "page-reference" || @.type == "block-reference")'
       ORDER BY id LIMIT 100`, [after]);
     if (!batch.rows.length) return;
     for (const page of batch.rows) {

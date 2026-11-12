@@ -27,12 +27,16 @@ export type {
   UpdatePageRequest,
 } from './pages.js';
 export * from './databases.js';
+export * from './whiteboards.js';
 export { computeRow, formulaFromDisplay, formulaFunctionNames, formulaLengthLimit, formulaToDisplay, parseFormula } from './formula.js';
 export type { FormulaResult, FormulaType, FormulaValue, RollupSource } from './formula.js';
 export type { FavoriteListResponse } from './favorites.js';
 export { pageBacklinkLimit, pageIdFromReferenceUrl, pageReferenceLabelLimit, pageReferenceUrl } from './pageReferences.js';
 export type { PageBacklink, PageBacklinksResponse, SerializedPageReference } from './pageReferences.js';
+export { graphEdgeLimit, graphLinkKinds, graphNodeLimit } from './graph.js';
+export type { GraphEdge, GraphLinkKind, GraphNode, WorkspaceGraphResponse } from './graph.js';
 export type { AttachmentMetadata } from './attachments.js';
+export { attachmentByteLimit, attachmentLimitFor, attachmentPreviewKind, isMediaAttachment, mediaAttachmentByteLimit } from './attachments.js';
 export { isStoredMermaidSource } from './mermaid.js';
 export type { SerializedMermaidNode } from './mermaid.js';
 export { isFootnoteId, isMarkdownDate, isMarkdownFrontMatter, isMarkdownMetadataKey, markdownFrontMatterKey,
@@ -60,3 +64,9 @@ export function isHealthResponse(value: unknown): value is HealthResponse {
 }
 export { tagNameKey } from './tagNameKey.js';
 export * from './attachmentPresentation.js';
+export { blockAlignments, isTextStyle, parseTextStyle, textColorHex, textColorIds, textStyleCss } from './textStyle.js';
+export type { BlockAlignment, TextColorId, TextStyle } from './textStyle.js';
+export { bookmarkLimits, isSerializedBookmark } from './bookmarks.js';
+export type { LinkPreview } from './bookmarks.js';
+export { blockIdKey, blockReferenceUrl, isBlockId, isSerializedBlockReference } from './blockReferences.js';
+export type { SerializedBlockReference } from './blockReferences.js';

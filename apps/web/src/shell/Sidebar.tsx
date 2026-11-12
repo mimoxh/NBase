@@ -19,6 +19,7 @@ export interface SidebarProps {
   treeControls?: ReactNode;
   onNewPage: () => void;
   onNewDatabase?: () => void;
+  onNewWhiteboard?: () => void;
   onImport: () => void;
   onImportFolder?: () => void;
   createBusy: boolean;
@@ -89,6 +90,7 @@ export function Sidebar(props: SidebarProps) {
       <div className="nb-sidebar-foot">
         <button className="nb-nav-row" disabled={props.createBusy} onClick={props.onNewPage}><Icon name="plus" size={15} /><span>新建页面</span></button>
         {props.onNewDatabase && <button className="nb-nav-row" disabled={props.createBusy} onClick={props.onNewDatabase}><Icon name="table" size={15} /><span>新建数据库</span></button>}
+        {props.onNewWhiteboard && <button className="nb-nav-row" disabled={props.createBusy} onClick={props.onNewWhiteboard}><Icon name="focus" size={15} /><span>新建白板</span></button>}
         <button className="nb-nav-row" onClick={props.onImport}><Icon name="upload" size={15} /><span>导入 Markdown</span></button>
         {props.onImportFolder && <button className="nb-nav-row" onClick={props.onImportFolder}><Icon name="folder" size={15} /><span>导入 Markdown 文件夹</span></button>}
       </div>

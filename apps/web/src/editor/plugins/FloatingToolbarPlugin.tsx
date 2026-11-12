@@ -9,12 +9,15 @@ import {
   $getSelection, $isRangeSelection, COMMAND_PRIORITY_LOW, FORMAT_TEXT_COMMAND, KEY_ESCAPE_COMMAND, createCommand,
 } from 'lexical';
 import type { LexicalCommand, TextFormatType } from 'lexical';
+import type { TextStyle } from '@nbase/contracts';
+import { $applyTextStyle, $selectionTextStyle } from '../textFormatting';
+import { TextColorMenu } from './TextColorMenu';
 import './floatingToolbar.css';
 
 /** Asks the main toolbar to open its link form for the current selection. */
 export const OPEN_LINK_FORM_COMMAND: LexicalCommand<void> = createCommand('NBASE_OPEN_LINK_FORM');
 
-type Marks = Record<'bold' | 'italic' | 'strikethrough' | 'highlight' | 'code', boolean> & { link: boolean };
+type Marks = Record<'bold' | 'italic' | 'strikethrough' | 'highlight' | 'code', boolean> & { link: boolean; textStyle: TextStyle };
 
 const narrowScreen = '(hover: none), (max-width: 720px)';
 
@@ -29,6 +32,7 @@ function $marks(): Marks | null {
     strikethrough: selection.hasFormat('strikethrough'), highlight: selection.hasFormat('highlight'),
     code: selection.hasFormat('code'),
     link: nodes.some(node => $findMatchingParent(node, $isLinkNode)),
+    textStyle: $selectionTextStyle(),
   };
 }
 
@@ -41,6 +45,7 @@ export function FloatingToolbarPlugin() {
   const element = useRef<HTMLDivElement>(null);
   const pointerDown = useRef(false);
   const dismissed = useRef(false);
+  const [colorOpen, setColorOpen] = useState(false);
 
   const refresh = useCallback(() => {
     const next = pointerDown.current || dismissed.current || editor.isComposing() || !editor.isEditable()
@@ -72,6 +77,7 @@ export function FloatingToolbarPlugin() {
   }, [editor, refresh]);
 
   const open = Boolean(marks);
+  useEffect(() => { if (!open) setColorOpen(false); }, [open]);
   useLayoutEffect(() => {
     if (!open) { setPosition(null); return; }
     const place = () => {
@@ -108,6 +114,11 @@ export function FloatingToolbarPlugin() {
     {button('删除线', <s>S</s>, marks.strikethrough, format('strikethrough'))}
     {button('文字高亮', <mark className="nbase-highlight">高亮</mark>, marks.highlight, format('highlight'))}
     {button('行内代码', <span className="nbase-code-icon">&lt;/&gt;</span>, marks.code, format('code'))}
+    {button('文字和背景颜色', <span className="nbase-color-icon" style={{ ...(marks.textStyle.color ? { color: `var(--nb-c-${marks.textStyle.color})` } : {}),
+      ...(marks.textStyle.background ? { backgroundColor: `var(--nb-bg-${marks.textStyle.background})` } : {}) }}>A</span>,
+    colorOpen, () => setColorOpen(value => !value))}
     {button('链接', '链接', marks.link, () => editor.dispatchCommand(OPEN_LINK_FORM_COMMAND, undefined))}
+    {colorOpen && <div className="nbase-floating-colors"><TextColorMenu value={marks.textStyle}
+      onPick={patch => { editor.update(() => $applyTextStyle(patch)); setColorOpen(false); }} /></div>}
   </div>;
 }

@@ -10,6 +10,7 @@ import {
 } from 'lexical';
 import type { BaseSelection, LexicalNode, NodeKey, SerializedLexicalNode, SerializedRootNode } from 'lexical';
 import { normalizeDocumentContent } from './normalize';
+import { $hasMergedCells, $tableGrid } from './tableLayout';
 
 const maxRows = 100;
 const maxColumns = 30;
@@ -214,6 +215,16 @@ export function $applyTablePaste(
 
 export function $alignTableColumn(alignment: TableAlignment): void {
   const cell = $currentCell($getSelection());
+  const table = cell?.getParent()?.getParent();
+  if (cell && $isTableNode(table) && $hasMergedCells(table)) {
+    const grid = $tableGrid(table);
+    const start = grid.flat().find(entry => entry.cell.is(cell))?.column;
+    const cells = new Set(grid.flatMap(row => row.filter(entry => entry.column === start).map(entry => entry.cell)));
+    if ([...cells].every(item => item.getFormatType() === alignment)) return;
+    $addUpdateTag(HISTORY_PUSH_TAG);
+    for (const item of cells) item.setFormat(alignment);
+    return;
+  }
   const position = cell ? $cellPosition(cell) : null;
   if (!position) return;
   const column = position.grid.cells.map(row => row[position.column]!);
@@ -222,22 +233,24 @@ export function $alignTableColumn(alignment: TableAlignment): void {
   for (const item of column) item.setFormat(alignment);
 }
 
-export function $moveTableLine(axis: 'row' | 'column', direction: -1 | 1): void {
+export function $moveTableLine(axis: 'row' | 'column', direction: -1 | 1): boolean {
   const cell = $currentCell($getSelection());
   const position = cell ? $cellPosition(cell) : null;
-  if (!position) return;
+  if (!position) return false;
+  // Rows and columns of a merged table are not independent lines.
+  if ($hasMergedCells(position.grid.table)) return false;
   const { grid, row, column } = position;
   const next = (axis === 'row' ? row : column) + direction;
   if (axis === 'row') {
     const other = grid.rows[next];
-    if (!other) return;
+    if (!other) return false;
     const current = grid.rows[row]!;
     $addUpdateTag(HISTORY_PUSH_TAG);
     if (direction === -1) other.insertBefore(current);
     else other.insertAfter(current);
     $normalizeRowHeaders($grid(grid.table)!);
   } else {
-    if (!grid.cells[0]![next]) return;
+    if (!grid.cells[0]![next]) return false;
     $addUpdateTag(HISTORY_PUSH_TAG);
     for (const cells of grid.cells) {
       if (direction === -1) cells[next]!.insertBefore(cells[column]!);
@@ -250,4 +263,5 @@ export function $moveTableLine(axis: 'row' | 'column', direction: -1 | 1): void 
       grid.table.setColWidths(reordered);
     }
   }
+  return true;
 }

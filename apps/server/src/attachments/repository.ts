@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { open, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import type { AttachmentMetadata } from '@nbase/contracts';
+import { attachmentByteLimit, mediaAttachmentByteLimit, type AttachmentMetadata } from '@nbase/contracts';
+import { createReadStream, type ReadStream } from 'node:fs';
 import type { Pool, PoolClient } from 'pg';
 
-export const maxAttachmentBytes = 10 * 1024 * 1024;
+/** The request body limit; each type's own limit is checked after its bytes are identified. */
+export const maxAttachmentBytes = mediaAttachmentByteLimit;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface StoredAttachment {
@@ -26,8 +28,30 @@ export function isAttachmentId(value: unknown): value is string {
   return typeof value === 'string' && uuidPattern.test(value);
 }
 
-type AcceptedFile = { mediaType: string; extension: string; inline: boolean };
-function identifyFile(bytes: Buffer, name: string): AcceptedFile {
+type AcceptedFile = { mediaType: string; extension: string; inline: boolean; extensions?: string[] };
+const ascii = (bytes: Buffer, start: number, end: number) => bytes.subarray(start, end).toString('latin1');
+function identifyMedia(bytes: Buffer): AcceptedFile | null {
+  if (ascii(bytes, 4, 8) === 'ftyp') {
+    const brand = ascii(bytes, 8, 12);
+    return brand === 'M4A ' || brand === 'M4B '
+      ? { mediaType: 'audio/mp4', extension: '.m4a', inline: true }
+      : { mediaType: 'video/mp4', extension: '.mp4', inline: true, extensions: ['.mp4', '.m4v'] };
+  }
+  if (bytes.subarray(0, 4).equals(Buffer.from('1a45dfa3', 'hex')) && bytes.subarray(0, 64).includes('webm')) {
+    return { mediaType: 'video/webm', extension: '.webm', inline: true };
+  }
+  if (ascii(bytes, 0, 4) === 'OggS') return { mediaType: 'audio/ogg', extension: '.ogg', inline: true, extensions: ['.ogg', '.oga'] };
+  if (ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 12) === 'WAVE') return { mediaType: 'audio/wav', extension: '.wav', inline: true };
+  // MP3: an ID3v2 tag, or an MPEG audio frame sync with a valid layer and bitrate.
+  if (ascii(bytes, 0, 3) === 'ID3' || (bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xe0) === 0xe0
+    && ((bytes[1] ?? 0) & 0x06) !== 0 && ((bytes[2] ?? 0) & 0xf0) !== 0xf0)) {
+    return { mediaType: 'audio/mpeg', extension: '.mp3', inline: true };
+  }
+  return null;
+}
+export function identifyFile(bytes: Buffer, name: string): AcceptedFile {
+  const media = identifyMedia(bytes);
+  if (media) return media;
   if (bytes.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))) {
     return { mediaType: 'image/png', extension: '.png', inline: true };
   }
@@ -65,7 +89,7 @@ function safeFileName(value: unknown, kind: AcceptedFile): string {
   }
   const name = value.includes('.') ? value : `${value}${kind.extension}`;
   const suffix = name.slice(name.lastIndexOf('.')).toLowerCase();
-  const permitted = kind.mediaType === 'image/jpeg' ? ['.jpg', '.jpeg'] : [kind.extension];
+  const permitted = kind.mediaType === 'image/jpeg' ? ['.jpg', '.jpeg'] : kind.extensions ?? [kind.extension];
   if (!permitted.includes(suffix) || name.length > 180) throw new AttachmentError(415, 'ATTACHMENT_TYPE_MISMATCH');
   return name;
 }
@@ -110,6 +134,22 @@ export class PgAttachmentRepository {
     return result.rows[0] ? metadata(result.rows[0]) : null;
   }
 
+  /**
+   * A byte range of a stored file. Hashing 100 MiB on every seek is not practical, so a range read
+   * checks the stored size only; a full read still verifies the digest.
+   */
+  async range(workspaceId: string, attachment: AttachmentMetadata, start: number, end: number): Promise<ReadStream> {
+    const path = filePath(this.root, workspaceId, attachment.id);
+    let size: number;
+    try { size = (await stat(path)).size; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new AttachmentError(503, 'ATTACHMENT_MISSING');
+      throw error;
+    }
+    if (size !== attachment.byteSize) throw new AttachmentError(503, 'ATTACHMENT_CORRUPT');
+    return createReadStream(path, { start, end });
+  }
+
   async bytes(workspaceId: string, attachment: AttachmentMetadata): Promise<Buffer> {
     const path = filePath(this.root, workspaceId, attachment.id);
     let bytes: Buffer;
@@ -133,6 +173,9 @@ export class PgAttachmentRepository {
     if (!bytes.length) throw new AttachmentError(400, 'ATTACHMENT_EMPTY');
     if (bytes.length > maxAttachmentBytes) throw new AttachmentError(413, 'ATTACHMENT_TOO_LARGE');
     const kind = identifyFile(bytes, String(rawName ?? ''));
+    if (bytes.length > (kind.mediaType.startsWith('audio/') || kind.mediaType.startsWith('video/') ? mediaAttachmentByteLimit : attachmentByteLimit)) {
+      throw new AttachmentError(413, 'ATTACHMENT_TOO_LARGE');
+    }
     const fileName = safeFileName(rawName, kind);
     const digest = createHash('sha256').update(bytes).digest();
     const path = filePath(this.root, workspaceId, id);

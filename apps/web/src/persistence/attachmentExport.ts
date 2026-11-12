@@ -94,8 +94,9 @@ export function zipEntries(entries: ZipEntry[]): Blob {
     u16(item.name.length); u16(0); u16(0); u16(0); u16(0); u32(0); u32(item.offset);
     copy(item.name);
   }
+  const centralLength = cursor - centralStart;
   u32(0x06054b50); u16(0); u16(0); u16(records.length); u16(records.length);
-  u32(cursor - centralStart); u32(centralStart); u16(0);
+  u32(centralLength); u32(centralStart); u16(0);
   if (cursor !== total) throw new Error('导出文件构建失败。');
   return new Blob([bytes], { type: 'application/zip' });
 }

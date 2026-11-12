@@ -8,7 +8,10 @@ import type { CreatePageRequest, FavoriteListResponse, PageCoverId, PageDocument
 import type { Pool, PoolClient, QueryResult } from 'pg';
 import { attachmentReferences, validateDocumentContent } from './validate.js';
 import { replacePageLinks } from './page-links.js';
+import { contentMatchesKind, isWhiteboardContent } from '../whiteboards/content.js';
 import { extractDocumentIndex, type IndexedPageReference } from './search-text.js';
+import { searchPages } from '../search/search.js';
+import { refreshPagePinyin } from '../search/write.js';
 
 const maxRevision = 9223372036854775807n;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -111,14 +114,6 @@ function summaryFromRow(row: PageRow): PageSummary {
   const { content: _content, properties: _properties, ...summary } = pageFromRow(row);
   void _content; void _properties;
   return summary;
-}
-
-function searchSnippet(text: string, phrase: string): string {
-  if (!text) return '仅标题匹配';
-  const at = text.toLocaleLowerCase().indexOf(phrase.toLocaleLowerCase());
-  const start = Math.max(0, (at < 0 ? 0 : at) - 45);
-  const end = Math.min(text.length, (at < 0 ? 0 : at + phrase.length) + 85);
-  return `${start ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}`;
 }
 
 /** Object key order is irrelevant to an idempotency replay. Never turn parsed JSON into an object via assignment. */
@@ -319,27 +314,7 @@ export class PgPageRepository {
   }
 
   async search(workspaceId: string, actorId: string, phrase: string, limit: number, tagIds: string[] = []): Promise<SearchResponse> {
-    const result = await this.pool.query<{ id: string; parent_id: string | null; title: string; icon: string | null;
-      revision: string; updated_at: Date; search_text: string; title_match: boolean }>(`
-      SELECT p.id, p.parent_id, p.title, p.icon, p.revision::text AS revision, p.updated_at, p.search_text,
-        (position(lower($3) in lower(p.title)) > 0) AS title_match
-      FROM pages p
-      JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
-      WHERE p.workspace_id = $1 AND p.deleted_at IS NULL
-        AND (position(lower($3) in lower(p.title)) > 0
-          OR position(lower($3) in lower(p.search_text)) > 0)
-        AND NOT EXISTS (
-          SELECT 1 FROM unnest($5::uuid[]) AS required(tag_id)
-          WHERE NOT EXISTS (SELECT 1 FROM page_tags pt
-            WHERE pt.workspace_id = p.workspace_id AND pt.page_id = p.id AND pt.tag_id = required.tag_id)
-        )
-      ORDER BY title_match DESC, p.updated_at DESC, p.id
-      LIMIT $4
-    `, [workspaceId, actorId, phrase, limit + 1, tagIds]);
-    return { results: result.rows.slice(0, limit).map(row => ({ pageId: row.id, title: row.title, icon: row.icon ?? null,
-      parentId: row.parent_id, revision: row.revision, updatedAt: row.updated_at.toISOString(),
-      snippet: searchSnippet(row.search_text, phrase), matchField: row.title_match ? 'title' as const : 'content' as const })),
-    truncated: result.rows.length > limit };
+    return searchPages(this.pool, workspaceId, actorId, phrase, limit, tagIds);
   }
 
   /** Run one authorized write and its idempotency receipt under the workspace lock. */
@@ -474,7 +449,7 @@ export class PgPageRepository {
       );
       const parentKind = parent.rows[0]?.kind;
       if (!parentKind) throw new PageError(422, 'PAGE_TREE_INVALID');
-      if (parentKind === 'row' || (parentKind === 'database' && requestedKind === 'database')) {
+      if (parentKind === 'row' || parentKind === 'whiteboard' || (parentKind === 'database' && requestedKind === 'database')) {
         throw new PageError(422, 'PAGE_KIND_INVALID');
       }
       if (parentKind === 'database') {
@@ -489,6 +464,11 @@ export class PgPageRepository {
       }
     }
     if (body.properties !== undefined && kind !== 'row') throw new PageError(422, 'PAGE_KIND_INVALID');
+    if (isWhiteboardContent(body.content)) {
+      // The board in the content is what makes a page a whiteboard; rows and databases cannot carry one.
+      if (kind !== 'document') throw new PageError(422, 'PAGE_KIND_INVALID');
+      kind = 'whiteboard';
+    }
     const result = await client.query<PageRow>(`
       INSERT INTO pages (id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, search_text,
         kind, row_properties)
@@ -497,6 +477,7 @@ export class PgPageRepository {
     `, [randomUUID(), workspaceId, body.parentId, body.title, JSON.stringify(body.content),
       searchText, body.icon ?? null, body.cover ?? null, kind, rowProperties ? JSON.stringify(rowProperties) : null]);
     const page = pageFromRow(result.rows[0]!);
+    await refreshPagePinyin(client, workspaceId, page.id, { title: body.title, searchText });
     if (body.tagIds?.length) page.tagIds = await this.replaceTags(client, workspaceId, page.id, body.tagIds);
     if (index.references.length) await replacePageLinks(client, workspaceId, page.id, index.references);
     await this.snapshot(client, workspaceId, [page.id], actorId, 'create');
@@ -548,7 +529,7 @@ export class PgPageRepository {
     if (!row) throw new PageError(404, 'NOT_FOUND');
     if (row.content_schema_version !== 1) throw new PageError(422, 'CONTENT_VERSION_UNSUPPORTED');
     if (row.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', row.revision);
-    if (row.kind === 'database' && body.content) throw new PageError(422, 'PAGE_KIND_INVALID');
+    if (body.content && (row.kind === 'database' || !contentMatchesKind(row.kind, body.content))) throw new PageError(422, 'PAGE_KIND_INVALID');
     if (body.properties !== undefined && row.kind !== 'row') throw new PageError(422, 'PAGE_KIND_INVALID');
     if (row.kind === 'row' && body.parentId !== undefined && body.parentId !== row.parent_id) {
       throw new PageError(422, 'PAGE_KIND_INVALID');
@@ -582,6 +563,8 @@ export class PgPageRepository {
       JSON.stringify(body.content ?? row.content_json), body.expectedRevision,
       searchText, icon, cover, rowProperties ? JSON.stringify(rowProperties) : null]);
     if (!result.rows[0]) throw new PageError(409, 'REVISION_CONFLICT');
+    await refreshPagePinyin(client, workspaceId, pageId,
+      { title: body.title !== undefined && body.title !== row.title ? body.title : undefined, searchText });
     const tagIds = body.tagIds === undefined ? row.tag_ids : await this.replaceTags(client, workspaceId, pageId, body.tagIds);
     if (index) await replacePageLinks(client, workspaceId, pageId, index.references);
     await this.snapshot(client, workspaceId, [pageId], actorId, 'update');
@@ -718,6 +701,7 @@ export class PgPageRepository {
         WHERE workspace_id = $1 AND id = $2 RETURNING ${pageColumns}`,
       [workspaceId, pageId, version.title, JSON.stringify(content), searchText,
         rowProperties ? JSON.stringify(rowProperties) : null]);
+      await refreshPagePinyin(client, workspaceId, pageId, { title: version.title, searchText });
       await replacePageLinks(client, workspaceId, pageId, index.references);
       if (current.kind === 'row' && current.parent_id) {
         const schema = await loadDatabaseSchema(client, workspaceId, current.parent_id);

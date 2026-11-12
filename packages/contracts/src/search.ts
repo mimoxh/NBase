@@ -7,6 +7,11 @@ export interface SearchResult {
   updatedAt: string;
   snippet: string;
   matchField: 'title' | 'content';
+  /**
+   * The literal text to mark and select in `matchField` when it is not the query itself:
+   * the Chinese a pinyin query matched, or one term of a query matched as separate words.
+   */
+  highlight?: string;
 }
 
 export interface SearchResponse {

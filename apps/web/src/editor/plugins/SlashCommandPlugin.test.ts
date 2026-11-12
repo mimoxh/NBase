@@ -15,3 +15,12 @@ it('offers upload commands only where the host can pick files', () => {
 it('keeps upload commands available in table cells, like the page menu', () => {
   expect(keys('img', true, true)).toEqual(['image']);
 });
+
+it('matches static pinyin aliases and initials for Chinese command names', () => {
+  expect(keys('biaoti').slice(0, 3)).toEqual(['h1', 'h2', 'h3']);
+  expect(keys('bt2')).toEqual(['h2']);
+  expect(keys('dmk')).toEqual(['code']);
+  expect(keys('fgx')).toEqual(['hr']);
+  expect(keys('db')).not.toContain('check');
+  expect(keys('tupian', false, true)).toEqual(['image']);
+});

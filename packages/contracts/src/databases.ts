@@ -4,7 +4,7 @@ import type { PageSummary } from './pages.js';
  * Databases are pages whose children are row pages. The schema and views live in a
  * separate record; each row keeps its own values next to its document body.
  */
-export const pageKinds = ['document', 'database', 'row'] as const;
+export const pageKinds = ['document', 'database', 'row', 'whiteboard'] as const;
 export type PageKind = typeof pageKinds[number];
 
 export const propertyTypes = ['title', 'text', 'number', 'select', 'multi_select', 'date', 'checkbox', 'url',
