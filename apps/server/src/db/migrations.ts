@@ -402,4 +402,36 @@ WHERE EXISTS (
 );
 `,
   },
+  {
+    version: 19,
+    name: 'page_search_pinyin',
+    sql: `
+-- Derived pinyin keys (docs/architecture/search.md). NULL means not indexed yet: search then uses the
+-- literal path for that page, and the background indexer fills it in without the workspace lock.
+ALTER TABLE pages ADD COLUMN search_title_pinyin tsvector;
+ALTER TABLE pages ADD COLUMN search_body_pinyin tsvector;
+
+-- Any write that changes the source text clears the stale keys, even one that does not know about pinyin.
+CREATE FUNCTION pages_search_pinyin_reset() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.title IS DISTINCT FROM OLD.title THEN NEW.search_title_pinyin := NULL; END IF;
+  IF NEW.search_text IS DISTINCT FROM OLD.search_text THEN NEW.search_body_pinyin := NULL; END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER pages_search_pinyin_reset BEFORE UPDATE OF title, search_text ON pages
+  FOR EACH ROW EXECUTE FUNCTION pages_search_pinyin_reset();
+
+CREATE INDEX pages_search_pinyin_pending_idx ON pages (id)
+  WHERE search_title_pinyin IS NULL OR search_body_pinyin IS NULL;
+`,
+  },
+  {
+    // 19 is reserved for a parallel feature; applied versions need not be contiguous.
+    version: 20,
+    name: 'whiteboard_pages',
+    sql: `
+ALTER TABLE pages DROP CONSTRAINT pages_kind;
+ALTER TABLE pages ADD CONSTRAINT pages_kind CHECK (kind IN ('document', 'database', 'row', 'whiteboard'));
+`,
+  },
 ];

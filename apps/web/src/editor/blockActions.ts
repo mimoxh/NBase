@@ -2,7 +2,7 @@ import { $generateNodesFromSerializedNodes } from '@lexical/clipboard';
 import { $isCodeNode } from '@lexical/code';
 import { $isListNode } from '@lexical/list';
 import { $isHeadingNode, $isQuoteNode } from '@lexical/rich-text';
-import { quickCaptureMarker } from '@nbase/contracts';
+import { blockIdKey, quickCaptureMarker } from '@nbase/contracts';
 import { $createParagraphNode, $getRoot, $isElementNode, $isParagraphNode, $isRootNode } from 'lexical';
 import type { LexicalNode, SerializedLexicalNode } from 'lexical';
 import { $isFootnoteDefinitionNode } from './nodes/FootnoteNodes';
@@ -43,7 +43,8 @@ function serialized(node: LexicalNode): SerializedBlock {
   const value = node.exportJSON() as SerializedBlock;
   // A quick-capture marker locates exactly one heading, so a copy must not carry it.
   if (value.$) {
-    const { [quickCaptureMarker]: _marker, ...state } = value.$;
+    // Nor may a copy carry the original's block anchor, which references point at.
+    const { [quickCaptureMarker]: _marker, [blockIdKey]: _anchor, ...state } = value.$;
     if (Object.keys(state).length) value.$ = state;
     else delete value.$;
   }

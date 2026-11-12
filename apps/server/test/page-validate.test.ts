@@ -41,7 +41,7 @@ test('rejects executable links, custom CSS, nested tables and merged cells', () 
   reject(style, 'CONTENT_INVALID');
   const cell = content();
   cell.editorState.root.children[0] = {
-    type: 'tablecell', version: 1, colSpan: 2, rowSpan: 1, children: [],
+    type: 'tablecell', version: 1, colSpan: 65, rowSpan: 1, children: [],
   } as never;
   reject(cell, 'CONTENT_INVALID');
 });
@@ -194,4 +194,53 @@ test('accepts image presentation settings and rejects them on files or out of ra
   reject(withAttachment({ caption: '换\n行' }), 'CONTENT_INVALID');
   reject(withAttachment({ caption: 'x'.repeat(301) }), 'CONTENT_INVALID');
   reject(withAttachment({ width: 50 }, 'application/pdf'), 'CONTENT_INVALID');
+});
+
+test('accepts palette text styles and toggles, rejects raw CSS and summary-less toggles', () => {
+  const styled = content();
+  styled.editorState.root.children[0]!.children[0]!.style = 'color: var(--nb-c-red);background-color: var(--nb-bg-yellow);';
+  assert.equal(validateDocumentContent(styled).schemaVersion, 1);
+  for (const style of ['color: red;', 'color: var(--nb-c-red)', 'background-color: var(--nb-bg-yellow);color: var(--nb-c-red);', 'color: var(--nb-c-teal);']) {
+    const raw = content();
+    raw.editorState.root.children[0]!.children[0]!.style = style;
+    reject(raw, 'CONTENT_INVALID');
+  }
+  const paragraph = () => ({ type: 'paragraph', version: 1, children: [{ type: 'text', version: 1, text: '摘要', style: '' }] });
+  const toggle = content() as unknown as { editorState: { root: { children: unknown[] } } };
+  toggle.editorState.root.children = [{ type: 'toggle', version: 1, children: [paragraph(), paragraph()] }];
+  assert.equal(validateDocumentContent(toggle).schemaVersion, 1);
+  toggle.editorState.root.children = [{ type: 'toggle', version: 1, children: [] }];
+  reject(toggle, 'CONTENT_INVALID');
+  toggle.editorState.root.children = [{ type: 'toggle', version: 1, children: [{ type: 'heading', tag: 'h1', version: 1, children: [] }] }];
+  reject(toggle, 'CONTENT_INVALID');
+});
+
+test('accepts bounded merged cells and integer column widths', () => {
+  const table = (cell: Record<string, unknown>, widths?: unknown) => {
+    const value = content() as unknown as { editorState: { root: { children: unknown[] } } };
+    value.editorState.root.children = [{ type: 'table', version: 1, ...(widths === undefined ? {} : { colWidths: widths }), children: [
+      { type: 'tablerow', version: 1, children: [{ type: 'tablecell', version: 1, colSpan: 1, rowSpan: 1, children: [], ...cell }] }] }];
+    return value;
+  };
+  assert.equal(validateDocumentContent(table({ colSpan: 2, rowSpan: 3 }, [120, 240])).schemaVersion, 1);
+  for (const [cell, widths] of [[{ colSpan: 0 }], [{ rowSpan: 1.5 }], [{ width: 100 }], [{}, [10]], [{}, [120.5]], [{}, 'wide']] as const) {
+    reject(table(cell as Record<string, unknown>, widths), 'CONTENT_INVALID');
+  }
+});
+
+test('accepts block references and anchors, rejects malformed ones', () => {
+  const page = '11111111-2222-4333-8444-555555555555';
+  const doc = (paragraph: Record<string, unknown>) => {
+    const value = content() as unknown as { editorState: { root: { children: unknown[] } } };
+    value.editorState.root.children = [{ type: 'paragraph', version: 1, children: [], ...paragraph }];
+    return value;
+  };
+  const reference = (fields: Record<string, unknown>) => ({ children: [{ type: 'block-reference', version: 1, targetPageId: page, blockId: 'abcd1234', label: '块', ...fields }] });
+  assert.equal(validateDocumentContent(doc({ $: { nbaseBlockId: 'abcd1234' }, ...reference({}) })).schemaVersion, 1);
+  for (const bad of [{ $: { nbaseBlockId: 'ABC' } }, reference({ blockId: 'x' }), reference({ targetPageId: 'nope' }), reference({ label: '' })]) {
+    reject(doc(bad), 'CONTENT_INVALID');
+  }
+  const rootAnchor = content() as unknown as { editorState: { root: Record<string, unknown> } };
+  rootAnchor.editorState.root.$ = { nbaseBlockId: 'abcd1234' };
+  reject(rootAnchor, 'CONTENT_INVALID');
 });

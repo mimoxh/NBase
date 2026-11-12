@@ -1,6 +1,8 @@
-import { isFootnoteId, pageReferenceLabelLimit, type SerializedPageReference, type StoredDocumentContent } from '@nbase/contracts';
+import { isFootnoteId, isSerializedBlockReference, pageReferenceLabelLimit, type SerializedPageReference, type StoredDocumentContent } from '@nbase/contracts';
 
-const separatingElements = new Set(['paragraph', 'heading', 'quote', 'callout', 'listitem', 'code', 'tablecell', 'footnote-definition']);
+import { isWhiteboardContent, whiteboardIndex } from '../whiteboards/content.js';
+
+const separatingElements = new Set(['paragraph', 'heading', 'quote', 'callout', 'toggle', 'listitem', 'code', 'tablecell', 'footnote-definition']);
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const contextLength = 48;
 
@@ -17,6 +19,7 @@ const normalizeWhitespace = (text: string) => text.replace(/\s+/gu, ' ').trim();
 
 /** Flatten adjacent text leaves and retain reference positions for contextual snippets. */
 function inspectDocument(content: StoredDocumentContent, collectReferences: boolean) {
+  if (isWhiteboardContent(content)) return whiteboardIndex(content);
   const pieces: string[] = [];
   const locations: { targetPageId: string; occurrence: number; start: number; end: number }[] = [];
   let length = 0;
@@ -25,17 +28,21 @@ function inspectDocument(content: StoredDocumentContent, collectReferences: bool
   const visit = (node: unknown, depth: number): void => {
     if (!node || typeof node !== 'object' || depth > 64) return;
     const value = node as Record<string, unknown>;
-    if (value.type === 'page-reference') {
+    // Block references share the occurrence counter: both index into page_links and render with the same DOM marker.
+    if (value.type === 'page-reference' || value.type === 'block-reference') {
       const ordinal = occurrence++;
-      if (isPageReference(value)) {
+      if (value.type === 'page-reference' ? isPageReference(value) : isSerializedBlockReference(value)) {
         const start = length;
-        append(value.label);
-        if (collectReferences) locations.push({ targetPageId: value.targetPageId.toLowerCase(), occurrence: ordinal, start, end: length });
+        const reference = value as { label: string; targetPageId: string };
+        append(reference.label);
+        if (collectReferences) locations.push({ targetPageId: reference.targetPageId.toLowerCase(), occurrence: ordinal, start, end: length });
       }
     } else if ((value.type === 'footnote-reference' || value.type === 'footnote-definition') && isFootnoteId(value.footnoteId)) {
       append(' ' + value.footnoteId + ' ');
     } else if (value.type === 'callout') {
       if (typeof value.title === 'string') append(` ${value.title} `);
+    } else if (value.type === 'bookmark') {
+      for (const key of ['title', 'description', 'siteName'] as const) if (typeof value[key] === 'string') append(` ${value[key]} `);
     } else if (value.type === 'mermaid') {
       if (typeof value.source === 'string') append(` ${value.source} `);
     } else if (value.type === 'equation') {

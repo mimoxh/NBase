@@ -1,14 +1,15 @@
-import { attachmentPresentationOf, isAttachmentPresentation, isCalloutKind, isSerializedDatabaseView, isCalloutTitle, isFootnoteId, isMarkdownFrontMatter, isStoredMermaidSource, markdownFrontMatterKey, pageCoverIds, quickCaptureMarker, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
+import { attachmentPresentationOf, isAttachmentPresentation, isCalloutKind, isSerializedDatabaseView, isCalloutTitle, isFootnoteId, isMarkdownFrontMatter, isSerializedBookmark, blockIdKey, isBlockId, isSerializedBlockReference, isStoredMermaidSource, isTextStyle, markdownFrontMatterKey, pageCoverIds, quickCaptureMarker, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
 import { isPageReference } from './search-text.js';
+import { isWhiteboardContent, whiteboardAttachmentReferences, whiteboardProblem } from '../whiteboards/content.js';
 
 export const maxContentBytes = 1024 * 1024;
 const maxNodes = 20_000;
 const maxDepth = 64;
 const elementTypes = new Set([
-  'root', 'paragraph', 'heading', 'quote', 'callout', 'list', 'listitem', 'code',
+  'root', 'paragraph', 'heading', 'quote', 'callout', 'toggle', 'list', 'listitem', 'code',
   'link', 'autolink', 'table', 'tablerow', 'tablecell', 'footnote-definition',
 ]);
-const leafTypes = new Set(['text', 'code-highlight', 'linebreak', 'tab', 'horizontalrule', 'image-reference', 'attachment', 'equation', 'page-reference', 'footnote-reference', 'mermaid', 'database-view']);
+const leafTypes = new Set(['text', 'code-highlight', 'linebreak', 'tab', 'horizontalrule', 'image-reference', 'attachment', 'equation', 'page-reference', 'footnote-reference', 'mermaid', 'database-view', 'bookmark', 'block-reference']);
 const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype']);
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -36,6 +37,7 @@ function invalid(): never { throw new ContentValidationError('CONTENT_INVALID');
 export function validateDocumentContent(value: unknown): StoredDocumentContent {
   if (!object(value)) invalid();
   if (value.schemaVersion !== 1) throw new ContentValidationError('CONTENT_VERSION_UNSUPPORTED');
+  if (isWhiteboardContent(value)) return whiteboardProblem(value) ? invalid() : value;
   let json: string;
   try { json = JSON.stringify(value); } catch { return invalid(); }
   if (Buffer.byteLength(json, 'utf8') > maxContentBytes) invalid();
@@ -55,7 +57,10 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
       captureHeading = true;
     }
     if (node.textStyle !== undefined && node.textStyle !== '') invalid();
-    if (node.style !== undefined && node.style !== '') invalid();
+    if (node.style !== undefined && node.style !== '' && !(node.type === 'text' && isTextStyle(node.style))) invalid();
+    // A toggle's first block is its always-visible summary line.
+    if (node.type === 'toggle' && (inTable || !Array.isArray(node.children) || !object(node.children[0])
+      || node.children[0].type !== 'paragraph')) invalid();
     if (node.type === 'table' && inTable) invalid();
     if (node.type === 'callout' && (inTable || !isCalloutKind(node.kind) || !isCalloutTitle(node.title)
       || !Array.isArray(node.children))) invalid();
@@ -63,13 +68,22 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
       && (typeof node.url !== 'string' || !safeLinkUrl(node.url))) invalid();
     if (node.type === 'heading' && !['h1', 'h2', 'h3', 'h4', 'h5', 'h6'].includes(String(node.tag))) invalid();
     if (node.type === 'list' && !['bullet', 'number', 'check'].includes(String(node.listType))) invalid();
-    if (node.type === 'tablecell' && (node.colSpan !== 1 || node.rowSpan !== 1)) invalid();
+    // Merged cells and column widths mirror the web editor's bounds in tableLayout.ts.
+    const span = (value: unknown) => value === undefined || (Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 64);
+    if (node.type === 'tablecell' && (!span(node.colSpan) || !span(node.rowSpan) || node.width !== undefined)) invalid();
+    if (node.type === 'table' && node.colWidths !== undefined && (!Array.isArray(node.colWidths) || node.colWidths.length > 64
+      || !node.colWidths.every(width => Number.isInteger(width) && width >= 40 && width <= 2000))) invalid();
     if (node.type === 'image-reference'
       && (typeof node.markdown !== 'string' || typeof node.alt !== 'string')) invalid();
     if (node.type === 'equation' && (typeof node.equation !== 'string' || node.equation.length > 10_000
       || typeof node.inline !== 'boolean')) invalid();
     if (node.type === 'mermaid' && (inTable || inLinkOrCode || !isStoredMermaidSource(node.source))) invalid();
     if (node.type === 'database-view' && (depth !== 1 || !isSerializedDatabaseView(node))) invalid();
+    if (node.type === 'bookmark' && (inTable || inLinkOrCode || !isSerializedBookmark(node) || !safeLinkUrl(String(node.url)))) invalid();
+    if (node.type === 'block-reference' && (inLinkOrCode || !isSerializedBlockReference(node))) invalid();
+    // A block anchor belongs to a block element, never to the root or to a leaf.
+    if (object(node.$) && Object.hasOwn(node.$, blockIdKey)
+      && (depth === 0 || !elementTypes.has(node.type) || !isBlockId(node.$[blockIdKey]))) invalid();
     if (node.type === 'page-reference'
       && (inLinkOrCode || !isPageReference(node) || node.targetPageId !== node.targetPageId.toLowerCase())) invalid();
     if ((node.type === 'footnote-reference' || node.type === 'footnote-definition') && !isFootnoteId(node.footnoteId)) invalid();
@@ -127,6 +141,7 @@ export interface AttachmentReference { id: string; fileName: string; mediaType: 
 
 /** Call only after validateDocumentContent has bounded the tree. */
 export function attachmentReferences(content: StoredDocumentContent): AttachmentReference[] {
+  if (isWhiteboardContent(content)) return whiteboardAttachmentReferences(content);
   const result: AttachmentReference[] = [];
   const visit = (node: unknown): void => {
     const value = node as Record<string, unknown>;

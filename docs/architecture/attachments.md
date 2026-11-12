@@ -6,7 +6,8 @@
 
 - 配置了 `NBASE_DATABASE_URL` 时，启动还必须提供绝对路径 `NBASE_ATTACHMENT_DIR`。目录必须事先存在、可写，并位于公开的 Web 静态目录之外；检查失败则不监听。不要把附件目录放进 `apps/web/dist` 或容器临时层。
 - `attachments` 表记录工作区、上传者、原文件名、识别出的媒体类型、字节数、SHA-256 和创建时间。磁盘文件名仅由工作区 UUID 和附件 UUID 组成；用户文件名不会参与磁盘路径。
-- 当前单文件上限 10 MiB，允许 PNG、JPEG、GIF、WebP、PDF、ZIP、UTF-8 TXT/Markdown。图片按字节签名识别后才以内联图片提供；SVG 和不支持的字节类型拒绝。非图片只能作为附件下载。浏览器预检查不代替服务端限制。
+- 允许 PNG、JPEG、GIF、WebP、PDF、ZIP、UTF-8 TXT/Markdown，以及音频 MP3、M4A、WAV、OGG 和视频 MP4、WebM。类型一律按字节签名识别，扩展名须与之相符；SVG 和不支持的字节类型拒绝。音视频单文件上限 100 MiB，其余 10 MiB（契约 `attachmentLimitFor`），请求体上限按 100 MiB 设置，识别类型后再按各自上限拒绝。浏览器预检查不代替服务端限制。
+- 图片、音视频和 PDF 以内联方式提供，编辑器直接预览：音视频用 `<audio>`/`<video>`，PDF 点击后在同源 iframe 中打开（响应带 `X-Frame-Options: SAMEORIGIN`）。其他类型只能下载。内容接口支持单个 `Range` 请求以便播放和拖动进度；范围读取只核对文件大小，完整读取仍校验 SHA-256 摘要。音视频进入完整备份，会明显增加备份体积。
 - 客户端生成附件 UUID，以 `PUT /api/workspaces/:workspaceId/attachments/:attachmentId?name=...` 上传 `application/octet-stream`。Cookie 会话、精确 Origin、CSRF 和工作区编辑权限在读取请求体前验证。同 ID、相同内容和元信息可重试，返回既有元数据；不同内容返回 409。文件先写同目录临时文件，再原子提升，最后提交元数据。进程在提升后、提交前崩溃可能留下孤儿文件；相同 ID、相同字节的重试可接管该文件。
 - `GET /api/workspaces/:workspaceId/attachments/:attachmentId` 返回元数据；`.../content` 由服务端再次检查工作区权限、文件长度和 SHA-256。未登录返回 401，无成员关系返回 404；缺失或损坏文件返回明确 503。响应使用 `private, no-store` 与 `nosniff`。图片可同源显示，`?download=1` 强制下载。
 - 文档 JSON 的 `attachment` 节点保存稳定 UUID、原文件名、媒体类型和说明；页面创建/更新时服务器确认这些元数据确实属于当前工作区。导入的外部图片 Markdown 仍显示不加载的引用占位，不会向外部站点请求图片。

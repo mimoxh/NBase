@@ -76,3 +76,17 @@ test('search includes visible footnote labels and body without indexing front ma
     ] } } };
   assert.equal(extractSearchText(content), '正文 说明 说明 脚注正文');
 });
+
+test('indexes block references as links to their page, in document order with page references', () => {
+  const page = '11111111-2222-4333-8444-555555555555';
+  const other = '66666666-7777-4888-8999-aaaaaaaaaaaa';
+  const index = extractDocumentIndex({ schemaVersion: 1, editorState: { root: { type: 'root', version: 1, children: [
+    { type: 'paragraph', version: 1, children: [
+      { type: 'page-reference', version: 1, targetPageId: other, label: '页面' },
+      { type: 'text', version: 1, text: ' 与 ' },
+      { type: 'block-reference', version: 1, targetPageId: page, blockId: 'abcd1234', label: '某个块' },
+    ] },
+  ] } } });
+  assert.deepEqual(index.references.map(item => [item.targetPageId, item.occurrence]), [[other, 0], [page, 1]]);
+  assert.match(index.searchText, /某个块/);
+});

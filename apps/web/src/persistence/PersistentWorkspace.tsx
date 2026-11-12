@@ -1,8 +1,11 @@
+import type { LinkPreview } from '@nbase/contracts';
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AuthSessionResponse, DailyNoteSettings, DailyNoteStatus, NoteTemplate, OpenDailyNoteRequest,
   PageBacklink, PageCoverId, PageDocument, PageSummary, PageVersion, QuickCaptureRequest, SearchResult,
   StoredDocumentContent, TrashedPageDocument, UpdatePageRequest, WorkspaceTag } from '@nbase/contracts';
-import { pageIdFromReferenceUrl } from '@nbase/contracts';
+import { isWhiteboardContent, pageIdFromReferenceUrl, whiteboardContent } from '@nbase/contracts';
+import { LazyWhiteboard } from '../whiteboard/lazy';
+import { attachmentContentUrl, boardSnapshot } from '../whiteboard/host';
 import { Icon } from '../components/Icon';
 import { DocumentEditor } from '../editor/DocumentEditor';
 import { placePage, type PagePlacement } from '../shell/pageOrder';
@@ -10,7 +13,8 @@ import { readingMenuItems, useReadingPrefs } from '../shell/readingPrefs';
 import { SourceEditorDialog } from '../editor/SourceEditorDialog';
 import { addMarkdownFrontMatter, createContentFromMarkdown, markdownFromContent, parseMarkdownImport } from '../editor/markdown';
 import type { AttachmentPickKind, DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
-import { ApiError, attachmentClient, loadPageTree, pageClient, tagClient } from './client';
+import { resolveBlockText } from './blockResolver';
+import { ApiError, attachmentClient, loadPageTree, pageClient, request, tagClient, workspacePath } from './client';
 import { downloadBlob } from './fileDownload';
 import { packageFolderSubtree } from './folderExport';
 import type { PropertyValue } from '@nbase/contracts';
@@ -25,6 +29,8 @@ import { exportAttachments } from './attachmentExport';
 import { PersistentSearchDialog } from './PersistentSearchDialog';
 import { PageHistoryDialog, TrashDialog } from './PageRecoveryDialogs';
 import { PageBacklinks } from './PageBacklinks';
+import { LazyGraphDialog, LazyLocalGraph, useGraphShortcut } from '../graph/lazy';
+import { createPersistentGraphSource } from '../graph/persistentSource';
 import { FolderImportDialog } from './FolderImportDialog';
 import { resolveImportTags } from './importTags';
 import { CopyNoteDialog, NewNoteDialog, TemplateManagerDialog } from './NoteTemplateDialogs';
@@ -54,7 +60,7 @@ import './persistent.css';
 
 const attachmentAccept: Record<AttachmentPickKind, string> = {
   image: '.png,.jpg,.jpeg,.gif,.webp',
-  file: '.png,.jpg,.jpeg,.gif,.webp,.pdf,.zip,.txt,.md',
+  file: '.png,.jpg,.jpeg,.gif,.webp,.pdf,.zip,.txt,.md,.mp3,.m4a,.wav,.ogg,.oga,.mp4,.m4v,.webm',
 };
 
 export function PersistentWorkspace() {
@@ -86,7 +92,7 @@ export function PersistentWorkspace() {
   const [readOnly, setReadOnly] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [dialog, setDialog] = useState<'source' | 'import' | 'move' | 'search' | 'history' | 'trash' | 'delete' |
-    'new' | 'templates' | 'copy' | 'tags' | 'today' | 'quick-capture' | 'settings' | 'folder-import' | null>(null);
+    'new' | 'templates' | 'copy' | 'tags' | 'today' | 'quick-capture' | 'settings' | 'folder-import' | 'graph' | null>(null);
   const [newParent, setNewParent] = useState<string | null>(null);
   const [copyPreparing, setCopyPreparing] = useState(false);
   const [noteDialogError, setNoteDialogError] = useState('');
@@ -310,6 +316,9 @@ export function PersistentWorkspace() {
     setDialog(null); void openPageRef.current(pageId);
   }, []);
   const pageReferenceAccess = useMemo(() => ({ pages, open: openReferencedPage }), [pages, openReferencedPage]);
+  const graphWorkspaceId = workspace?.id;
+  const graphSource = useMemo(() => graphWorkspaceId ? createPersistentGraphSource(graphWorkspaceId) : null, [graphWorkspaceId]);
+  useGraphShortcut(() => setDialog('graph'), sessionPhase !== 'ready' || !graphSource || dialog !== null);
 
   useEffect(() => {
     if (!session || !workspace || !initialPageReference.current) return;
@@ -676,6 +685,7 @@ export function PersistentWorkspace() {
   };
   const createDatabaseRef = useRef(createDatabase);
   createDatabaseRef.current = createDatabase;
+  const createWhiteboard = (parentId: string | null) => { if (canWrite) void createPage(parentId, '未命名白板', whiteboardContent([])); };
   const databaseChoices = useMemo(() => pages.filter(page => page.kind === 'database')
     .map(page => ({ id: page.id, title: page.title, icon: page.icon })), [pages]);
 
@@ -804,7 +814,7 @@ export function PersistentWorkspace() {
   }, [sessionPhase, workspace, dialog]);
 
   const conflictMarkdown = useMemo(() => {
-    if (!conflict) return null;
+    if (!conflict || isWhiteboardContent(conflict.draft.content)) return null;
     try { return conflict.draft.markdown ?? markdownFromContent(conflict.draft.content as DocumentContent); }
     catch { return null; }
   }, [conflict]);
@@ -820,7 +830,8 @@ export function PersistentWorkspace() {
   const current = documentPage;
   const currentLocked = pageActionBusy || pendingActions.some(item => activeId && item.affectedIds.includes(activeId));
   const rawContent = initialContent ?? current?.content;
-  const supported = rawContent?.schemaVersion === 1;
+  // Whiteboards have no Markdown form, so Markdown-only paths fall back to the raw JSON for them.
+  const supported = rawContent?.schemaVersion === 1 && !isWhiteboardContent(rawContent);
   const openSource = () => {
     const snapshot = editorRef.current?.getSnapshot();
     if (!current || !snapshot || !workspaceScope) { setNotice('当前正文还未打开。'); return; }
@@ -862,8 +873,9 @@ export function PersistentWorkspace() {
     if (!saved) throw new Error('副本尚未确认；源码与待创建操作仍保留，请先处理待创建记录。');
     setNotice('源码已另存为新页面，可从侧栏打开。');
   };
-  const { exportCurrent, exportFolder, uploadFiles, retryUpload, importFile, completeImport } = createPageTransfers({ session, workspace,
-    workspaceScope, liveScope, current, title, conflict, conflictMarkdown, supported, tags, readOnly, currentLocked, canWrite, pendingImport,
+  const { exportCurrent, exportCurrentAs, exportFolder, uploadFiles, retryUpload, importFile, completeImport } = createPageTransfers({ session, workspace,
+    workspaceScope, liveScope, current, title, conflict, conflictMarkdown, supported, tags, readOnly,
+    pageTitle: id => pages.find(page => page.id === id)?.title, currentLocked, canWrite, pendingImport,
     editorSnapshot, editorRef, activeIdRef, draftsRef, uploadingRef, folderExportingRef, importResolvingRef, createBusyRef, setDialog, setNotice,
     setReauth, setNoteDialogError, setFolderExporting, setImportResolving, setPendingImport, setPendingUploads, settlePageBeforeWrite, createPage });
   const toggleSidebar = () => {
@@ -911,11 +923,21 @@ export function PersistentWorkspace() {
     onTrash: (id: string) => { void openPage(id).then(opened => { if (opened) setDialog('delete'); }); },
     ...(canWrite ? { onPlace: (id: string, placement: PagePlacement) => { void placePageInTree(id, placement); } } : {}),
   };
+  const formatExportItems: MenuItem[] = [
+    { key: 'download-html', label: '下载为 HTML', icon: 'download', onSelect: () => void exportCurrentAs('html') },
+    { key: 'download-docx', label: '下载为 Word', icon: 'download', onSelect: () => void exportCurrentAs('docx') },
+  ];
   const pageMenuItems: (MenuItem | 'divider')[] = current?.kind === 'database' ? [
     { key: 'move', label: '移动到…', icon: 'folder', disabled: currentLocked || !canWrite, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialog('move'); } },
     { key: 'export', label: '导入导出…', icon: 'download', onSelect: () => requestDatabaseExport(current.id) },
     'divider',
     { key: 'trash', label: '移入回收站（含所有行）', icon: 'trash', danger: true, disabled: currentLocked || !canWrite, onSelect: () => setDialog('delete') },
+  ] : current?.kind === 'whiteboard' ? [
+    { key: 'mode', label: readOnly ? '切换为编辑' : '切换为只读', icon: 'focus', disabled: !canWrite, onSelect: () => setReadOnly(!readOnly) },
+    { key: 'download', label: '下载白板数据 (JSON)', icon: 'download', onSelect: exportCurrent },
+    { key: 'move', label: '移动到…', icon: 'folder', disabled: currentLocked || !canWrite, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialog('move'); } },
+    'divider',
+    { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, disabled: currentLocked || !canWrite, onSelect: () => setDialog('delete') },
   ] : current?.kind === 'row' ? [
     ...readingMenuItems(readingPrefs, setReadingPrefs),
     'divider',
@@ -923,6 +945,7 @@ export function PersistentWorkspace() {
     { key: 'attach', label: '添加图片或附件', icon: 'image', disabled: editorReadOnly, onSelect: () => pickAttachment('file') },
     { key: 'source', label: 'Markdown 源码', icon: 'code', onSelect: openSource },
     { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
+    ...formatExportItems,
     ...(current.parentId ? [{ key: 'database', label: '返回数据库', icon: 'table' as const, onSelect: () => void openPage(current.parentId!) }] : []),
     'divider',
     { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, disabled: currentLocked || !canWrite, onSelect: () => setDialog('delete') },
@@ -933,6 +956,7 @@ export function PersistentWorkspace() {
     { key: 'attach', label: '添加图片或附件', icon: 'image', disabled: editorReadOnly, onSelect: () => pickAttachment('file') },
     { key: 'source', label: 'Markdown 源码', icon: 'code', onSelect: openSource },
     { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
+    ...formatExportItems,
     { key: 'folder-zip', label: '导出已保存的页面与子页面 ZIP', icon: 'download', disabled: folderExporting, onSelect: () => void exportFolder() },
     'divider',
     { key: 'child', label: '添加子页面', icon: 'plus', disabled: createBusy || currentLocked || !canWrite, onSelect: () => openNewNote(current.id) },
@@ -950,6 +974,7 @@ export function PersistentWorkspace() {
       theme={theme} onTheme={setTheme} onLogout={() => void logout()}
       onSearch={() => setDialog('search')} onTrash={() => openTrash()}
       noteActions={<>
+        <button className="nb-nav-row" onClick={() => setDialog('graph')}><Icon name="link" size={15} /><span>关系图</span></button>
         <button className="nb-nav-row" onClick={() => setDialog('today')}><Icon name="clock" size={15} /><span>今天</span></button>
         {canWrite && <>
           <button className="nb-nav-row" disabled={!noteWrites.ready} onClick={() => setDialog('quick-capture')}><Icon name="plus" size={15} /><span>快速记录</span></button>
@@ -960,7 +985,7 @@ export function PersistentWorkspace() {
       </>}
       treeControls={tags.length > 0 && <TagFilter tags={tags} value={treeTagIds} onChange={setTreeTagIds} />}
       onNewPage={() => openNewNote(null)} onImport={() => { if (canWrite) fileRef.current?.click(); }}
-      {...(canWrite ? { onNewDatabase: () => void createDatabase(null) } : {})}
+      {...(canWrite ? { onNewDatabase: () => void createDatabase(null), onNewWhiteboard: () => createWhiteboard(null) } : {})}
       {...(canWrite ? { onImportFolder: () => setDialog('folder-import') } : {})}
       createBusy={createBusy || !canWrite} pages={filterPageTree(pages, treeTagIds)} activeId={activeId}
       favorites={favoriteSet} favoritePages={favoritePages} recentPages={recentPages}
@@ -988,6 +1013,20 @@ export function PersistentWorkspace() {
         {activeId ? loadingPage ? <div className="nb-home" role="status">正在读取页面…</div>
           : conflict ? <ConflictCard conflict={conflict} conflictMarkdown={conflictMarkdown} createBusy={createBusy} onDownload={exportCurrent}
             onSaveCopy={() => void createPage(conflict.server.parentId, `${conflict.draft.title || '未命名页面'}（冲突副本）`, conflict.draft.content, conflict.draft)} />
+          : current && current.kind === 'whiteboard' ? <div className="wb-host">
+            <div className="wb-host-head"><span className="nb-page-icon" aria-hidden="true">{current.icon ?? '🎨'}</span>
+              {editorReadOnly ? <h1 className="wb-title" data-nbase-find-title>{title || '未命名白板'}</h1>
+                : <input className="wb-title page-title" data-nbase-find-title aria-label="白板标题" value={title} disabled={currentLocked}
+                  onChange={event => changeTitle(event.target.value)} placeholder="未命名白板"
+                  onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.currentTarget.blur(); }} />}</div>
+            {rawContent && isWhiteboardContent(rawContent) ? <LazyWhiteboard key={`${current.id}:${editorEpoch}`} boardId={current.id} content={rawContent}
+              readOnly={editorReadOnly} title={title} pages={pages} onNotice={setNotice} onOpenPage={id => void openPage(id)}
+              imageUrl={id => workspace ? attachmentContentUrl(workspace.id, id) : null}
+              onUploadImages={editorReadOnly ? undefined : files => uploadFiles(files)}
+              onReady={(id, content) => { if (id === activeIdRef.current) setEditorSnapshot(boardSnapshot(content)); }}
+              onChange={(id, content) => { if (id === activeIdRef.current) markDraft(id, titleRef.current, boardSnapshot(content)); }} />
+              : <div role="alert" className="nbase-unsupported"><h2>暂不能打开此白板</h2><button className="nb-btn" onClick={exportCurrent}>下载原始 JSON</button></div>}
+          </div>
           : current && current.kind === 'database' ? <>
             <div className="nb-doc-wide-head">
               <PageHeader icon={current.icon ?? '🗃️'} cover={current.cover} editable={!editorReadOnly}
@@ -1022,12 +1061,16 @@ export function PersistentWorkspace() {
                   if (pendingSearchRef.current?.pageId === id) requestAnimationFrame(() => locatePendingSearch(id));
                   if (pendingBacklinkRef.current?.link.sourcePageId === id) requestAnimationFrame(() => locatePendingBacklink(id));
                 }} onNotice={setNotice}
-                workspaceId={workspace?.id} onUploadFiles={uploadFiles} onPickAttachment={pickAttachment} databases={databaseEmbedding} />
+                workspaceId={workspace?.id} onUploadFiles={uploadFiles} onPickAttachment={pickAttachment} databases={databaseEmbedding}
+                resolveBlock={workspace ? (pageId, blockId) => resolveBlockText(workspace.id, pageId, blockId) : undefined}
+                onLinkPreview={workspace && session && !readOnly ? url => request<LinkPreview>(workspacePath(workspace.id) + '/link-preview', 'POST', { url }, session.csrfToken) : undefined} />
                 : <div role="alert" className="nbase-unsupported"><h2>暂不能打开此格式版本</h2>
                   <p>原始数据仍保留在服务端。请先下载副本，等待兼容升级。</p>
                   <button className="nb-btn" onClick={exportCurrent}>下载原始 JSON</button></div>}
               {workspace && <PageBacklinks key={current.id} workspaceId={workspace.id} pageId={current.id} revision={current.revision}
                 onOpen={link => openBacklink(link, current.id)} />}
+              {graphSource && <LazyLocalGraph source={graphSource} pageId={current.kind === 'row' && current.parentId ? current.parentId : current.id}
+                refreshKey={current.revision} onOpen={openReferencedPage} onExpand={() => setDialog('graph')} />}
             </div>
             <Toc outline={editorSnapshot?.outline ?? []} onJump={id => editorRef.current?.jumpToHeading(id)} />
           </> : <section className="nb-home" role="alert">页面暂时无法打开。{saveStatus.text}</section>
@@ -1065,6 +1108,8 @@ export function PersistentWorkspace() {
         if (command === 'theme') setTheme(theme === 'dark' ? 'light' : 'dark');
       }}
       onAuthError={() => { setReauth(true); setShowReauthForm(true); setDialog(null); }} />}
+    {dialog === 'graph' && graphSource && <LazyGraphDialog source={graphSource} currentPageId={activeId} tags={tags}
+      onOpen={openReferencedPage} onClose={() => setDialog(null)} />}
     {dialog === 'history' && workspace && current && <PageHistoryDialog key={current.id} workspaceId={workspace.id}
       pageId={current.id} currentRevision={current.revision} busy={pageActionBusy || !canWrite} pageReferences={pageReferenceAccess}
       onRestore={(version: PageVersion) => void beginPageAction('restore-version', current.id, current.revision, title, version.revision)}
@@ -1092,7 +1137,7 @@ export function PersistentWorkspace() {
       onRestorePage={id => openTrash(id)} onCreate={openDailyNote} onCapture={quickCapture} onSaveSettings={saveDailySettings} />}
     {dialog === 'delete' && current && <TrashPageDialog title={title} childCount={subtreeIds(pages, current.id).length - 1} busy={pageActionBusy}
       onConfirm={() => void beginPageAction('trash', current.id, current.revision, title)} onClose={() => setDialog(null)} />}
-    {dialog === 'move' && current && <MovePageDialog current={current} pages={pages.filter(page => page.kind !== 'database')} target={moveTarget} onTarget={setMoveTarget}
+    {dialog === 'move' && current && <MovePageDialog current={current} pages={pages.filter(page => page.kind !== 'database' && page.kind !== 'whiteboard')} target={moveTarget} onTarget={setMoveTarget}
       onConfirm={() => void movePage()} onClose={() => setDialog(null)} />}
     {dialog === 'folder-import' && workspace && canWrite && <FolderImportDialog userId={session.user.id} workspaceId={workspace.id}
       csrfToken={session.csrfToken} pages={pages} defaultParentId={activeId} parseMarkdown={parseMarkdownImport}

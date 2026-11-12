@@ -1,4 +1,4 @@
-import { Component, forwardRef, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Component, forwardRef, useCallback, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode, Ref } from 'react';
 import { createEditor, HISTORY_PUSH_TAG } from 'lexical';
 import type { HistoryState } from '@lexical/history';
@@ -37,6 +37,11 @@ import { FloatingToolbarPlugin } from './plugins/FloatingToolbarPlugin';
 import { BlockHandlePlugin } from './plugins/BlockHandlePlugin';
 import { WordCountPlugin } from './plugins/WordCountPlugin';
 import { ShortcutsPlugin } from './plugins/ShortcutsPlugin';
+import { revealInToggles, TogglePlugin } from './plugins/TogglePlugin';
+import { TableColumnResizePlugin } from './plugins/TableColumnResizePlugin';
+import { BookmarkPlugin } from './plugins/BookmarkPlugin';
+import { BlockReferencePlugin } from './plugins/BlockReferencePlugin';
+import { BlockResolverContext } from './nodes/BlockReferenceNode';
 import { FootnoteNavigationPlugin } from './nodes/FootnoteNodes';
 import { $insertAttachments, AttachmentWorkspaceContext } from './nodes/AttachmentNode';
 import 'katex/dist/katex.min.css';
@@ -144,7 +149,7 @@ function StateBridge({ props, editorRef, folding, history }: { props: DocumentEd
     },
     findText: phrase => {
       const root = editor.getRootElement();
-      return root ? findVisibleText(root, phrase, element => folding.current?.reveal(element)) : false;
+      return root ? findVisibleText(root, phrase, element => { revealInToggles(editor, element); folding.current?.reveal(element); }) : false;
     },
     jumpToHeading: id => folding.current?.jump(id),
     locatePageReference: (targetPageId, occurrence) => {
@@ -153,6 +158,7 @@ function StateBridge({ props, editorRef, folding, history }: { props: DocumentEd
       const node = occurrence === undefined ? [...nodes].find(item => item.dataset.nbasePageReference === targetPageId)
         : nodes.item(occurrence);
       if (!node || node.dataset.nbasePageReference !== targetPageId) return false;
+      revealInToggles(editor, node);
       folding.current?.reveal(node);
       node.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
       node.querySelector<HTMLElement>('a,button')?.focus({ preventScroll: true });
@@ -183,6 +189,13 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
   const history = useMemo(createEmptyHistoryState, []);
   const folding = useRef<SectionFoldingHandle>(null);
   const noticeRef = useRef(props.onNotice);
+  const resolveRef = useRef(props.resolveBlock);
+  resolveRef.current = props.resolveBlock;
+  const hasResolver = Boolean(props.resolveBlock);
+  const resolverContext = useMemo(() => ({ documentId: props.documentId,
+    resolve: hasResolver ? (pageId: string, blockId: string) => resolveRef.current?.(pageId, blockId) ?? Promise.resolve(null) : undefined }),
+  [hasResolver, props.documentId]);
+  const revealBlock = useCallback((element: HTMLElement) => folding.current?.reveal(element), []);
   noticeRef.current = props.onNotice;
   const config = useMemo(() => {
     const content = props.initialContent ?? createContentFromMarkdown(props.initialMarkdown ?? '');
@@ -201,6 +214,7 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
   }; }, []);
   return <AttachmentWorkspaceContext.Provider value={props.workspaceId ?? null}>
     <PageReferencesProvider references={props.pageReferences}><DatabaseEmbeddingProvider value={props.databases}>
+    <BlockResolverContext.Provider value={resolverContext}>
     <LexicalComposer initialConfig={config}>
     <div className="document-editor" data-readonly={Boolean(props.readOnly)}>
       {failure && <div className="nbase-editor-error" role="alert"><strong>编辑器发生错误，原始内容仍保留。</strong><span>{failure}</span><details><summary>查看打开时的原始内容</summary><pre>{props.initialMarkdown ?? JSON.stringify(props.initialContent, null, 2)}</pre></details></div>}
@@ -218,14 +232,15 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <EquationPlugin /><SlashCommandPlugin onPickAttachment={props.onPickAttachment} /><CalloutPlugin /><PageReferencePlugin historyState={history} />
       <MermaidPlugin historyState={history} /><DatabaseViewPlugin />
       <ListIndentPlugin /><LinkInteractionPlugin onNotice={props.onNotice} />
-      <FloatingToolbarPlugin /><BlockHandlePlugin onBeforeMove={element => folding.current?.expand(element)} />
-      <ShortcutsPlugin /><WordCountPlugin />
+      <FloatingToolbarPlugin /><BlockHandlePlugin onBeforeMove={element => folding.current?.expand(element)} documentId={props.documentId} onNotice={props.onNotice} />
+      <ShortcutsPlugin /><WordCountPlugin /><TogglePlugin documentId={props.documentId} /><TableColumnResizePlugin /><BookmarkPlugin onLinkPreview={props.onLinkPreview} onNotice={props.onNotice} />
       <FootnoteNavigationPlugin reveal={element => folding.current?.reveal(element)} />
+      <BlockReferencePlugin documentId={props.documentId} onNotice={props.onNotice} reveal={revealBlock} />
       <SafePastePlugin onNotice={props.onNotice} onUploadFiles={props.onUploadFiles} />
       <SectionFoldingPlugin ref={folding} />
       <StateBridge props={props} editorRef={editorRef} folding={folding} history={history} />
     </div>
-  </LexicalComposer></DatabaseEmbeddingProvider></PageReferencesProvider></AttachmentWorkspaceContext.Provider>;
+  </LexicalComposer></BlockResolverContext.Provider></DatabaseEmbeddingProvider></PageReferencesProvider></AttachmentWorkspaceContext.Provider>;
 }
 
 export const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(function DocumentEditor(props, ref) {

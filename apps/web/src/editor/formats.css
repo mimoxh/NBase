@@ -52,3 +52,37 @@
   color: inherit;
   font: inherit;
 }
+
+/* Text and background colours are palette tokens so both themes stay readable. */
+:root {
+  --nb-c-gray: #787774; --nb-c-brown: #9f6b53; --nb-c-orange: #d9730d; --nb-c-yellow: #cb912f; --nb-c-green: #448361;
+  --nb-c-blue: #337ea9; --nb-c-purple: #9065b0; --nb-c-pink: #c14c8a; --nb-c-red: #d44c47;
+  --nb-bg-gray: #f1f1ef; --nb-bg-brown: #f4eeee; --nb-bg-orange: #fbecdd; --nb-bg-yellow: #fbf3db; --nb-bg-green: #edf3ec;
+  --nb-bg-blue: #e7f3f8; --nb-bg-purple: #f6f3f9; --nb-bg-pink: #faf1f5; --nb-bg-red: #fdebec;
+}
+[data-theme="dark"] {
+  --nb-c-gray: #9b9b9b; --nb-c-brown: #ba856f; --nb-c-orange: #c77d48; --nb-c-yellow: #ca9849; --nb-c-green: #529e72;
+  --nb-c-blue: #5e9fd0; --nb-c-purple: #9d68d3; --nb-c-pink: #d15796; --nb-c-red: #df5452;
+  --nb-bg-gray: #2f2f2f; --nb-bg-brown: #4a3228; --nb-bg-orange: #5c3b23; --nb-bg-yellow: #564328; --nb-bg-green: #243d30;
+  --nb-bg-blue: #143a4e; --nb-bg-purple: #3c2d49; --nb-bg-pink: #4e2c3c; --nb-bg-red: #522e2a;
+}
+.nbase-color-anchor { position: relative; display: inline-flex; }
+.nbase-color-icon { display: inline-block; min-width: 16px; padding: 0 3px; border-radius: 3px; font-weight: 650; border-bottom: 2px solid currentColor; line-height: 1.2; }
+.nbase-color-popover, .nbase-floating-colors { padding: 8px 10px; border: 1px solid var(--nb-line); border-radius: 8px; background: var(--nb-bg); box-shadow: var(--nb-shadow-sm); z-index: 40; }
+.nbase-floating-colors { position: absolute; top: calc(100% + 4px); left: 0; width: 292px; }
+.nbase-color-menu { display: grid; gap: 8px; font-size: 12px; }
+.nbase-color-row { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+.nbase-color-row > span { flex: 0 0 100%; color: var(--nb-muted); }
+.nbase-color-menu .nbase-color-swatch { width: 24px; height: 24px; min-width: 0; padding: 0; border: 1px solid var(--nb-line); border-radius: 5px; background: var(--nb-bg); font-weight: 650; cursor: pointer; }
+.nbase-color-menu .nbase-color-swatch[aria-pressed="true"] { box-shadow: var(--nb-ring); }
+
+/* Collapsible block: the gutter left of the summary line is the disclosure control. */
+.nbase-toggle { position: relative; margin: 6px 0; padding-inline-start: 24px; }
+.nbase-toggle::before { content: '▸'; position: absolute; inset-inline-start: 0; top: 0; width: 22px; height: 1.75em; display: grid; place-items: center;
+  border-radius: 4px; color: var(--nb-muted); cursor: pointer; transition: transform .12s; user-select: none; }
+.nbase-toggle[data-open="true"]::before { transform: rotate(90deg); }
+.nbase-toggle:hover::before { background: var(--nb-hover); color: var(--nb-text); }
+.nbase-toggle > :first-child { margin-top: 0; margin-bottom: 2px; font-weight: 550; }
+.nbase-toggle > :last-child { margin-bottom: 0; }
+@media screen { .nbase-toggle[data-open="false"] > :not(:first-child) { display: none; } }
+@media print { .nbase-toggle::before { transform: rotate(90deg); } }

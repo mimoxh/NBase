@@ -1,5 +1,5 @@
 import { applyRowPatch, type DatabaseView, type PageCoverId, type PageKind, type PropertyDefinition,
-  type PropertyValue, type RowProperties } from '@nbase/contracts';
+  type PropertyValue, type RowProperties, type WhiteboardContent } from '@nbase/contracts';
 import type { EditorSnapshot } from '../editor/types';
 import { placePage, type PagePlacement } from '../shell/pageOrder';
 
@@ -22,6 +22,8 @@ export interface Page {
   database?: { properties: PropertyDefinition[]; views: DatabaseView[]; revision: number };
   /** Row pages only. */
   properties?: RowProperties;
+  /** Whiteboard pages only. */
+  board?: WhiteboardContent;
   revision?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -42,6 +44,7 @@ export type Action =
   | { type: 'snapshot'; id: string; snapshot: EditorSnapshot; dirty: boolean }
   | { type: 'insert'; page: Page }
   | { type: 'db-schema'; id: string; properties: PropertyDefinition[]; views: DatabaseView[] }
+  | { type: 'board'; id: string; content: WhiteboardContent }
   | { type: 'row-update'; id: string; title?: string; properties?: Record<string, PropertyValue | null>; at: string };
 
 export function descendants(pages: Page[], id: string): Set<string> {
@@ -83,6 +86,7 @@ export function workspaceReducer(state: Workspace, action: Action): Workspace {
       return { ...state, view: state.currentId && affected.has(state.currentId) ? 'trash' : state.view, pages: state.pages.map(p => affected.has(p.id) && !p.deleted ? { ...p, deleted: true, deletionRoot: action.id, dirty: true } : p) };
     }
     case 'insert': return { ...state, pages: [...state.pages, action.page] };
+    case 'board': return { ...state, pages: state.pages.map(p => p.id === action.id && p.kind === 'whiteboard' ? { ...p, board: action.content, dirty: true } : p) };
     case 'db-schema': return { ...state, pages: state.pages.map(p => p.id === action.id && p.database
       ? { ...p, database: { properties: action.properties, views: action.views, revision: p.database.revision + 1 }, dirty: true } : p) };
     case 'row-update': return { ...state, pages: state.pages.map(p => p.id !== action.id ? p : {

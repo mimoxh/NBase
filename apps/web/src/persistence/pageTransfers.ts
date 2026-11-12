@@ -1,3 +1,4 @@
+import { attachmentLimitFor } from '@nbase/contracts';
 import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from 'react';
 import type { AttachmentMetadata, AuthSessionResponse, PageDocument, StoredDocumentContent, WorkspaceTag } from '@nbase/contracts';
 import { addMarkdownFrontMatter, markdownFromContent, parseMarkdownImport } from '../editor/markdown';
@@ -25,6 +26,8 @@ export interface PageTransferContext {
   conflictMarkdown: string | null;
   supported: boolean;
   tags: WorkspaceTag[];
+  /** Page and database titles for exported references and database placeholders. */
+  pageTitle?: (id: string) => string | undefined;
   readOnly: boolean;
   currentLocked: boolean;
   canWrite: boolean;
@@ -52,7 +55,7 @@ export interface PageTransferContext {
 
 /** Page export, attachment upload and Markdown import for the page that is open now. */
 export function createPageTransfers({ session, workspace, workspaceScope, liveScope, current, title, conflict, conflictMarkdown, supported,
-  tags, readOnly, currentLocked, canWrite, pendingImport, editorSnapshot, editorRef, activeIdRef, draftsRef, uploadingRef,
+  tags, pageTitle, readOnly, currentLocked, canWrite, pendingImport, editorSnapshot, editorRef, activeIdRef, draftsRef, uploadingRef,
   folderExportingRef, importResolvingRef, createBusyRef, setDialog, setNotice, setReauth, setNoteDialogError, setFolderExporting,
   setImportResolving, setPendingImport, setPendingUploads, settlePageBeforeWrite, createPage }: PageTransferContext) {
   const tagNamesFor = (ids: string[] | undefined) => tags.filter(tag => ids?.includes(tag.id)).map(tag => tag.name);
@@ -86,6 +89,22 @@ export function createPageTransfers({ session, workspace, workspaceScope, liveSc
         snapshot?.content ?? editorSnapshot?.content ?? current.content, title || '未命名页面', tagNamesFor(current.tagIds));
     }
   };
+  /** HTML / Word: same content choice as `exportCurrent` (unsaved editor state, or the local draft during a conflict). */
+  const exportCurrentAs = async (format: 'html' | 'docx') => {
+    if (!current) return;
+    const source = conflict ? { name: `${conflict.draft.title || '未命名页面'}-本机草稿`, title: conflict.draft.title, content: conflict.draft.content }
+      : supported ? { name: title || '未命名页面', title, content: editorRef.current?.getSnapshot()?.content ?? editorSnapshot?.content ?? current.content } : null;
+    if (!source) { setNotice('页面格式无法识别，只能下载原始 JSON。'); return; }
+    try {
+      setNotice(format === 'docx' ? '正在生成 Word 文档…' : '正在生成 HTML…');
+      const { exportPageFile } = await import('../export/browser');
+      const result = await exportPageFile({ title: source.title || '未命名页面', content: source.content, format, onProgress: setNotice,
+        ...(workspace ? { fetchAttachment: (id: string) => attachmentClient.download(workspace.id, id) } : {}),
+        ...(pageTitle ? { pageTitle } : {}) });
+      downloadBlob(source.name, result.blob, result.extension);
+      setNotice(result.note ?? `${format === 'docx' ? 'Word 文档' : 'HTML'} 已发起下载，请检查浏览器下载记录。`);
+    } catch (error) { setNotice(`导出未完成：${message(error)} 原页面没有修改。`); if (isAuthError(error)) setReauth(true); }
+  };
   const exportFolder = async () => {
     if (!current || !workspace || folderExportingRef.current) return;
     folderExportingRef.current = true; setFolderExporting(true);
@@ -110,8 +129,9 @@ export function createPageTransfers({ session, workspace, workspaceScope, liveSc
     if (!session || !workspace || !pageId || readOnly || currentLocked) return [];
     const uploaded: AttachmentMetadata[] = [];
     for (const file of files) {
-      if (!file.size || file.size > 10 * 1024 * 1024) {
-        setNotice(`${file.name || '附件'}：请选择 1 字节至 10 MB 的文件。`); continue;
+      const limit = attachmentLimitFor(file.type || file.name);
+      if (!file.size || file.size > limit) {
+        setNotice(`${file.name || '附件'}：请选择 1 字节至 ${limit / 1024 / 1024} MB 的文件（音视频上限 100 MB）。`); continue;
       }
       const id = crypto.randomUUID();
       uploadingRef.current += 1;
@@ -171,5 +191,5 @@ export function createPageTransfers({ session, workspace, workspaceScope, liveSc
     finally { importResolvingRef.current = false; setImportResolving(false); }
   };
 
-  return { exportCurrent, exportFolder, uploadFiles, retryUpload, importFile, completeImport };
+  return { exportCurrent, exportCurrentAs, exportFolder, uploadFiles, retryUpload, importFile, completeImport };
 }

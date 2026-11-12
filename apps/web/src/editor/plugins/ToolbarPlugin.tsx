@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { TableActions } from './TableActions';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
-import { calloutKinds, calloutTitleMaxLength, isCalloutKind, isCalloutTitle, type CalloutKind } from '@nbase/contracts';
+import { blockAlignments, calloutKinds, calloutTitleMaxLength, isCalloutKind, isCalloutTitle, type BlockAlignment, type CalloutKind, type TextStyle } from '@nbase/contracts';
 import { $createTextNode, $getNodeByKey, $getRoot, $getSelection, $isRangeSelection, $setSelection, CAN_REDO_COMMAND, CAN_UNDO_COMMAND, COMMAND_PRIORITY_LOW, FORMAT_TEXT_COMMAND, REDO_COMMAND, UNDO_COMMAND } from 'lexical';
 import type { BaseSelection, LexicalNode, TextFormatType } from 'lexical';
 import { $isHeadingNode } from '@lexical/rich-text';
@@ -19,17 +19,30 @@ import { CODE_LANGUAGES } from '../codeLanguages';
 import { $changeListIndent, $selectedListItems } from '../listIndent';
 import { OPEN_LINK_FORM_COMMAND } from './FloatingToolbarPlugin';
 import { $calloutForNode, $isCalloutNode, $unwrapCallout, calloutLabels } from '../nodes/CalloutNode';
+import { $applyTextStyle, $selectionAlignment, $selectionTextStyle, $setAlignment } from '../textFormatting';
+import { TextColorMenu } from './TextColorMenu';
+import { $canMergeSelection, $canSplitSelection, $hasMergedCells } from '../tableLayout';
+import { $getTableNodeFromLexicalNodeOrThrow } from '@lexical/table';
+import { Popover } from '../../components/Popover';
+
+const alignmentLabels: Record<BlockAlignment, string> = { left: '左对齐', center: '居中', right: '右对齐', justify: '两端对齐' };
 
 type Props = { readOnly: boolean; onNotice?: ((message: string) => void) | undefined; findPanel?: ReactNode };
 type CalloutState = { key: string; kind: CalloutKind; title: string };
-type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; highlight: boolean; code: boolean; link: string; table: boolean; listItem: boolean; codeKey: string; codeLanguage: string; callout: CalloutState | null };
-const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, highlight: false, code: false, link: '', table: false, listItem: false, codeKey: '', codeLanguage: '', callout: null };
+type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; highlight: boolean; code: boolean; link: string; table: boolean; listItem: boolean; codeKey: string; codeLanguage: string; callout: CalloutState | null; textStyle: TextStyle; align: BlockAlignment | null; canMerge: boolean; canSplit: boolean; merged: boolean };
+const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, highlight: false, code: false, link: '', table: false, listItem: false, codeKey: '', codeLanguage: '', callout: null, textStyle: {}, align: null, canMerge: false, canSplit: false, merged: false };
 
 function $enclosingCodeBlock(node: LexicalNode): LexicalNode | null {
   for (let current: LexicalNode | null = node; current; current = current.getParent()) {
     if ($isCodeNode(current)) return current;
   }
   return null;
+}
+
+function $tableState(node: LexicalNode) {
+  const cell = $getTableCellNodeFromLexicalNode(node);
+  return { canMerge: $canMergeSelection(), canSplit: $canSplitSelection(),
+    merged: cell ? $hasMergedCells($getTableNodeFromLexicalNodeOrThrow(cell)) : false };
 }
 
 export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
@@ -40,6 +53,7 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
   const [linkOpen, setLinkOpen] = useState(false);
   const [linkUrl, setLinkUrl] = useState('');
   const [linkError, setLinkError] = useState('');
+  const [colorOpen, setColorOpen] = useState(false);
   const savedSelection = useRef<BaseSelection | null>(null);
   const openLinkForm = useRef(() => {});
   useEffect(() => {
@@ -63,9 +77,12 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
         setState({ block, bold: selection.hasFormat('bold'), italic: selection.hasFormat('italic'), strikethrough: selection.hasFormat('strikethrough'), highlight: selection.hasFormat('highlight'), code: selection.hasFormat('code'), link, table: Boolean($getTableCellNodeFromLexicalNode(node)),
           listItem: $selectedListItems() !== null,
           codeKey: codeBlock?.getKey() ?? '', codeLanguage: $isCodeNode(codeBlock) ? codeBlock.getLanguage() ?? '' : '',
-          callout: callout ? { key: callout.getKey(), kind: callout.getKind(), title: callout.getTitle() } : null });
+          callout: callout ? { key: callout.getKey(), kind: callout.getKind(), title: callout.getTitle() } : null,
+          textStyle: $selectionTextStyle(), align: $selectionAlignment(), ...$tableState(node) });
       } else if ($isTableSelection(selection)) {
-        setState((previous) => ({ ...previous, table: true, listItem: false, codeKey: '', codeLanguage: '', callout: null }));
+        // Read Lexical state here; the React updater runs outside the editor read.
+        const table = $tableState(selection.anchor.getNode());
+        setState((previous) => ({ ...previous, table: true, listItem: false, codeKey: '', codeLanguage: '', callout: null, textStyle: {}, align: null, ...table }));
       }
     };
     editor.read('latest', update);
@@ -150,6 +167,20 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
         {button('删除线', <s>S</s>, () => format('strikethrough'), state.strikethrough)}
         {button('文字高亮', <mark className="nbase-highlight">高亮</mark>, () => format('highlight'), state.highlight, state.code || Boolean(state.codeKey))}
         {button('行内代码', <span className="nbase-code-icon">&lt;/&gt;</span>, () => format('code'), state.code)}
+        <span className="nbase-color-anchor">
+          {button('文字和背景颜色', <span className="nbase-color-icon" style={{ ...(state.textStyle.color ? { color: `var(--nb-c-${state.textStyle.color})` } : {}),
+            ...(state.textStyle.background ? { backgroundColor: `var(--nb-bg-${state.textStyle.background})` } : {}) }}>A</span>,
+          () => setColorOpen(open => !open), Boolean(state.textStyle.color || state.textStyle.background), Boolean(state.codeKey))}
+          {colorOpen && !readOnly && <Popover label="文字和背景颜色" className="nbase-color-popover" portal width={292} onClose={() => setColorOpen(false)}>
+            <TextColorMenu value={state.textStyle} onPick={patch => { edit(() => $applyTextStyle(patch)); setColorOpen(false); }} />
+          </Popover>}
+        </span>
+      </div>
+      <div className="nbase-tool-group">
+        <select aria-label="段落对齐" value={state.align ?? 'left'} disabled={readOnly || !state.align}
+          onChange={event => { const value = event.target.value as BlockAlignment; edit(() => $setAlignment(value)); }}>
+          {blockAlignments.map(value => <option key={value} value={value}>{alignmentLabels[value]}</option>)}
+        </select>
       </div>
       <div className="nbase-tool-group">
         {button('编辑链接', '链接', () => { setLinkUrl(state.link); setLinkError(''); setLinkOpen((open) => !open); }, Boolean(state.link))}
@@ -170,7 +201,7 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
       {button('在右侧插入列', '右侧插列', () => edit(() => { $insertTableColumnAtSelection(true); }))}
       {button('删除当前行', '删除行', () => edit($deleteTableRowAtSelection))}
       {button('删除当前列', '删除列', () => edit($deleteTableColumnAtSelection))}
-      <TableActions edit={edit} />
+      <TableActions edit={edit} canMerge={state.canMerge} canSplit={state.canSplit} merged={state.merged} onNotice={onNotice} />
       <small>Tab 切换单元格</small>
     </div>}
     {callout && !readOnly && <div className="nbase-callout-toolbar" role="toolbar" aria-label="提示块操作">

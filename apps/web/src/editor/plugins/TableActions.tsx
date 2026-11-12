@@ -1,7 +1,14 @@
 import { $alignTableColumn, $moveTableLine, type TableAlignment } from '../tableEditing';
+import { $mergeSelectedCells, $splitSelectedCell } from '../tableLayout';
 
-export function TableActions({ edit }: { edit: (action: () => void) => void }) {
+type Props = { edit: (action: () => void) => void; canMerge: boolean; canSplit: boolean; merged: boolean; onNotice?: ((message: string) => void) | undefined };
+
+export function TableActions({ edit, canMerge, canSplit, merged, onNotice }: Props) {
+  const tool = (label: string, disabled: boolean, action: () => void) => <button type="button" title={label} aria-label={label}
+    disabled={disabled} onMouseDown={event => event.preventDefault()} onClick={() => edit(action)}>{label}</button>;
   return <>
+    {tool('合并单元格', !canMerge, $mergeSelectedCells)}
+    {tool('拆分单元格', !canSplit, $splitSelectedCell)}
     <select aria-label="列对齐" defaultValue="" onChange={event => {
       const alignment = event.target.value as TableAlignment;
       event.target.value = '';
@@ -15,7 +22,8 @@ export function TableActions({ edit }: { edit: (action: () => void) => void }) {
     <select aria-label="移动行列" defaultValue="" onChange={event => {
       const [axis, direction] = event.target.value.split(':') as ['row' | 'column', '-1' | '1'];
       event.target.value = '';
-      edit(() => $moveTableLine(axis, direction === '-1' ? -1 : 1));
+      if (merged) { onNotice?.('含合并单元格的表格不能整行或整列移动，请先拆分。'); return; }
+      edit(() => { $moveTableLine(axis, direction === '-1' ? -1 : 1); });
     }}>
       <option value="" disabled>移动行列</option>
       <option value="row:-1">上移行</option>

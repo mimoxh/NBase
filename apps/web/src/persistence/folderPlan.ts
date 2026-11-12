@@ -1,3 +1,4 @@
+import { attachmentLimitFor } from '@nbase/contracts';
 import type { AttachmentMetadata, AttachmentPresentation, PageSummary, StoredDocumentContent } from '@nbase/contracts';
 import { readAttachmentPresentations, restoreAttachmentPresentations } from './attachmentPresentation';
 import {
@@ -9,7 +10,7 @@ export const folderMarkdownLimit = 200;
 export const folderFileLimit = 1000;
 export const folderBytesLimit = 190 * 1024 * 1024;
 const documentBytesLimit = 1024 * 1024;
-const attachmentBytesLimit = 10 * 1024 * 1024;
+
 export const subtreeManifestFormat = 'nbase-subtree-export-v1';
 export const folderAttachmentExtensions: Readonly<Record<string, string>> = {
   'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
@@ -299,8 +300,8 @@ export async function scanMarkdownFolder(files: readonly File[], options: {
         if (!safeAttachmentName(fileName) || (reference.image && !supportedImage.test(fileName))) {
           notice('不支持的附件类型或名称：' + destination.path); continue;
         }
-        if (file.size === 0 || file.size > attachmentBytesLimit) {
-          notice('附件大小须在 1 字节至 10 MiB 之间：' + destination.path); continue;
+        if (file.size === 0 || file.size > attachmentLimitFor(fileName)) {
+          notice(`附件大小须在 1 字节至 ${attachmentLimitFor(fileName) / 1024 / 1024} MiB 之间：` + destination.path); continue;
         }
         attachmentPaths.add(destination.path);
         if (!attachments.has(destination.path)) {

@@ -141,3 +141,36 @@
 .nbase-equation-actions small { color:var(--nb-faint,#a0a496); margin-right:auto; }
 .nbase-equation-actions button { border:1px solid var(--nb-line,#dfe2d9); border-radius:5px; background:var(--nb-bg,#fff); padding:4px 12px; font-size:12px; color:var(--nb-text,#4a4f43); cursor:pointer; }
 .nbase-equation-actions button.primary { background:var(--nb-accent,#687d50); border-color:var(--nb-accent,#687d50); color:#fff; }
+
+/* Column resizing: the right border of a cell is the handle. */
+.nbase-table-cell.nbase-col-resize-hover { box-shadow: inset -2px 0 0 var(--nb-accent); cursor: col-resize; }
+body.nbase-col-resizing, body.nbase-col-resizing * { cursor: col-resize !important; user-select: none; }
+
+/* Inline audio, video and PDF previews of uploaded attachments. */
+.nbase-attachment-media { display: block; width: 100%; max-width: 100%; margin: 6px 0; }
+.nbase-attachment-media.is-video { max-height: 70vh; background: #000; border-radius: 6px; }
+.nbase-attachment-pdf { display: block; width: 100%; height: min(75vh, 720px); margin: 6px 0; border: 1px solid var(--nb-line); border-radius: 6px; background: var(--nb-bg); }
+@media print { .nbase-attachment-media, .nbase-attachment-pdf { display: none; } }
+
+/* Web bookmark card: text only, no remote images. */
+.nbase-bookmark-block { margin: 10px 0; }
+.nbase-bookmark { border: 1px solid var(--nb-line); border-radius: 8px; background: var(--nb-bg); }
+.nbase-bookmark.is-selected { box-shadow: var(--nb-ring); }
+.nbase-bookmark-link { display: grid; gap: 4px; padding: 12px 14px; color: inherit; text-decoration: none; }
+.nbase-bookmark-link:hover { background: var(--nb-hover); border-radius: 8px; }
+.nbase-bookmark-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nbase-bookmark-description { color: var(--nb-muted); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.nbase-bookmark-site { display: flex; gap: 6px; align-items: center; min-width: 0; color: var(--nb-faint); font-size: 12px; }
+.nbase-bookmark-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.nbase-bookmark-form { display: grid; gap: 8px; min-width: min(420px, 80vw); }
+.nbase-bookmark-form input { padding: 7px 9px; border: 1px solid var(--nb-line); border-radius: 6px; background: var(--nb-bg); color: inherit; font: inherit; }
+.nbase-bookmark-hint { margin: 0; color: var(--nb-muted); font-size: 12px; }
+.nbase-bookmark-error { margin: 0; color: var(--nb-danger); font-size: 12px; }
+.nbase-bookmark-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* Block references link to a block anchored in another (or this) page. */
+.nbase-block-reference { color: var(--nb-accent-text); text-decoration: none; border-bottom: 1px dashed currentColor; cursor: pointer; }
+.nbase-block-reference::before { content: '❝ '; opacity: .6; }
+.nbase-block-reference.is-missing { color: var(--nb-faint); text-decoration: line-through; cursor: default; }
+.nbase-block-flash { animation: nbase-block-flash 1.6s ease-out; }
+@keyframes nbase-block-flash { from { background: var(--nb-accent-soft); } to { background: transparent; } }

@@ -33,6 +33,10 @@ import { MERMAID_TRANSFORMER } from './mermaidMarkdown';
 import { $createDatabaseViewNode, $isDatabaseViewNode, DatabaseViewNode, databaseViewMarkdown,
   databaseViewMarkdownPattern } from './nodes/DatabaseViewNode';
 import { normalizeDocumentContent } from './normalize';
+import { $tableGrid, $tableLayoutComment } from './tableLayout';
+import { $blockIdOf } from './blockAnchors';
+import { $createBlockReferenceNode, $isBlockReferenceNode, BlockReferenceNode } from './nodes/BlockReferenceNode';
+import { $resolveHtmlSubset, ALIGNED_BLOCK, BOOKMARK_BLOCK, createToggleTransformer, encodeHtmlSubset, textStyleSpan } from './markdownHtmlSubset';
 import type { DocumentContent, EditorSnapshot, MarkdownAssessment, OutlineItem } from './types';
 
 export { addMarkdownFrontMatter, getMarkdownFrontMatter, readMarkdownFrontMatter } from './markdownFrontMatter';
@@ -68,6 +72,49 @@ const SAFE_LINK: TextMatchTransformer = {
 };
 
 const PAGE_REFERENCE_PATTERN = /(?<!(?<!\\)(?:\\\\)*\\)\[((?:\\.|[^[\]\\\r\n]){1,510})\]\((\/\?page=[0-9a-f-]{36})\)/iu;
+const BLOCK_REFERENCE_PATTERN = /(?<!(?<!\\)(?:\\\\)*\\)\[((?:\\.|[^[\]\\\r\n]){1,510})\]\(\/\?page=([0-9a-f-]{36})#block-([a-z0-9]{8})\)/iu;
+const BLOCK_REFERENCE: TextMatchTransformer = {
+  type: 'text-match', dependencies: [BlockReferenceNode],
+  importRegExp: BLOCK_REFERENCE_PATTERN, regExp: /(?!)x/,
+  export(node) {
+    if (!$isBlockReferenceNode(node)) return null;
+    const label = node.getTextContent().replace(/[\\[\]`*_~=$<>!&]/g, '\\$&');
+    return '[' + label + '](/?page=' + node.getTargetPageId() + '#block-' + node.getBlockId() + ')';
+  },
+  replace(node, match) {
+    if ($findMatchingParent(node, $isLinkNode)) return;
+    const target = pageIdFromReferenceUrl('/?page=' + match[2]!.toLowerCase());
+    const label = match[1]!.replace(/\\([!-/:-@[-`{-~])/g, '$1');
+    if (target && isPageReferenceLabel(label)) node.replace($createBlockReferenceNode(target, match[3]!, label));
+  },
+};
+
+/**
+ * An anchored block exports as `<!-- ^id -->` on the line before it. The other element transformers
+ * still render the block itself, so this one only prefixes their output.
+ */
+function createBlockAnchorTransformer(transformers: () => Transformer[]): MultilineElementTransformer {
+  // Multiline rules run before single-line ones on export, so this must be one to wrap them all.
+  const self: MultilineElementTransformer = {
+    type: 'multiline-element', dependencies: [], regExpStart: /(?!)x/,
+    replace: () => false,
+    export(node, traverseChildren) {
+      const id = $blockIdOf(node);
+      if (!id) return null;
+      let body: string | null = null;
+      const all = transformers();
+      const ordered = [...all.filter(item => item.type === 'multiline-element'), ...all.filter(item => item.type === 'element')];
+      for (const transformer of ordered) {
+        if (transformer === self || !transformer.export) continue;
+        body = transformer.export(node, traverseChildren);
+        if (body !== null) break;
+      }
+      return `<!-- ^${id} -->\n` + (body ?? ($isElementNode(node) ? traverseChildren(node) : node.getTextContent()));
+    },
+  };
+  return self;
+}
+
 const PAGE_REFERENCE: TextMatchTransformer = {
   type: 'text-match', dependencies: [PageReferenceNode],
   importRegExp: PAGE_REFERENCE_PATTERN, regExp: /(?!)x/,
@@ -232,10 +279,15 @@ const DELIMITER_ESCAPE: TextMatchTransformer = {
   type: 'text-match', dependencies: [],
   importRegExp: /(?!)x/, regExp: /(?!)x/,
   export: (node, _children, exportFormat) => {
-    if (!$isTextNode(node) || node.hasFormat('code')) return null;
+    if (!$isTextNode(node)) return null;
     const text = node.getTextContent();
-    if (!/[=$]|\[\^/.test(text)) return null;
-    return exportFormat(node, text.replace(/[=$]|\[(?=\^)/g, '\\$&')).replace(/\\\\(?=[=$]|\[\^)/g, '\\');
+    const span = textStyleSpan(node.getStyle());
+    const escape = !node.hasFormat('code') && /[=$]|\[\^/.test(text);
+    if (!span && !escape) return null;
+    const rendered = escape ? exportFormat(node, text.replace(/[=$]|\[(?=\^)/g, '\\$&')).replace(/\\\\(?=[=$]|\[\^)/g, '\\')
+      : exportFormat(node, text);
+    // Emphasis markers may cross the span; import resolves the two independently.
+    return span ? span + rendered + '</span>' : rendered;
   },
   replace: () => {},
 };
@@ -273,6 +325,7 @@ const callout: MultilineElementTransformer = {
 return callout;
 }
 const CALLOUT = createCalloutTransformer(() => MARKDOWN_TRANSFORMERS);
+const TOGGLE = createToggleTransformer(() => MARKDOWN_TRANSFORMERS);
 
 /** Split only unescaped pipes. GFM requires pipes inside code spans to be escaped too. */
 function tableCells(line: string): string[] {
@@ -343,25 +396,30 @@ return {
     if (!$isTableNode(node)) return null;
     const rows = node.getChildren().filter($isTableRowNode);
     if (!rows.length) return '';
-    const rendered = rows.map(row => `| ${row.getChildren().filter($isTableCellNode).map(cell =>
-      escapeTablePipes(traverseChildren(cell)).replace(/\n+/g, ' ')).join(' | ')} |`);
-    const delimiters = rows[0]!.getChildren().filter($isTableCellNode).map(cell => {
+    // Merged cells export as a full GFM grid with empty covered positions; the comment restores them.
+    const grid = $tableGrid(node);
+    const rendered = grid.map((cells, row) => `| ${cells.map(({ cell, row: top, column: left }, column) =>
+      top !== row || left !== column ? '' : escapeTablePipes(traverseChildren(cell)).replace(/\n+/g, ' ')).join(' | ')} |`);
+    // A merged cell spans several columns, so read each column's alignment from a cell that occupies only it.
+    const delimiters = grid[0]!.map((first, index) => grid.map(row => row[index]!).find(entry => entry.column === index && entry.cell.getColSpan() === 1) ?? first).map(({ cell }) => {
       const format = cell.getFormatType();
       return format === 'center' ? ':---:' : format === 'right' ? '---:' : format === 'left' ? ':---' : '---';
     });
     rendered.splice(1, 0, `| ${delimiters.join(' | ')} |`);
-    return rendered.join('\n');
+    const layout = $tableLayoutComment(node);
+    return (layout ? layout + '\n\n' : '') + rendered.join('\n');
   },
 };
 
 }
 const TABLE = createTableTransformer(() => INLINE_TRANSFORMERS);
 
-const INLINE_TRANSFORMERS: Transformer[] = [IMAGE, PAGE_REFERENCE, LITERAL_LEGACY_REFERENCE, SAFE_LINK, FOOTNOTE_REFERENCE, EQUATION_INLINE, LITERAL_INLINE_CODE,
+const INLINE_TRANSFORMERS: Transformer[] = [IMAGE, BLOCK_REFERENCE, PAGE_REFERENCE, LITERAL_LEGACY_REFERENCE, SAFE_LINK, FOOTNOTE_REFERENCE, EQUATION_INLINE, LITERAL_INLINE_CODE,
   ...TRANSFORMERS.filter(item => item.type === 'text-format')];
+const BLOCK_ANCHOR = createBlockAnchorTransformer(() => MARKDOWN_TRANSFORMERS);
 export const MARKDOWN_TRANSFORMERS: Transformer[] = [
-  DATABASE_VIEW, CALLOUT, EQUATION_BLOCK, TABLE, HORIZONTAL_RULE, CHECK_LIST, FOOTNOTE_DEFINITION,
-  ATTACHMENT, IMAGE, PAGE_REFERENCE, LITERAL_LEGACY_REFERENCE, SAFE_LINK, FOOTNOTE_REFERENCE, EQUATION_INLINE, LITERAL_INLINE_CODE, DELIMITER_ESCAPE,
+  BLOCK_ANCHOR, DATABASE_VIEW, BOOKMARK_BLOCK, CALLOUT, TOGGLE, ALIGNED_BLOCK, EQUATION_BLOCK, TABLE, HORIZONTAL_RULE, CHECK_LIST, FOOTNOTE_DEFINITION,
+  ATTACHMENT, IMAGE, BLOCK_REFERENCE, PAGE_REFERENCE, LITERAL_LEGACY_REFERENCE, SAFE_LINK, FOOTNOTE_REFERENCE, EQUATION_INLINE, LITERAL_INLINE_CODE, DELIMITER_ESCAPE,
   MERMAID_TRANSFORMER, CODE_ALIASED, ...TRANSFORMERS.filter(item => item !== LINK && item !== CHECK_LIST && item !== CODE),
 ];
 
@@ -370,7 +428,11 @@ export function withMarkdownTransformers(extra: Transformer[]): Transformer[] {
   const transformers: Transformer[] = [];
   const callout = createCalloutTransformer(() => transformers);
   const table = createTableTransformer(() => transformers.filter(item => item.type === 'text-format' || item.type === 'text-match'));
-  transformers.push(...extra, ...MARKDOWN_TRANSFORMERS.map(item => item === CALLOUT ? callout : item === TABLE ? table : item));
+  const toggle = createToggleTransformer(() => transformers);
+  const anchor = createBlockAnchorTransformer(() => transformers);
+  // The anchor prefix wraps every other block rule, so it stays first.
+  transformers.push(anchor, ...extra, ...MARKDOWN_TRANSFORMERS.filter(item => item !== BLOCK_ANCHOR).map(item =>
+    item === CALLOUT ? callout : item === TABLE ? table : item === TOGGLE ? toggle : item));
   return transformers;
 }
 
@@ -431,9 +493,10 @@ function unsupportedReasons(markdown: string): string[] {
 
 function analyzeMarkdown(markdown: string, footnoteSlot?: (id: string) => string) {
   const header = readMarkdownFrontMatter(markdown);
-  const document = resolveMarkdownReferences(header.body, footnoteSlot);
+  const subset = encodeHtmlSubset(header.body);
+  const document = resolveMarkdownReferences(subset.markdown, footnoteSlot);
   const sections = [document.body, ...document.footnotes.map(note => note.markdown)];
-  const reasons = [...new Set([...document.warnings, ...sections.flatMap(unsupportedReasons)])];
+  const reasons = [...new Set([...document.warnings, ...(subset.reserved ? ['内部保留字符'] : []), ...sections.flatMap(unsupportedReasons)])];
   const preservedAsSource = header.preservedAsSource || reasons.length > 0;
   const warnings = [...header.warnings, ...reasons.map(reason => '检测到' + reason + '，此文档将以 Markdown 代码原文保留。')];
   const prose = sections.flatMap(section => proseLines(section).lines.map(maskMarkdownInlineLiterals)).join('\n');
@@ -482,6 +545,7 @@ export function parseMarkdownImport(markdown: string, transformers = MARKDOWN_TR
     },
   };
   const editor = createEditor({ namespace: 'nbase-markdown', nodes: EDITOR_NODES, onError: error => { throw error; } });
+  let unresolved = false;
   editor.update(() => {
     if (preservedAsSource) {
       $getRoot().clear().append($createCodeNode('markdown').append($createTextNode(markdown)));
@@ -493,9 +557,14 @@ export function parseMarkdownImport(markdown: string, transformers = MARKDOWN_TR
         if (!definition.isAttached()) root.append(definition);
         $convertFromMarkdownString(note.markdown, transformers, definition);
       }
-      if (Object.keys(header.metadata).length) $setState(root, frontMatterState, header.metadata);
+      if (!$resolveHtmlSubset(root)) {
+        unresolved = true;
+        root.clear().append($createCodeNode('markdown').append($createTextNode(markdown)));
+      } else if (Object.keys(header.metadata).length) $setState(root, frontMatterState, header.metadata);
     }
   }, { discrete: true });
+  if (unresolved) return { content: { schemaVersion: 1, editorState: editor.getEditorState().toJSON() }, tagNames: [],
+    warnings: [...warnings, '检测到无法定位的颜色、对齐或折叠标记，此文档将以 Markdown 代码原文保留。'], preservedAsSource: true };
   return {
     content: { schemaVersion: 1, editorState: editor.getEditorState().toJSON() },
     ...(!preservedAsSource && header.title !== undefined ? { title: header.title } : {}),

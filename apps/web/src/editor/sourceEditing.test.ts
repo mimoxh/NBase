@@ -332,8 +332,12 @@ it('blocks original unexpressed text styles and layout attributes', () => {
     expect(prepareSourceEdit(original).canApply, key).toBe(false);
   }
   const original = createContentFromMarkdown('正文');
-  root(original).children[0]!.format = 'right';
+  root(original).children[0]!.indent = 2;
   expect(prepareSourceEdit(original).canApply).toBe(false);
+  // Alignment has a Markdown form (`<div align>`), so it no longer blocks the source editor.
+  const aligned = createContentFromMarkdown('正文');
+  root(aligned).children[0]!.format = 'right';
+  expect(prepareSourceEdit(aligned).canApply).toBe(true);
 });
 
 it('rejects ambiguous quick capture headings and malformed original marker locations', () => {

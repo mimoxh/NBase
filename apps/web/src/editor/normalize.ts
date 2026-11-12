@@ -38,7 +38,8 @@ function normalizeNode(node: unknown): unknown {
   if (!node || typeof node !== 'object' || Array.isArray(node)) return node;
   const record = node as JsonObject;
   if (record.type === 'code') return { ...record, children: normalizeCodeChildren(record.children) };
-  if (Array.isArray(record.children)) return { ...record, children: record.children.map(normalizeNode) };
+  // Lexical mirrors the first text style onto its block for empty-line typing; only text nodes store colour.
+  if (Array.isArray(record.children)) return { ...record, ...(record.textStyle ? { textStyle: '' } : {}), children: record.children.map(normalizeNode) };
   return node;
 }
 
