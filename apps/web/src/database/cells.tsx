@@ -4,6 +4,7 @@ import { cellValue, effectiveType, isComputedProperty, isUrlValue, type Database
 import { Popover } from '../components/Popover';
 import { formatNumber, formatTimestamp } from './labels';
 import { RelationEditor, type RelationHost } from './RelationEditor';
+import { tagNames, useDatabaseTags } from './tags';
 
 export function OptionTag({ option }: { option: SelectOption }) {
   return <span className={`nb-db-tag nb-db-color-${option.color}`}>{option.name}</span>;
@@ -11,6 +12,7 @@ export function OptionTag({ option }: { option: SelectOption }) {
 
 /** Read-only rendering of a cell, used both in the table and in the row property panel. */
 export function CellValue({ row, def }: { row: DatabaseRow; def: PropertyDefinition }) {
+  const tagHost = useDatabaseTags();
   const value = cellValue(row, def);
   const kind = effectiveType(def);
   if (value === undefined) return kind === 'checkbox' ? <span className="nb-db-check" aria-label="未勾选" /> : null;
@@ -21,6 +23,8 @@ export function CellValue({ row, def }: { row: DatabaseRow; def: PropertyDefinit
       return <span className="nb-db-tags">{cell.items.map(item => <span key={item.id} className="nb-db-tag nb-db-color-default">{item.title || '未命名'}</span>)}
         {cell.total > cell.items.length && <span className="nb-db-muted">+{cell.total - cell.items.length}</span>}</span>;
     }
+    case 'tags': return <span className="nb-db-tags">{tagNames(tagHost, row).map(name =>
+      <span key={name} className="nb-db-tag nb-db-color-default">{name}</span>)}</span>;
     case 'title': return <span className="nb-db-title-text">{String(value)}</span>;
     case 'number': return <span className="nb-db-number">{formatNumber(value as number)}</span>;
     case 'checkbox': return <span className="nb-db-check checked" aria-label="已勾选">✓</span>;
@@ -135,13 +139,26 @@ export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOp
   const [editing, setEditing] = useState(false);
   const [invalid, setInvalid] = useState('');
   useEffect(() => { if (!invalid) return; const timer = setTimeout(() => setInvalid(''), 3000); return () => clearTimeout(timer); }, [invalid]);
-  const readOnlyType = def.type === 'created_time' || def.type === 'updated_time' || isComputedProperty(def);
+  const tagHost = useDatabaseTags();
+  const readOnlyType = def.type === 'created_time' || def.type === 'updated_time' || isComputedProperty(def)
+    || (def.type === 'tags' && !tagHost?.setRowTags);
   const value = cellValue(row, def);
   if (!editable || readOnlyType || (def.type === 'relation' && !relationHost)) return <CellValue row={row} def={def} />;
   if (def.type === 'relation') {
     return <>
       <button className="nb-db-cell-button" aria-label={`编辑${def.name}`} onClick={() => setEditing(true)}><CellValue row={row} def={def} /></button>
       {editing && <RelationEditor row={row} def={def} host={relationHost!} onClose={() => { setEditing(false); onNavigate?.('stay'); }} />}
+    </>;
+  }
+  if (def.type === 'tags') {
+    // The choices are the workspace's tags; new ones are made in the tag manager, not here.
+    const choices: PropertyDefinition = { ...def, type: 'multi_select',
+      options: tagHost!.tags.map(tag => ({ id: tag.id, name: tag.name, color: 'default' as const })) };
+    const selected = (row.tagIds ?? []).filter(id => tagHost!.tags.some(tag => tag.id === id));
+    return <>
+      <button className="nb-db-cell-button" aria-label={`编辑${def.name}`} onClick={() => setEditing(true)}><CellValue row={row} def={def} /></button>
+      {editing && <SelectEditor def={choices} value={selected} multiple onClose={() => { setEditing(false); onNavigate?.('stay'); }}
+        onChange={next => tagHost!.setRowTags!(row, next)} />}
     </>;
   }
   if (def.type === 'checkbox') {

@@ -96,6 +96,16 @@ export interface WhiteboardCard extends BoxElement {
   type: 'card';
   pageId: string;
   label: string;
+  /** Absent: a title chip. `preview`: the page itself, shown live inside the box and editable in place. */
+  view?: 'preview';
+}
+
+/** A live view of a database; rows and schema stay in the database, the board stores ids only. */
+export interface WhiteboardDatabase extends BoxElement {
+  type: 'database';
+  databaseId: string;
+  /** Absent shows the first view of the database. */
+  viewId?: string;
 }
 
 export interface WhiteboardPen extends BoxElement {
@@ -132,7 +142,7 @@ export interface WhiteboardConnector {
 }
 
 export type WhiteboardBoxElement = WhiteboardShape | WhiteboardText | WhiteboardNote | WhiteboardFrame
-  | WhiteboardImage | WhiteboardCard | WhiteboardPen;
+  | WhiteboardImage | WhiteboardCard | WhiteboardDatabase | WhiteboardPen;
 export type WhiteboardElement = WhiteboardBoxElement | WhiteboardConnector;
 export type WhiteboardElementType = WhiteboardElement['type'];
 
@@ -159,7 +169,8 @@ const allowedKeys: Record<WhiteboardElementType, ReadonlySet<string>> = {
   note: new Set([...boxKeys, 'text', 'color', 'fontSize', 'textAlign']),
   frame: new Set([...boxKeys, 'name']),
   image: new Set([...boxKeys, 'attachmentId', 'fileName', 'mediaType']),
-  card: new Set([...boxKeys, 'pageId', 'label']),
+  card: new Set([...boxKeys, 'pageId', 'label', 'view']),
+  database: new Set([...boxKeys, 'databaseId', 'viewId']),
   pen: new Set([...boxKeys, 'points', 'color', 'strokeWidth', 'highlighter']),
   connector: new Set(['id', 'type', 'mode', 'source', 'target', 'stroke', 'strokeWidth', 'strokeStyle', 'startArrow', 'endArrow', 'text', 'locked', 'groupId']),
 };
@@ -219,7 +230,10 @@ function elementProblem(el: unknown): string | null {
       return uuid(el.attachmentId) && typeof el.fileName === 'string' && el.fileName.length >= 1 && el.fileName.length <= 180
         && typeof el.mediaType === 'string' && el.mediaType.startsWith('image/') && el.mediaType.length <= 100 ? null : 'image';
     case 'card':
-      return uuid(el.pageId) && text(el.label, whiteboardLimits.maxLabel) && !lineBreaks.test(el.label) ? null : 'card';
+      return uuid(el.pageId) && text(el.label, whiteboardLimits.maxLabel) && !lineBreaks.test(el.label)
+        && (el.view === undefined || el.view === 'preview') ? null : 'card';
+    case 'database':
+      return uuid(el.databaseId) && (el.viewId === undefined || uuid(el.viewId)) ? null : 'database';
     case 'pen': {
       const points = el.points;
       if (!Array.isArray(points) || points.length < 2 || points.length % 2 !== 0
@@ -319,7 +333,7 @@ export function whiteboardSearchText(board: WhiteboardBoard): string {
   const parts: string[] = [];
   for (const el of board.elements) {
     const value = el.type === 'frame' ? el.name : el.type === 'card' ? el.label : el.type === 'image' ? el.fileName
-      : el.type === 'pen' ? '' : el.text;
+      : el.type === 'pen' || el.type === 'database' ? '' : el.text;
     const clean = squash(value);
     if (clean) parts.push(clean);
   }
@@ -328,13 +342,32 @@ export function whiteboardSearchText(board: WhiteboardBoard): string {
 
 export interface WhiteboardPageReference { targetPageId: string; occurrence: number; snippet: string }
 
-/** Page cards in z-order; `occurrence` counts cards, mirroring page references in documents. */
+/** Page cards and database views in z-order; `occurrence` counts them, mirroring page references in documents. */
 export function whiteboardPageReferences(board: WhiteboardBoard): WhiteboardPageReference[] {
   const result: WhiteboardPageReference[] = [];
   for (const el of board.elements) {
     if (el.type === 'card') result.push({ targetPageId: el.pageId, occurrence: result.length, snippet: squash(el.label) || '白板引用卡片' });
+    else if (el.type === 'database') result.push({ targetPageId: el.databaseId, occurrence: result.length, snippet: '白板中的数据库视图' });
   }
   return result;
+}
+
+/** A whiteboard shown inside a document. It stores only the page id; the board stays in its own page. */
+export interface SerializedWhiteboardView {
+  type: 'whiteboard-view';
+  version: 1;
+  pageId: string;
+  /** Block height in CSS pixels; absent uses the default. */
+  height?: number;
+}
+
+export const whiteboardViewHeight = { min: 240, max: 1600, initial: 460 } as const;
+
+export function isSerializedWhiteboardView(value: unknown): value is SerializedWhiteboardView {
+  if (!record(value) || Object.keys(value).some(key => !['type', 'version', 'pageId', 'height', '$'].includes(key))) return false;
+  return value.type === 'whiteboard-view' && value.version === 1 && uuid(value.pageId)
+    && (value.height === undefined || (Number.isInteger(value.height)
+      && finite(value.height, whiteboardViewHeight.min, whiteboardViewHeight.max)));
 }
 
 export function whiteboardAttachments(board: WhiteboardBoard): { id: string; fileName: string; mediaType: string }[] {

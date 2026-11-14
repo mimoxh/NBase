@@ -1,4 +1,4 @@
-import type { WhiteboardArrowhead, WhiteboardBoxElement, WhiteboardConnector, WhiteboardConnectorEnd, WhiteboardConnectorMode,
+import type { WhiteboardArrowhead, WhiteboardBoxElement, WhiteboardCard, WhiteboardConnector, WhiteboardDatabase, WhiteboardConnectorEnd, WhiteboardConnectorMode,
   WhiteboardElement, WhiteboardShape, WhiteboardShapeKind, WhiteboardStrokeStyle, WhiteboardTextAlign } from '@nbase/contracts';
 import { whiteboardLimits } from '@nbase/contracts';
 import { aabb, boundsOfPoints, centerOf, clamp, distance, distanceToPolyline, dominantSide, elbowRoute, exitPoint, expandRect, outlinePolygon,
@@ -573,4 +573,9 @@ export function normalizeForSave(elements: Elements): El[] {
 }
 
 export const elementText = (el: El): string => el.type === 'frame' ? el.name : el.type === 'card' ? el.label
-  : el.type === 'image' || el.type === 'pen' ? '' : el.text;
+  : el.type === 'image' || el.type === 'pen' || el.type === 'database' ? '' : el.text;
+
+/** Elements shown as live DOM over the canvas: page cards in preview mode and database views. */
+export const isEmbedElement = (el: El | null | undefined): el is (WhiteboardCard & { view: 'preview' }) | WhiteboardDatabase =>
+  Boolean(el) && (el!.type === 'database' || (el!.type === 'card' && el!.view === 'preview'));
+export const embedDefaultSize = { card: { w: 440, h: 420 }, database: { w: 680, h: 380 }, chip: { w: 260, h: 64 } } as const;

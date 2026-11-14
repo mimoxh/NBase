@@ -8,7 +8,7 @@ const paths = {
   straight: 'M4 20L20 4m0 0h-6m6 0v6',
   pen: 'M4 20l4-1 11-11-3-3L5 16zM14 6l3 3', highlighter: 'M9 11l-5 5v4h4l5-5M9 11l6-6 4 4-6 6M9 11l4 4M4 20h8',
   eraser: 'M8 20h12M5 15l9-9a2 2 0 0 1 3 0l2 2a2 2 0 0 1 0 3l-8 8H8z', frame: 'M7 3v18M17 3v18M3 7h18M3 17h18',
-  image: 'M4 5h16v14H4zM4 15l5-5 4 4 3-3 4 4M9 9h.01', card: 'M4 6h16v12H4zM8 10h8M8 14h5', mind: 'M9 12h4m0 0 3-5h4m-7 5 3 5h4M3 10h6v4H3z',
+  image: 'M4 5h16v14H4zM4 15l5-5 4 4 3-3 4 4M9 9h.01', card: 'M4 6h16v12H4zM8 10h8M8 14h5', table: 'M4 5h16v14H4zM4 10h16M4 15h16M10 5v14', mind: 'M9 12h4m0 0 3-5h4m-7 5 3 5h4M3 10h6v4H3z',
   undo: 'M9 14 4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3', redo: 'm15 14 5-5-5-5M20 9H9a5 5 0 0 0 0 10h3',
   zoomIn: 'M11 8v6M8 11h6M20 20l-4.5-4.5M18 11a7 7 0 1 1-14 0 7 7 0 0 1 14 0', zoomOut: 'M8 11h6M20 20l-4.5-4.5M18 11a7 7 0 1 1-14 0 7 7 0 0 1 14 0',
   fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', minimap: 'M3 5h18v14H3zM13 11h6v6h-6z', grid: 'M4 4h16v16H4zM4 12h16M12 4v16',

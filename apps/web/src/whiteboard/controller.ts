@@ -1,10 +1,10 @@
-import { whiteboardLimits, type WhiteboardCard, type WhiteboardConnectorEnd, type WhiteboardImage, type WhiteboardNote, type WhiteboardShape,
+import { whiteboardLimits, type WhiteboardCard, type WhiteboardConnectorEnd, type WhiteboardDatabase, type WhiteboardImage, type WhiteboardNote, type WhiteboardShape,
   type WhiteboardText } from '@nbase/contracts';
 import { aabb, boundsOfPoints, centerOf, distance, expandRect, normalizeRect, pointInRect, rectsIntersect, round, simplifyStroke, snapRect,
   toLocal, unionRects, type Box, type Point, type Rect, type SnapGuide } from './geometry';
 import { addMindChild, createMindRoot, fitMindNode, isMindNode, layoutMindsOf } from './mind';
 import { align, anchorPoint, applyStyle, boundsOfIds, cloneElements, connectorPath, createConnector, createShape, distribute, elementAt,
-  elementBounds, fitText, handlePoint, handles, hitTest, isBox, mindRootOf, movingSet, reorder, removeElements, resizeBox, rotateElements,
+  elementBounds, elementText, embedDefaultSize, isEmbedElement, fitText, handlePoint, handles, hitTest, isBox, mindRootOf, movingSet, reorder, removeElements, resizeBox, rotateElements,
   scaleElements, setGroup, setLocked, translate, withBox, withGroups, type Alignment, type BoxEl, type Connector, type El, type Handle,
   type OrderMove, type StylePatch } from './model';
 import { emptyOverlay, handleSize, rotateHandlePoint, toScreen, toWorldPoint, type Overlay } from './render/canvas';
@@ -185,6 +185,7 @@ export class Controller {
     this.pointers.set(input.pointerId, screen);
     this.lastPointer = screen;
     if (this.store.editingId) this.finishEditing();
+    if (this.store.activeEmbedId) this.deactivateEmbed();
     if (input.pointerType === 'touch' && this.pointers.size === 2) {
       // A second finger turns whatever started into a pinch.
       if (this.gesture && this.gesture.kind !== 'pan') this.store.cancel();
@@ -605,7 +606,7 @@ export class Controller {
   // ── Text editing ──
 
   canEdit(el: El | undefined): boolean {
-    return Boolean(el) && !this.store.readOnly && !el!.locked && el!.type !== 'image' && el!.type !== 'pen' && el!.type !== 'card';
+    return Boolean(el) && !this.store.readOnly && !el!.locked && el!.type !== 'image' && el!.type !== 'pen' && el!.type !== 'card' && el!.type !== 'database';
   }
 
   startEditing(id: string) {
@@ -625,7 +626,7 @@ export class Controller {
   editingText(): string {
     const el = this.store.editingId ? this.index.get(this.store.editingId) : undefined;
     if (!el) return '';
-    return el.type === 'frame' ? el.name : el.type === 'card' ? el.label : el.type === 'image' || el.type === 'pen' ? '' : el.text;
+    return elementText(el);
   }
 
   /** Apply typed text to the element being edited; saved immediately, undone as one step. */
@@ -666,11 +667,61 @@ export class Controller {
   openCard(id: string) {
     const el = this.index.get(id);
     if (el?.type === 'card') this.host.openPage(el.pageId);
+    else if (el?.type === 'database') this.host.openPage(el.databaseId);
+  }
+
+  // ── Live pages and databases ──
+
+  /** Hands pointer and keyboard input to a live page or database until it is deactivated. */
+  activateEmbed(id: string) {
+    if (!isEmbedElement(this.index.get(id))) return;
+    if (this.store.editingId) this.finishEditing();
+    this.store.activeEmbedId = id;
+    this.store.select([id]);
+    this.hoverId = null;
+    this.refreshOverlay();
+  }
+
+  deactivateEmbed() {
+    if (!this.store.activeEmbedId) return;
+    this.store.activeEmbedId = null;
+    this.refreshOverlay();
+  }
+
+  /** Switches a page card between the title chip and the live preview, giving the preview room to read. */
+  setCardView(id: string, view: 'chip' | 'preview') {
+    const el = this.index.get(id);
+    if (el?.type !== 'card' || el.locked) return;
+    const { view: _view, ...rest } = el;
+    void _view;
+    const next: WhiteboardCard = view === 'preview'
+      ? { ...rest, view: 'preview', w: Math.max(el.w, embedDefaultSize.card.w), h: Math.max(el.h, embedDefaultSize.card.h) }
+      : { ...rest, w: embedDefaultSize.chip.w, h: embedDefaultSize.chip.h };
+    if (this.store.activeEmbedId === id) this.store.activeEmbedId = null;
+    this.apply(this.elements.map(item => item.id === id ? next : item));
+  }
+
+  setDatabaseView(id: string, viewId: string) {
+    const el = this.index.get(id);
+    if (el?.type !== 'database' || el.viewId === viewId.toLowerCase()) return;
+    this.apply(this.elements.map(item => item.id === id ? { ...el, viewId: viewId.toLowerCase() } : item));
+  }
+
+  setHeight(id: string, height: number) {
+    const el = this.index.get(id);
+    if (!el || !isBox(el) || el.locked) return;
+    const h = round(Math.min(whiteboardLimits.maxSize, Math.max(120, height)));
+    if (h !== el.h) this.apply(this.elements.map(item => item.id === id ? { ...el, h } : item));
+  }
+
+  databaseElement(page: { id: string }): WhiteboardDatabase {
+    return { id: this.host.newId(), type: 'database', x: 0, y: 0, ...embedDefaultSize.database, angle: 0, databaseId: page.id.toLowerCase() };
   }
 
   doubleClick(screen: Point) {
     const world = this.world(screen);
     const hit = this.hit(world) ?? this.frameTitleAt(screen);
+    if (hit && isEmbedElement(hit)) { this.activateEmbed(hit.id); return; }
     if (hit?.type === 'card') { this.host.openPage(hit.pageId); return; }
     if (this.store.readOnly) return;
     if (hit && this.canEdit(hit)) { this.startEditing(hit.id); return; }
@@ -748,6 +799,7 @@ export class Controller {
     if (key === 'Enter' || key === 'F2') {
       if (store.selection.size !== 1) return false;
       const el = this.index.get([...store.selection][0]!);
+      if (isEmbedElement(el)) { this.activateEmbed(el.id); return true; }
       if (el?.type === 'card') { this.host.openPage(el.pageId); return true; }
       if (key === 'Enter' && isMindNode(el) && this.addMindNode(el.mindParentId ? 'sibling' : 'child')) return true;
       if (this.canEdit(el)) { this.startEditing(el!.id); return true; }

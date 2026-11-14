@@ -119,6 +119,25 @@ function drawCard(ctx: CanvasRenderingContext2D, el: WhiteboardCard, options: Sc
   ctx.fillText(truncate(info ? '页面 · 双击打开' : '页面不存在或已删除', room, titleSize * 0.8, false, measure), textX, el.h / 2 + titleSize * 0.75);
 }
 
+/** The box under a live page or database: what shows while the DOM view is not mounted (far zoom, export, culling). */
+function drawEmbedFrame(ctx: CanvasRenderingContext2D, w: number, h: number, icon: string, title: string, options: SceneOptions, zoom: number) {
+  const { theme, measure } = options;
+  const outline = new Path2D(roundedRectPath(0, 0, w, h, Math.min(8, h / 3)));
+  ctx.shadowColor = theme.shadow; ctx.shadowBlur = options.exporting ? 0 : 8 * Math.min(1, zoom); ctx.shadowOffsetY = 2;
+  ctx.fillStyle = theme.cardBg; ctx.fill(outline);
+  ctx.shadowColor = 'transparent';
+  stroke(ctx, theme.cardLine, 1, 'solid'); ctx.stroke(outline);
+  // Far away the title is the only readable part, so it grows with the box instead of staying header-sized.
+  const size = Math.max(14, Math.min(h * 0.3, w * 0.06, 14 / Math.max(zoom, 0.05)));
+  if (size * zoom < 3) return;
+  ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  ctx.font = fontOf(size); ctx.fillStyle = theme.muted;
+  ctx.fillText(icon, 12, 12 + size * 0.7);
+  ctx.font = fontOf(size, true); ctx.fillStyle = themed('#1f2328', theme.dark);
+  const textX = 12 + size * 1.5;
+  ctx.fillText(truncate(title, w - textX - 12, size, true, measure), textX, 12 + size * 0.7);
+}
+
 function drawImage(ctx: CanvasRenderingContext2D, el: Extract<El, { type: 'image' }>, options: SceneOptions) {
   const image = options.images.get(el.attachmentId);
   if (image instanceof HTMLImageElement) { ctx.drawImage(image, 0, 0, el.w, el.h); return; }
@@ -166,7 +185,17 @@ function drawBox(ctx: CanvasRenderingContext2D, el: BoxEl, options: SceneOptions
         ctx.strokeStyle = theme.frameStroke; ctx.lineWidth = 1 / zoom; ctx.setLineDash([]); ctx.strokeRect(0, 0, el.w, el.h);
         break;
       case 'image': drawImage(ctx, el, options); break;
-      case 'card': drawCard(ctx, el, options, zoom); break;
+      case 'card': {
+        if (el.view !== 'preview') { drawCard(ctx, el, options, zoom); break; }
+        const info = options.pageInfo(el.pageId);
+        drawEmbedFrame(ctx, el.w, el.h, info?.icon ?? '📄', cardTitle(el, info), options, zoom);
+        break;
+      }
+      case 'database': {
+        const info = options.pageInfo(el.databaseId);
+        drawEmbedFrame(ctx, el.w, el.h, info?.icon ?? '🗃️', info ? info.title || '未命名数据库' : '数据库视图', options, zoom);
+        break;
+      }
       case 'pen': break;
     }
   });

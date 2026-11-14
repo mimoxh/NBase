@@ -62,7 +62,11 @@ function ToolStyleStrip({ store }: { store: BoardStore }) {
   return null;
 }
 
-export function Toolbar({ store, onImage, onCard, canUpload }: { store: BoardStore; onImage: () => void; onCard: () => void; canUpload: boolean }) {
+export function Toolbar({ store, onImage, onCard, onDatabase, canUpload }: {
+  store: BoardStore; onImage: () => void; onCard: () => void; canUpload: boolean;
+  /** Absent where the host cannot show databases. */
+  onDatabase?: (() => void) | undefined;
+}) {
   useBoard(store);
   const [collapsed, setCollapsed] = useState(false);
   if (store.readOnly) return <div className="wb-toolbar wb-toolbar-ro" role="toolbar" aria-label="白板工具">
@@ -81,6 +85,7 @@ export function Toolbar({ store, onImage, onCard, canUpload }: { store: BoardSto
       <span className="wb-sep" />
       <button type="button" className="wb-tool" title={canUpload ? '插入图片' : '插入图片（需要可写的已登录工作区）'} aria-label="插入图片" disabled={!canUpload} onClick={onImage}><BoardIcon name="image" /></button>
       <button type="button" className="wb-tool" title="插入页面卡片" aria-label="插入页面卡片" onClick={onCard}><BoardIcon name="card" /></button>
+      {onDatabase && <button type="button" className="wb-tool" title="插入数据库视图" aria-label="插入数据库视图" onClick={onDatabase}><BoardIcon name="table" /></button>}
     </div>
   </div>;
 }

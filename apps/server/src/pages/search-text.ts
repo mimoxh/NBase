@@ -1,4 +1,4 @@
-import { isFootnoteId, isSerializedBlockReference, pageReferenceLabelLimit, type SerializedPageReference, type StoredDocumentContent } from '@nbase/contracts';
+import { isFootnoteId, isSerializedBlockReference, isSerializedWhiteboardView, pageReferenceLabelLimit, type SerializedPageReference, type StoredDocumentContent } from '@nbase/contracts';
 
 import { isWhiteboardContent, whiteboardIndex } from '../whiteboards/content.js';
 
@@ -21,7 +21,7 @@ const normalizeWhitespace = (text: string) => text.replace(/\s+/gu, ' ').trim();
 function inspectDocument(content: StoredDocumentContent, collectReferences: boolean) {
   if (isWhiteboardContent(content)) return whiteboardIndex(content);
   const pieces: string[] = [];
-  const locations: { targetPageId: string; occurrence: number; start: number; end: number }[] = [];
+  const locations: { targetPageId: string; occurrence: number; start: number; end: number; label?: string }[] = [];
   let length = 0;
   let occurrence = 0;
   const append = (text: string) => { pieces.push(text); length += text.length; };
@@ -36,6 +36,12 @@ function inspectDocument(content: StoredDocumentContent, collectReferences: bool
         const reference = value as { label: string; targetPageId: string };
         append(reference.label);
         if (collectReferences) locations.push({ targetPageId: reference.targetPageId.toLowerCase(), occurrence: ordinal, start, end: length });
+      }
+    } else if (value.type === 'whiteboard-view') {
+      // An embedded whiteboard links to its page: it shares the counter and the DOM marker with page references.
+      const ordinal = occurrence++;
+      if (collectReferences && isSerializedWhiteboardView(value)) {
+        locations.push({ targetPageId: value.pageId, occurrence: ordinal, start: length, end: length, label: '嵌入的白板' });
       }
     } else if ((value.type === 'footnote-reference' || value.type === 'footnote-definition') && isFootnoteId(value.footnoteId)) {
       append(' ' + value.footnoteId + ' ');
@@ -57,7 +63,8 @@ function inspectDocument(content: StoredDocumentContent, collectReferences: bool
   };
   visit(content.editorState.root, 0);
   const raw = pieces.join('');
-  const references: IndexedPageReference[] = locations.map(({ targetPageId, occurrence, start, end }) => {
+  const references: IndexedPageReference[] = locations.map(({ targetPageId, occurrence, start, end, label }) => {
+    if (label) return { targetPageId, occurrence, snippet: label };
     const from = Math.max(0, start - contextLength);
     const to = Math.min(raw.length, end + contextLength);
     const excerpt = normalizeWhitespace(raw.slice(from, to).replace(/^\p{Cs}|\p{Cs}$/gu, ''));

@@ -46,7 +46,7 @@ const isolatedEvents = ['keydown', 'keyup', 'keypress', 'beforeinput', 'input', 
 
 const markHandled = (event: Event) => { (event as Event & { _lexicalHandled?: boolean })._lexicalHandled = true; };
 
-function useIsolatedFromEditor() {
+export function useIsolatedFromEditor() {
   const attached = useRef<HTMLElement | null>(null);
   const detach = () => {
     for (const name of isolatedEvents) attached.current?.removeEventListener(name, markHandled);

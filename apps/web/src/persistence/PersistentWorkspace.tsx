@@ -1,4 +1,4 @@
-import type { LinkPreview } from '@nbase/contracts';
+import type { AttachmentMetadata, LinkPreview } from '@nbase/contracts';
 ﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AuthSessionResponse, DailyNoteSettings, DailyNoteStatus, NoteTemplate, OpenDailyNoteRequest,
   PageBacklink, PageCoverId, PageDocument, PageSummary, PageVersion, QuickCaptureRequest, SearchResult,
@@ -29,6 +29,7 @@ import { exportAttachments } from './attachmentExport';
 import { PersistentSearchDialog } from './PersistentSearchDialog';
 import { PageHistoryDialog, TrashDialog } from './PageRecoveryDialogs';
 import { PageBacklinks } from './PageBacklinks';
+import { RowChildPages } from './RowChildPages';
 import { LazyGraphDialog, LazyLocalGraph, useGraphShortcut } from '../graph/lazy';
 import { createPersistentGraphSource } from '../graph/persistentSource';
 import { FolderImportDialog } from './FolderImportDialog';
@@ -44,6 +45,7 @@ import { createPageActions } from './pageActions';
 import { createPageTransfers, type PendingImport, type PendingUpload } from './pageTransfers';
 import { ancestorChain, subtreeIds } from './pageTreePaths';
 import { usePageSaver } from './usePageSaver';
+import { EmbeddedPagesProvider, EmbedPathProvider, EmbedStates, type EmbeddedPages } from '../embed/source';
 import { ConflictCard, EmptyPanel, HomePanel } from './WorkspacePanels';
 import { WorkspaceNotices } from './WorkspaceNotices';
 import { isAuthError, message } from './workspaceErrors';
@@ -124,6 +126,7 @@ export function PersistentWorkspace() {
   const activeIdRef = useRef<string | null>(null);
   const titleRef = useRef('');
   const docsRef = useRef(new Map<string, PageDocument>());
+  const embedStates = useRef(new EmbedStates()).current;
   const draftsRef = useRef(new Map<string, LocalPageDraft>());
   const pendingActionsRef = useRef(new Map<string, LocalPendingAction>());
   const pageActionBusyRef = useRef(false);
@@ -165,12 +168,17 @@ export function PersistentWorkspace() {
     // Database rows are listed by their database, not by the page tree.
     if (page.kind !== 'row') setPages(previous => previous.some(item => item.id === page.id)
       ? previous.map(item => item.id === page.id ? summary : item) : [...previous, summary]);
+    // A page moved into a database became a row and leaves the tree.
+    else setPages(previous => previous.some(item => item.id === page.id) ? previous.filter(item => item.id !== page.id) : previous);
     if (activeIdRef.current === page.id) setDocumentPage(page);
   };
 
   const { queueWrite, persistDraft, scheduleSave, markDraft, savePage, savePageRef, saveTimers, waitForSave } = usePageSaver({
     session, workspace, tabId, actionsLoaded, activeIdRef, docsRef, draftsRef, pendingActionsRef,
-    upsertPage, setStatus, setNotice, setReauth, setConflict, setOtherDraft, setEditorSnapshot });
+    upsertPage, setStatus, setNotice, setReauth, setConflict, setOtherDraft, setEditorSnapshot,
+    onPageState: (pageId, state) => embedStates.set(pageId, state) });
+  const markDraftRef = useRef(markDraft);
+  markDraftRef.current = markDraft;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -645,6 +653,11 @@ export function PersistentWorkspace() {
       upsertPage(updated);
       if (done) setNotice(done);
       if (patch.tagIds) void refreshTags().catch(() => undefined);
+      // Moving into or out of a database changes what the page is, and with it where its child pages show.
+      if ((current.kind ?? 'document') !== (updated.kind ?? 'document')) {
+        if (current.kind === 'row' && current.parentId) announceDatabaseChange(current.parentId);
+        void reloadTree(session);
+      }
       if (updated.kind === 'row' && updated.parentId) announceDatabaseChange(updated.parentId);
       if (updated.kind === 'database') announceDatabaseChange(updated.id);
       return true;
@@ -689,8 +702,11 @@ export function PersistentWorkspace() {
   const databaseChoices = useMemo(() => pages.filter(page => page.kind === 'database')
     .map(page => ({ id: page.id, title: page.title, icon: page.icon })), [pages]);
 
+  const tagsRef = useRef(tags);
+  tagsRef.current = tags;
   const databaseSource = useMemo(() => session && workspace ? createPersistentSource({
     workspaceId: workspace.id, csrfToken: session.csrfToken, canWrite: canWrite && !readOnly,
+    tags: () => tagsRef.current,
     openPage: id => { setDialog(null); void openPageRef.current(id); },
     notice: setNotice,
     trashRow: row => beginPageActionRef.current('trash', row.id, row.revision, row.title, undefined, true),
@@ -718,9 +734,58 @@ export function PersistentWorkspace() {
     source: databaseSource, databases: databaseChoices,
     createDatabase: () => {
       const parent = activeIdRef.current;
-      return createDatabaseRef.current(parent && docsRef.current.get(parent)?.kind === 'document' ? parent : null, false);
+      return createDatabaseRef.current(parent && ['document', 'row'].includes(docsRef.current.get(parent)?.kind ?? 'document') ? parent : null, false);
     },
   } : undefined, [databaseSource, databaseChoices]);
+
+  /** Pages shown inside the open page are written through the same saver as the open page itself. */
+  const createPageRef = useRef(createPage);
+  createPageRef.current = createPage;
+  const uploadFilesRef = useRef<(files: File[]) => Promise<AttachmentMetadata[]>>(async () => []);
+  const embeddedPages = useMemo<EmbeddedPages | null>(() => session && workspace ? {
+    canWrite: canWrite && !readOnly,
+    pages,
+    load: async pageId => {
+      let server: PageDocument;
+      try { server = await pageClient.get(workspace.id, pageId); }
+      catch (error) {
+        if (error instanceof ApiError && error.status === 404) return null;
+        if (isAuthError(error)) setReauth(true);
+        throw error;
+      }
+      // A save of this tab may have landed while the read was on its way; never step back to the older revision.
+      const known = docsRef.current.get(pageId);
+      if (!known || BigInt(known.revision) <= BigInt(server.revision)) docsRef.current.set(pageId, normalizePage(server));
+      const latest = docsRef.current.get(pageId)!;
+      const draft = draftsRef.current.get(pageId);
+      if (draft && !draft.pending && draft.baseRevision !== latest.revision) embedStates.set(pageId, 'conflict');
+      return { id: latest.id, title: draft?.title ?? latest.title, icon: latest.icon, kind: latest.kind ?? 'document',
+        content: draft?.content ?? latest.content };
+    },
+    save: (pageId, pageTitle, snapshot) => markDraftRef.current(pageId, pageTitle, snapshot),
+    state: pageId => embedStates.get(pageId),
+    subscribe: (pageId, listener) => embedStates.subscribe(pageId, listener),
+    openPage: pageId => { setDialog(null); void openPageRef.current(pageId); },
+    ...(canWrite && !readOnly ? {
+      createWhiteboard: async () => {
+        const parent = activeIdRef.current;
+        const created = await createPageRef.current(parent && ['document', 'row'].includes(docsRef.current.get(parent)?.kind ?? 'document') ? parent : null,
+          '未命名白板', whiteboardContent([]), undefined, undefined, false);
+        return created?.id ?? null;
+      },
+      uploadImages: (files: File[]) => uploadFilesRef.current(files),
+    } : {}),
+    editor: {
+      pageReferences: pageReferenceAccess, databases: databaseEmbedding, workspaceId: workspace.id,
+      resolveBlock: (pageId, blockId) => resolveBlockText(workspace.id, pageId, blockId),
+      ...(canWrite && !readOnly ? {
+        onUploadFiles: (files: File[]) => uploadFilesRef.current(files),
+        onLinkPreview: (url: string) => request<LinkPreview>(workspacePath(workspace.id) + '/link-preview', 'POST', { url }, session.csrfToken),
+      } : {}),
+    },
+    imageUrl: attachmentId => attachmentContentUrl(workspace.id, attachmentId),
+    notice: setNotice,
+  } : null, [session, workspace, canWrite, readOnly, pages, pageReferenceAccess, databaseEmbedding]);
 
   const placePageInTree = async (pageId: string, placement: PagePlacement) => {
     if (!session || !workspace || !canWrite) return;
@@ -892,6 +957,7 @@ export function PersistentWorkspace() {
   const recentPages = recentIds.flatMap(id => pages.filter(page => page.id === id)).slice(0, 5);
   const homePages = [...pages].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 10);
   const editorReadOnly = readOnly || currentLocked || !canWrite;
+  uploadFilesRef.current = uploadFiles;
   const pickAttachment = (kind: AttachmentPickKind) => {
     const input = attachmentInputRef.current;
     if (!input) return;
@@ -947,6 +1013,7 @@ export function PersistentWorkspace() {
     { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
     ...formatExportItems,
     ...(current.parentId ? [{ key: 'database', label: '返回数据库', icon: 'table' as const, onSelect: () => void openPage(current.parentId!) }] : []),
+    { key: 'move', label: '移出数据库或移到别处…', icon: 'folder' as const, disabled: currentLocked || !canWrite, onSelect: () => { setMoveTarget(''); setDialog('move'); } },
     'divider',
     { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, disabled: currentLocked || !canWrite, onSelect: () => setDialog('delete') },
   ] : current ? [
@@ -1019,12 +1086,14 @@ export function PersistentWorkspace() {
                 : <input className="wb-title page-title" data-nbase-find-title aria-label="白板标题" value={title} disabled={currentLocked}
                   onChange={event => changeTitle(event.target.value)} placeholder="未命名白板"
                   onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.currentTarget.blur(); }} />}</div>
-            {rawContent && isWhiteboardContent(rawContent) ? <LazyWhiteboard key={`${current.id}:${editorEpoch}`} boardId={current.id} content={rawContent}
+            {rawContent && isWhiteboardContent(rawContent) ? <EmbeddedPagesProvider value={embeddedPages}><EmbedPathProvider pageId={current.id}>
+              <LazyWhiteboard key={`${current.id}:${editorEpoch}`} boardId={current.id} content={rawContent}
               readOnly={editorReadOnly} title={title} pages={pages} onNotice={setNotice} onOpenPage={id => void openPage(id)}
               imageUrl={id => workspace ? attachmentContentUrl(workspace.id, id) : null}
               onUploadImages={editorReadOnly ? undefined : files => uploadFiles(files)}
               onReady={(id, content) => { if (id === activeIdRef.current) setEditorSnapshot(boardSnapshot(content)); }}
               onChange={(id, content) => { if (id === activeIdRef.current) markDraft(id, titleRef.current, boardSnapshot(content)); }} />
+              </EmbedPathProvider></EmbeddedPagesProvider>
               : <div role="alert" className="nbase-unsupported"><h2>暂不能打开此白板</h2><button className="nb-btn" onClick={exportCurrent}>下载原始 JSON</button></div>}
           </div>
           : current && current.kind === 'database' ? <>
@@ -1062,11 +1131,14 @@ export function PersistentWorkspace() {
                   if (pendingBacklinkRef.current?.link.sourcePageId === id) requestAnimationFrame(() => locatePendingBacklink(id));
                 }} onNotice={setNotice}
                 workspaceId={workspace?.id} onUploadFiles={uploadFiles} onPickAttachment={pickAttachment} databases={databaseEmbedding}
+                embeds={embeddedPages ?? undefined}
                 resolveBlock={workspace ? (pageId, blockId) => resolveBlockText(workspace.id, pageId, blockId) : undefined}
                 onLinkPreview={workspace && session && !readOnly ? url => request<LinkPreview>(workspacePath(workspace.id) + '/link-preview', 'POST', { url }, session.csrfToken) : undefined} />
                 : <div role="alert" className="nbase-unsupported"><h2>暂不能打开此格式版本</h2>
                   <p>原始数据仍保留在服务端。请先下载副本，等待兼容升级。</p>
                   <button className="nb-btn" onClick={exportCurrent}>下载原始 JSON</button></div>}
+              {workspace && current.kind === 'row' && <RowChildPages workspaceId={workspace.id} rowId={current.id} revision={current.revision}
+                onOpen={id => void openPage(id)} />}
               {workspace && <PageBacklinks key={current.id} workspaceId={workspace.id} pageId={current.id} revision={current.revision}
                 onOpen={link => openBacklink(link, current.id)} />}
               {graphSource && <LazyLocalGraph source={graphSource} pageId={current.kind === 'row' && current.parentId ? current.parentId : current.id}
@@ -1137,7 +1209,8 @@ export function PersistentWorkspace() {
       onRestorePage={id => openTrash(id)} onCreate={openDailyNote} onCapture={quickCapture} onSaveSettings={saveDailySettings} />}
     {dialog === 'delete' && current && <TrashPageDialog title={title} childCount={subtreeIds(pages, current.id).length - 1} busy={pageActionBusy}
       onConfirm={() => void beginPageAction('trash', current.id, current.revision, title)} onClose={() => setDialog(null)} />}
-    {dialog === 'move' && current && <MovePageDialog current={current} pages={pages.filter(page => page.kind !== 'database' && page.kind !== 'whiteboard')} target={moveTarget} onTarget={setMoveTarget}
+    {dialog === 'move' && current && <MovePageDialog current={current} target={moveTarget} onTarget={setMoveTarget}
+      pages={pages.filter(page => page.kind !== 'whiteboard' && (page.kind !== 'database' || current.kind === 'row' || (current.kind ?? 'document') === 'document'))}
       onConfirm={() => void movePage()} onClose={() => setDialog(null)} />}
     {dialog === 'folder-import' && workspace && canWrite && <FolderImportDialog userId={session.user.id} workspaceId={workspace.id}
       csrfToken={session.csrfToken} pages={pages} defaultParentId={activeId} parseMarkdown={parseMarkdownImport}

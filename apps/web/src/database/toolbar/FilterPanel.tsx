@@ -3,6 +3,7 @@ import { databaseConditionLimit, effectiveType, filterOperatorsFor, flatFilters,
 import { Icon } from '../../components/Icon';
 import { Popover } from '../../components/Popover';
 import { operatorLabel, relativeDateLabels } from '../labels';
+import { useDatabaseTags } from '../tags';
 
 function DateValue({ filter, onChange }: { filter: ViewFilter; onChange: (value: string | null) => void }) {
   const value = typeof filter.value === 'string' ? filter.value : '';
@@ -17,6 +18,7 @@ function DateValue({ filter, onChange }: { filter: ViewFilter; onChange: (value:
 }
 
 function FilterValue({ def, filter, onChange }: { def: PropertyDefinition; filter: ViewFilter; onChange: (value: string | number | null) => void }) {
+  const tagHost = useDatabaseTags();
   if (!operatorNeedsValue(filter.operator)) return null;
   const value = filter.value ?? '';
   const kind = effectiveType(def);
@@ -24,6 +26,12 @@ function FilterValue({ def, filter, onChange }: { def: PropertyDefinition; filte
     return <select className="nb-db-select" aria-label="筛选值" value={String(value)} onChange={event => onChange(event.target.value || null)}>
       <option value="">选择选项</option>
       {(def.options ?? []).map(option => <option key={option.id} value={option.id}>{option.name}</option>)}
+    </select>;
+  }
+  if (kind === 'tags') {
+    return <select className="nb-db-select" aria-label="筛选值" value={String(value)} onChange={event => onChange(event.target.value || null)}>
+      <option value="">选择标签</option>
+      {(tagHost?.tags ?? []).map(tag => <option key={tag.id} value={tag.id}>{tag.name}</option>)}
     </select>;
   }
   if (['date', 'created_time', 'updated_time'].includes(kind)) return <DateValue filter={filter} onChange={onChange} />;

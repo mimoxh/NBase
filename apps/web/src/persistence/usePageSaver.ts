@@ -23,11 +23,15 @@ export interface PageSaverOptions {
   setConflict: Dispatch<SetStateAction<{ server: PageDocument; draft: LocalPageDraft } | null>>;
   setOtherDraft: Dispatch<SetStateAction<LocalPageDraft | null>>;
   setEditorSnapshot: Dispatch<SetStateAction<EditorSnapshot | null>>;
+  /** Save progress of any page, including pages shown inside the open one. */
+  onPageState?: ((pageId: string, state: 'saving' | 'saved' | 'conflict' | 'error') => void) | undefined;
 }
 
 /** The per-page write path: local draft first, then one serialized server save per page. */
 export function usePageSaver({ session, workspace, tabId, actionsLoaded, activeIdRef, docsRef, draftsRef, pendingActionsRef,
-  upsertPage, setStatus, setNotice, setReauth, setConflict, setOtherDraft, setEditorSnapshot }: PageSaverOptions) {
+  upsertPage, setStatus, setNotice, setReauth, setConflict, setOtherDraft, setEditorSnapshot, onPageState }: PageSaverOptions) {
+  const pageStateRef = useRef(onPageState);
+  pageStateRef.current = onPageState;
   const savingRef = useRef(new Set<string>());
   const saveWaitersRef = useRef(new Map<string, (() => void)[]>());
   const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -86,6 +90,7 @@ export function usePageSaver({ session, workspace, tabId, actionsLoaded, activeI
       ...(previous?.recoveredFrom ? { recoveredFrom: previous.recoveredFrom } : {}),
     };
     draftsRef.current.set(pageId, draft);
+    pageStateRef.current?.(pageId, 'saving');
     if (activeIdRef.current === pageId) {
       setOtherDraft(null); setEditorSnapshot(snapshot); setStatus('正在写入本机草稿…');
     }
@@ -129,6 +134,7 @@ export function usePageSaver({ session, workspace, tabId, actionsLoaded, activeI
       if (!latest || latest.pending?.clientMutationId !== body.clientMutationId) return;
       if (latest.sequence === sentSequence) {
         await clearResolvedDraft(latest);
+        if (!draftsRef.current.has(pageId)) pageStateRef.current?.(pageId, 'saved');
         if (activeIdRef.current === pageId && !draftsRef.current.has(pageId)) setStatus('已保存到服务端');
       } else {
         const { pending: _pending, ...remaining } = latest;
@@ -139,14 +145,17 @@ export function usePageSaver({ session, workspace, tabId, actionsLoaded, activeI
         scheduleSave(pageId, 100);
       }
     } catch (error) {
+      let failure: 'conflict' | 'error' = 'error';
       if (isAuthError(error)) setReauth(true);
       if (error instanceof ApiError && error.code === 'REVISION_CONFLICT') {
+        failure = 'conflict';
         try {
           const server = await pageClient.get(workspace.id, pageId);
           const latest = draftsRef.current.get(pageId);
           if (latest && matchesServer(latest, server)) {
             await clearResolvedDraft(latest);
             upsertPage(server);
+            if (!draftsRef.current.has(pageId)) pageStateRef.current?.(pageId, 'saved');
             if (activeIdRef.current === pageId && !draftsRef.current.has(pageId)) {
               setConflict(null); setStatus('已保存到服务端');
             }
@@ -163,6 +172,7 @@ export function usePageSaver({ session, workspace, tabId, actionsLoaded, activeI
           if (remaining.sequence !== sentSequence) scheduleSave(pageId, 100);
         }
       }
+      pageStateRef.current?.(pageId, failure);
       if (activeIdRef.current === pageId) setStatus(message(error));
     } finally {
       savingRef.current.delete(pageId);

@@ -17,11 +17,15 @@ export function TrashPageDialog({ title, childCount, busy, onConfirm, onClose }:
 export function MovePageDialog({ current, pages, target, onTarget, onConfirm, onClose }: {
   current: PageDocument; pages: PageSummary[]; target: string; onTarget: (value: string) => void; onConfirm: () => void; onClose: () => void;
 }) {
+  const intoDatabase = pages.some(page => page.id === target && page.kind === 'database');
+  const leavingDatabase = current.kind === 'row' && target !== (current.parentId ?? '');
   return <Modal title="移动页面" onClose={onClose}>
     <label className="field-label" htmlFor="persistent-move-target">移动到</label>
     <select id="persistent-move-target" className="select-field" value={target} onChange={event => onTarget(event.target.value)}>
       <option value="">个人空间（根目录）</option>{pages.filter(page => page.id !== current.id).map(page =>
-        <option key={page.id} value={page.id}>{page.title || '未命名页面'}</option>)}</select>
+        <option key={page.id} value={page.id}>{page.kind === 'database' ? `数据库：${page.title || '未命名数据库'}` : page.title || '未命名页面'}</option>)}</select>
+    {intoDatabase && <p className="dialog-description">页面会成为这个数据库的一行：正文、标签和历史保留，子页面仍在它下面，但不再显示在侧栏目录里。</p>}
+    {leavingDatabase && <p className="dialog-description">移出后，它在原数据库里的字段值和关联不再保留（历史版本里仍可查看）。</p>}
     <div className="dialog-actions"><button className="nb-btn" onClick={onClose}>取消</button>
       <button className="nb-btn nb-btn-primary" onClick={onConfirm}>移动并保存</button></div></Modal>;
 }

@@ -4,7 +4,7 @@ import { localDay, resolveFilters, activeProperties, aggregatesFor, databaseQuer
 import type { Pool, PoolClient } from 'pg';
 import { computeValues } from './computed.js';
 import { loadRelationCells } from './relations.js';
-import { databaseRow, type RowRecord } from './schema.js';
+import { databaseRow, rowTagIdsColumn, type RowRecord } from './schema.js';
 
 /**
  * SQL form of contracts' `evaluateView`. Both run the same `resolveFilters` output, and
@@ -13,7 +13,10 @@ import { databaseRow, type RowRecord } from './schema.js';
  */
 const uuidPattern = '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
 const datePattern = '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$';
-const rowColumns = `p.id, p.title, p.icon, p.row_properties, p.revision::text AS revision, p.created_at, p.updated_at`;
+const rowColumns = `p.id, p.title, p.icon, p.row_properties, p.revision::text AS revision, p.created_at, p.updated_at, ${rowTagIdsColumn}`;
+/** Workspace tags of the row page; `select` and `extra` are fixed SQL fragments, never request input. */
+const tagSubquery = (select: string, extra = '') =>
+  `(SELECT ${select} FROM page_tags pt WHERE pt.workspace_id = p.workspace_id AND pt.page_id = p.id${extra})`;
 
 class Sql {
   readonly values: unknown[] = [];
@@ -86,6 +89,7 @@ function dayOf(sql: Sql, def: PropertyDefinition, timeZone: string): string {
 function emptyOf(sql: Sql, def: PropertyDefinition): string {
   switch (def.type) {
     case 'relation': return `NOT EXISTS ${relationSubquery(sql, def, '1')}`;
+    case 'tags': return `NOT EXISTS ${tagSubquery('1')}`;
     case 'title': case 'text': case 'url': return `(${textOf(sql, def)} IS NULL)`;
     case 'number': return `(${numberOf(sql, def)} IS NULL)`;
     case 'date': return `(${dateValueOf(sql, def)} IS NULL)`;
@@ -113,6 +117,10 @@ function conditionSql(sql: Sql, condition: ResolvedCondition, timeZone: string):
   switch (def.type) {
     case 'relation': {
       const has = `EXISTS ${relationSubquery(sql, def, '1', ` AND position(lower(${sql.add(target, 'text')}) in lower(o.title)) > 0`)}`;
+      return op === 'contains' ? has : `NOT ${has}`;
+    }
+    case 'tags': {
+      const has = `EXISTS ${tagSubquery('1', ` AND pt.tag_id::text = lower(${sql.add(target, 'text')})`)}`;
       return op === 'contains' ? has : `NOT ${has}`;
     }
     case 'title': case 'text': case 'url': {
@@ -153,6 +161,7 @@ function sortSql(sql: Sql, rawDef: PropertyDefinition, direction: 'asc' | 'desc'
   switch (def.type) {
     case 'number': return nullsLast(numberOf(sql, def));
     case 'relation': return nullsLast(`NULLIF(${relationSubquery(sql, def, 'count(*)')}, 0)`);
+    case 'tags': return nullsLast(`NULLIF(${tagSubquery('count(*)')}, 0)`);
     case 'checkbox': return `${checkedOf(sql, def)} ${dir}`;
     case 'date': return nullsLast(`(${dateValueOf(sql, def)} COLLATE "C")`);
     case 'created_time': return `date_trunc('milliseconds', p.created_at) ${dir}`;

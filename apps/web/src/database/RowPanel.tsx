@@ -4,6 +4,7 @@ import { nextOptionColor } from './labels';
 import type { RelationHost } from './RelationEditor';
 import { RowProperties } from './RowProperties';
 import { announceDatabaseChange, useDatabase, type DatabaseDataSource } from './source';
+import { DatabaseTagsContext } from './tags';
 
 /**
  * Row page header block: reads the parent database's schema and lets the host write the
@@ -50,7 +51,11 @@ export function RowPanel({ source, databaseId, row, editable, pending, onChange 
     const properties = doc.properties.map(p => p.id === def.id ? { ...p, options: [...(p.options ?? []), option] } : p);
     return await state.saveSchema({ properties, views: doc.views }) ? option.id : null;
   };
-  return <RowProperties row={{ ...row, ...(relations ? { relations } : {}), ...(computed ? { computed } : {}) }} properties={state.doc.properties} editable={editable && source.canWrite} pending={pending}
-    onChange={onChange} onCreateOption={createOption} databaseTitle={state.doc.page.title} databaseIcon={state.doc.page.icon}
-    onOpenDatabase={() => source.openDatabase(databaseId)} relationHostFor={relationHost} />;
+  // Tags of the open row page are changed with the page's own tag control, so here they only show.
+  const workspaceTags = source.workspaceTags?.();
+  return <DatabaseTagsContext.Provider value={workspaceTags ? { tags: workspaceTags } : null}>
+    <RowProperties row={{ ...row, ...(relations ? { relations } : {}), ...(computed ? { computed } : {}) }} properties={state.doc.properties} editable={editable && source.canWrite} pending={pending}
+      onChange={onChange} onCreateOption={createOption} databaseTitle={state.doc.page.title} databaseIcon={state.doc.page.icon}
+      onOpenDatabase={() => source.openDatabase(databaseId)} relationHostFor={relationHost} />
+  </DatabaseTagsContext.Provider>;
 }

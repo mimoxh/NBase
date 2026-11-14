@@ -9,6 +9,10 @@
 .nbase-unsupported p { line-height: 1.7; color: var(--muted); }
 .nbase-history-preview h3 { font-size: 20px; margin: 0 0 20px; overflow-wrap: anywhere; }
 .nbase-history-preview .nbase-editor-tools { display: none; }
+.nb-row-children { margin: 24px 0 8px; padding-top: 12px; border-top: 1px solid var(--nb-line); }
+.nb-row-children h2 { margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--nb-muted); }
+.nb-row-children ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.nb-row-children button { display: inline-flex; align-items: center; gap: 6px; }
 .nbase-history-preview .nbase-editor-content { min-height: 160px; padding: 0; }
 .persistent-workspace .page-title:disabled { opacity: 1; color: inherit; }
 .nbase-backlinks { margin:16px 0; padding-top:10px; border-top:1px solid var(--nb-line); }

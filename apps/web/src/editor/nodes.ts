@@ -12,6 +12,7 @@ import { PageReferenceNode } from './nodes/PageReferenceNode';
 import { FootnoteDefinitionNode, FootnoteReferenceNode } from './nodes/FootnoteNodes';
 import { MermaidNode } from './nodes/MermaidNode';
 import { DatabaseViewNode } from './nodes/DatabaseViewNode';
+import { WhiteboardViewNode } from './nodes/WhiteboardViewNode';
 import { ToggleNode } from './nodes/ToggleNode';
 import { BookmarkNode } from './nodes/BookmarkNode';
 import { BlockReferenceNode } from './nodes/BlockReferenceNode';
@@ -21,5 +22,5 @@ export const EDITOR_NODES = [
   HeadingNode, QuoteNode, ListNode, ListItemNode, CodeNode, CodeHighlightNode,
   LinkNode, AutoLinkNode, TableNode, TableRowNode, TableCellNode,
   HorizontalRuleNode, ImageReferenceNode, AttachmentNode, EquationNode, CalloutNode, PageReferenceNode,
-  FootnoteDefinitionNode, FootnoteReferenceNode, MermaidNode, DatabaseViewNode, ToggleNode, BookmarkNode, BlockReferenceNode,
+  FootnoteDefinitionNode, FootnoteReferenceNode, MermaidNode, DatabaseViewNode, WhiteboardViewNode, ToggleNode, BookmarkNode, BlockReferenceNode,
 ];

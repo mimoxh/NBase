@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
-import { $insertNodeToNearestRoot, mergeRegister } from '@lexical/utils';
-import { $createParagraphNode, $getSelection, $isParagraphNode, $isRangeSelection, COMMAND_PRIORITY_HIGH } from 'lexical';
+import { mergeRegister } from '@lexical/utils';
+import { COMMAND_PRIORITY_HIGH } from 'lexical';
 import { Modal } from '../../components/Modal';
+import { $insertEmbedBlock } from '../embedInsert';
 import { $createDatabaseViewNode, INSERT_DATABASE_VIEW_COMMAND, REQUEST_DATABASE_VIEW_COMMAND,
   useDatabaseEmbedding } from '../nodes/DatabaseViewNode';
 
@@ -16,15 +17,7 @@ export function DatabaseViewPlugin() {
   useEffect(() => mergeRegister(
     editor.registerCommand(INSERT_DATABASE_VIEW_COMMAND, ({ databaseId, viewId }) => {
       if (!editor.isEditable()) return false;
-      const node = $createDatabaseViewNode(databaseId, viewId ?? null);
-      // Take over an empty top-level paragraph (such as the one the slash command was typed in):
-      // Markdown cannot keep an empty paragraph between blocks, which would block source editing.
-      const selection = $getSelection();
-      const top = $isRangeSelection(selection) ? selection.anchor.getNode().getTopLevelElement() : null;
-      if ($isParagraphNode(top) && top.getChildrenSize() === 0) top.replace(node);
-      else $insertNodeToNearestRoot(node);
-      if (!node.getNextSibling()) node.insertAfter($createParagraphNode());
-      node.selectNext();
+      $insertEmbedBlock($createDatabaseViewNode(databaseId, viewId ?? null));
       return true;
     }, COMMAND_PRIORITY_HIGH),
     editor.registerCommand(REQUEST_DATABASE_VIEW_COMMAND, mode => {

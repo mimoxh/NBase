@@ -1,6 +1,7 @@
 import type { SerializedEditorState } from 'lexical';
 import type { AttachmentMetadata, LinkPreview, PageSummary } from '@nbase/contracts';
 import type { DatabaseEmbedding } from './nodes/DatabaseViewNode';
+import type { EmbeddedPages } from '../embed/source';
 
 /** Versioned document payload; runtime node keys are never document identities. */
 export interface DocumentContent {
@@ -46,6 +47,8 @@ export interface DocumentEditorProps {
   onPickAttachment?: ((kind: AttachmentPickKind) => void) | undefined;
   /** Shows database view blocks live; without it they render as placeholders and no database commands appear. */
   databases?: DatabaseEmbedding | undefined;
+  /** Shows embedded whiteboards live; without it they render as placeholders and no whiteboard commands appear. */
+  embeds?: EmbeddedPages | undefined;
   /** Reads a web page's title for a bookmark card; without it bookmarks show the address only. */
   onLinkPreview?: ((url: string) => Promise<LinkPreview>) | undefined;
   /** Current text of an anchored block in a saved page, or null when it no longer exists. */

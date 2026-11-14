@@ -44,7 +44,9 @@ export function ContextMenu({ x, y, items, bounds, onClose }: { x: number; y: nu
 
 export interface PickablePage { id: string; title: string; icon: string | null; kind?: string | undefined }
 
-export function PagePicker({ pages, onPick, onClose }: { pages: readonly PickablePage[]; onPick: (page: PickablePage) => void; onClose: () => void }) {
+export function PagePicker({ pages, onPick, onClose, label = '插入页面卡片', placeholder = '搜索要引用的页面' }: {
+  pages: readonly PickablePage[]; onPick: (page: PickablePage) => void; onClose: () => void; label?: string; placeholder?: string;
+}) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const matches = useMemo(() => {
@@ -52,9 +54,9 @@ export function PagePicker({ pages, onPick, onClose }: { pages: readonly Pickabl
     return pages.filter(page => !q || (page.title || '未命名页面').toLowerCase().includes(q)).slice(0, 80);
   }, [pages, query]);
   return <div className="wb-modal-scrim" role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="wb-modal" role="dialog" aria-modal="true" aria-label="插入页面卡片">
+    <div className="wb-modal" role="dialog" aria-modal="true" aria-label={label}>
       <div className="nb-pal-input"><BoardIcon name="search" size={16} />
-        <input autoFocus value={query} placeholder="搜索要引用的页面" aria-label="搜索页面"
+        <input autoFocus value={query} placeholder={placeholder} aria-label="搜索页面"
           onChange={event => { setQuery(event.target.value); setActive(0); }}
           onKeyDown={event => {
             if (event.nativeEvent.isComposing) return;

@@ -45,6 +45,8 @@ export class BoardStore {
   tool: Tool = 'select';
   style: ToolStyle = { ...defaultToolStyle };
   editingId: string | null = null;
+  /** The live page or database on the board that currently takes pointer and keyboard input. */
+  activeEmbedId: string | null = null;
   background: Background = 'dots';
   minimap = false;
   overlay: Overlay = emptyOverlay;
@@ -79,6 +81,7 @@ export class BoardStore {
     // Drop selected ids that no longer exist.
     if ([...this.selection].some(id => !this.index.has(id))) this.selection = new Set([...this.selection].filter(id => this.index.has(id)));
     if (this.editingId && !this.index.has(this.editingId)) this.editingId = null;
+    if (this.activeEmbedId && !this.index.has(this.activeEmbedId)) this.activeEmbedId = null;
   }
 
   /** Start a gesture: later previews and the commit are measured against this state. */
@@ -131,7 +134,7 @@ export class BoardStore {
   redo() { this.travel(this.history.redo(this.elements)); }
   private travel(state: El[] | null) {
     if (!state || this.readOnly) return;
-    this.editingId = null; this.gestureBase = null;
+    this.editingId = null; this.activeEmbedId = null; this.gestureBase = null;
     this.setElements(state);
     this.emit();
     this.persist(state);

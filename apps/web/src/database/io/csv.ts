@@ -16,8 +16,9 @@ function quote(field: string): string {
   return /[",\r\n]/.test(field) ? `"${field.replaceAll('"', '""')}"` : field;
 }
 
-export function csvCell(row: DatabaseRow, def: PropertyDefinition): string {
+export function csvCell(row: DatabaseRow, def: PropertyDefinition, tagName?: (id: string) => string | undefined): string {
   const kind = effectiveType(def);
+  if (kind === 'tags') return guard((row.tagIds ?? []).flatMap(id => { const name = tagName?.(id); return name ? [name] : []; }).join(', '));
   if (kind === 'number') { const value = cellValue(row, def); return value === undefined ? '' : String(value); }
   if (kind === 'checkbox') return cellValue(row, def) === true ? '✓' : '';
   if (kind === 'created_time' || kind === 'updated_time') return formatTimestamp(String(cellValue(row, def) ?? ''));
@@ -26,9 +27,9 @@ export function csvCell(row: DatabaseRow, def: PropertyDefinition): string {
 }
 
 /** RFC 4180 text with a UTF-8 BOM, which Excel needs to read Chinese correctly. */
-export function rowsToCsv(rows: DatabaseRow[], columns: PropertyDefinition[]): string {
+export function rowsToCsv(rows: DatabaseRow[], columns: PropertyDefinition[], tagName?: (id: string) => string | undefined): string {
   const lines = [columns.map(def => quote(guard(def.name))).join(',')];
-  for (const row of rows) lines.push(columns.map(def => quote(csvCell(row, def))).join(','));
+  for (const row of rows) lines.push(columns.map(def => quote(csvCell(row, def, tagName))).join(','));
   return `﻿${lines.join('\r\n')}\r\n`;
 }
 

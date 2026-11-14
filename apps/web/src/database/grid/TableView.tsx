@@ -8,6 +8,7 @@ import { creatableTypes, typeGlyphs, typeLabels } from '../labels';
 import type { Panel } from '../panel';
 import type { RowStore } from '../rowStore';
 import type { DatabaseDataSource, DatabaseState } from '../source';
+import { useDatabaseTags } from '../tags';
 import { AggregateBar } from './AggregateBar';
 import { useColumnResize } from './useColumnResize';
 import { useGrid } from './useGrid';
@@ -27,6 +28,7 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
   onCreateOption: (def: PropertyDefinition) => (name: string) => Promise<string | null>;
 }) {
   const canWrite = source.canWrite;
+  const tagHost = useDatabaseTags();
   const [dragRow, setDragRow] = useState<string | null>(null);
   const [dropRow, setDropRow] = useState<string | null>(null);
   const { widthOf, startResize } = useColumnResize(view, canWrite, widths => onUpdateView({ widths }));
@@ -96,7 +98,9 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
                 <button onClick={() => setPanel({ kind: 'add-relation' })}><span className="nb-db-glyph">{typeGlyphs.relation}</span>{typeLabels.relation}…</button>
                 <button onClick={() => onAddProperty('formula')}><span className="nb-db-glyph">{typeGlyphs.formula}</span>{typeLabels.formula}</button>
                 <button disabled={!state.doc?.properties.some(p => p.type === 'relation' && !p.deletedAt)} title="需要先添加关联字段" onClick={() => onAddProperty('rollup')}>
-                  <span className="nb-db-glyph">{typeGlyphs.rollup}</span>{typeLabels.rollup}</button></div>
+                  <span className="nb-db-glyph">{typeGlyphs.rollup}</span>{typeLabels.rollup}</button>
+                {tagHost && <button disabled={state.doc?.properties.some(p => p.type === 'tags' && !p.deletedAt)} title="显示并修改页面的工作区标签；每个数据库一个"
+                  onClick={() => onAddProperty('tags')}><span className="nb-db-glyph">{typeGlyphs.tags}</span>{typeLabels.tags}</button>}</div>
             </Popover>}
           </span>
         </th>}

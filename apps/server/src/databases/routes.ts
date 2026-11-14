@@ -15,7 +15,7 @@ import { applyBulk } from './bulk.js';
 import { markSchemaChanged } from './computed.js';
 import { changeRelation, createRelation, mirrorRelationDeletion, relationsUnchanged } from './relations.js';
 import { readDatabaseRows, runDatabaseAggregate, runDatabaseQuery } from './query.js';
-import { databaseRow, loadDatabaseSchema, searchProjection, type RowRecord } from './schema.js';
+import { databaseRow, loadDatabaseSchema, rowTagIdsColumn, searchProjection, type RowRecord } from './schema.js';
 import { DatabaseWorker, selectRowsForIndex, writeRowSearchText } from './worker.js';
 
 interface WorkspaceParams { workspaceId: string }
@@ -76,9 +76,9 @@ async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorI
   if (!withRows) return { page: pageSummary(head), properties: head.properties_json, views: head.views_json,
     schemaRevision: head.schema_revision, rows: [] };
   const rows = await db.query<RowRecord>(`
-    SELECT id, title, icon, row_properties, revision::text AS revision, created_at, updated_at FROM pages
-    WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL AND kind = 'row'
-    ORDER BY sort_position, id LIMIT $3
+    SELECT p.id, p.title, p.icon, p.row_properties, p.revision::text AS revision, p.created_at, p.updated_at, ${rowTagIdsColumn} FROM pages p
+    WHERE p.workspace_id = $1 AND p.parent_id = $2 AND p.deleted_at IS NULL AND p.kind = 'row'
+    ORDER BY p.sort_position, p.id LIMIT $3
   `, [workspaceId, pageId, wholeReadLimit]);
   return { page: pageSummary(head), properties: head.properties_json, views: head.views_json,
     schemaRevision: head.schema_revision, rows: rows.rows.map(databaseRow) };

@@ -176,6 +176,11 @@ const builtinsBlock: Record<string, DocxRenderer['block']> = {
     return c.paragraph(c.run(`数据库视图${title ? `：${title}` : ''}`, { bold: true }) + c.run('\n导出不包含数据库行，请在 NBase 中查看或导出该数据库。', { color: '6F7470' }),
       { ...frame, border: 'C8CBC4', shade: 'F6F6F3' });
   },
+  'whiteboard-view': (node, c, frame) => {
+    const title = c.resources.pageTitle?.(str(node.pageId).toLowerCase());
+    return c.paragraph(c.run(`白板${title ? `：${title}` : ''}`, { bold: true }) + c.run('\n导出不包含白板内容，请在 NBase 中打开该白板并导出图片。', { color: '6F7470' }),
+      { ...frame, border: 'C8CBC4', shade: 'F6F6F3' });
+  },
   'footnote-definition': (node, c, frame) => {
     const id = str(node.footnoteId);
     if (c.footnotes.referenced.has(id) && !frame.inFootnote) return '';

@@ -11,6 +11,7 @@ import { monthBounds, nextOptionColor, operatorLabel, relativeDateLabels, typeLa
 import type { Panel } from './panel';
 import { useRowStore } from './rowStore';
 import { announceDatabaseChange, useDatabase, type DatabaseDataSource } from './source';
+import { DatabaseTagsContext, type DatabaseTagHost } from './tags';
 import { FieldsPanel } from './toolbar/FieldsPanel';
 import { FilterPanel } from './toolbar/FilterPanel';
 import { SortPanel } from './toolbar/SortPanel';
@@ -151,7 +152,11 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
     return text ? <button key={index} className="nb-db-chip" onClick={() => setPanel({ kind: 'filter' })}>{text}</button> : null;
   });
 
-  return <div className={`nb-db ${compact ? 'nb-db-compact' : ''}`}>
+  const workspaceTags = source.workspaceTags?.();
+  const tagHost: DatabaseTagHost | null = workspaceTags ? { tags: workspaceTags,
+    ...(canWrite ? { setRowTags: (row: DatabaseRow, tagIds: string[]) => { void store.updateRow(row.id, { tagIds }); } } : {}) } : null;
+
+  return <DatabaseTagsContext.Provider value={tagHost}><div className={`nb-db ${compact ? 'nb-db-compact' : ''}`}>
     {heading}
     <div className="nb-db-bar">
       <ViewTabs views={doc.views} view={view} canWrite={canWrite} canBoard={active.some(isGroupableProperty)} canCalendar={active.some(isCalendarProperty)} open={panel?.kind === 'views'} onOpen={() => setPanel({ kind: 'views' })}
@@ -209,7 +214,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
         再显示 {Math.min(200, store.total - limit)} 行</button>}
       {compact && <button className="nb-btn nb-btn-quiet" onClick={() => source.openDatabase(databaseId)}>打开完整数据库</button>}
     </div>
-  </div>;
+  </div></DatabaseTagsContext.Provider>;
 }
 
 export { OptionTag };

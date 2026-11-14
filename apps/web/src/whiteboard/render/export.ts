@@ -121,8 +121,23 @@ export function boardToSvg(elements: Elements, images: ReadonlyMap<string, strin
           : `<rect width="${num(el.w)}" height="${num(el.h)}" fill="#f1f3f5" stroke="#dfe3e8"/>`);
         break;
       }
+      case 'database': {
+        const info = options.pageInfo(el.databaseId);
+        body.push(`<path d="${roundedRectPath(0, 0, el.w, el.h, 8)}" fill="${theme.cardBg}" stroke="${theme.cardLine}"/>`,
+          `<text x="12" y="24" font-size="16" dominant-baseline="central">${escape(info?.icon ?? '🗃️')}</text>`,
+          `<text x="38" y="24" font-size="14" font-weight="600" fill="${themed('#1f2328', dark)}" dominant-baseline="central">${escape(info ? info.title || '未命名数据库' : '数据库视图')}</text>`,
+          `<text x="12" y="48" font-size="12" fill="${theme.muted}" dominant-baseline="central">数据库视图 · 导出不包含数据</text>`);
+        break;
+      }
       case 'card': {
         const info = options.pageInfo(el.pageId);
+        if (el.view === 'preview') {
+          body.push(`<path d="${roundedRectPath(0, 0, el.w, el.h, 8)}" fill="${theme.cardBg}" stroke="${theme.cardLine}"/>`,
+            `<text x="12" y="24" font-size="16" dominant-baseline="central">${escape(info?.icon ?? '📄')}</text>`,
+            `<text x="38" y="24" font-size="14" font-weight="600" fill="${themed('#1f2328', dark)}" dominant-baseline="central">${escape(cardTitle(el, info))}</text>`,
+            `<text x="12" y="48" font-size="12" fill="${theme.muted}" dominant-baseline="central">页面预览 · 导出不包含正文</text>`);
+          break;
+        }
         body.push(`<path d="${roundedRectPath(0, 0, el.w, el.h, Math.min(10, el.h / 3))}" fill="${theme.cardBg}" stroke="${info ? theme.cardLine : theme.danger}"${info ? '' : ' stroke-dasharray="4 3"'}/>`,
           `<text x="12" y="${num(el.h / 2)}" font-size="20" dominant-baseline="central">${escape(info ? info.icon ?? '📄' : '⚠️')}</text>`,
           `<text x="44" y="${num(el.h / 2 - 9)}" font-size="15" font-weight="600" fill="${info ? themed('#1f2328', dark) : theme.danger}" dominant-baseline="central">${escape(cardTitle(el, info))}</text>`,

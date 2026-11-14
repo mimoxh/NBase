@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type Cha
 import { defaultDatabaseSchema, whiteboardContent, whiteboardSearchText, type PageCoverId, type PageSummary } from '@nbase/contracts';
 import { LazyWhiteboard } from '../whiteboard/lazy';
 import { demoImageUrl, demoUploadImages } from '../whiteboard/host';
+import { EmbeddedPagesProvider, EmbedPathProvider, EmbedStates, type EmbeddedPages } from '../embed/source';
+import { isWhiteboardContent } from '@nbase/contracts';
 import { downloadBlob } from '../persistence/fileDownload';
 import { LazyDatabaseView as DatabaseView, LazyRowPanel as RowPanel } from '../database/lazy';
 import { createDemoSource } from '../database/demoSource';
@@ -309,6 +311,42 @@ export function WorkspaceApp() {
     else if (key === 'theme') setTheme(theme === 'dark' ? 'light' : 'dark');
   };
   const summaries = useMemo(() => state.pages.filter(p => !p.deleted && p.kind !== 'row').map(toSummary), [state.pages]);
+  /** Pages shown inside the open page; like every demo change they live in the session only. */
+  const embedStates = useRef(new EmbedStates()).current;
+  const embeddedPages = useMemo<EmbeddedPages>(() => ({
+    canWrite: !readOnly,
+    pages: summaries,
+    load: async id => {
+      const page = stateRef.current.pages.find(p => p.id === id && !p.deleted);
+      if (!page) return null;
+      return { id: page.id, title: page.title, icon: page.icon, kind: page.kind ?? 'document',
+        content: page.board ?? page.snapshot?.content ?? createContentFromMarkdown(page.markdown) };
+    },
+    save: (id, _title, snapshot) => {
+      const action: Action = isWhiteboardContent(snapshot.content)
+        ? { type: 'board', id, content: snapshot.content } : { type: 'snapshot', id, snapshot, dirty: true };
+      // The ref moves first so another view of the same page reading right away sees the change.
+      stateRef.current = workspaceReducer(stateRef.current, action);
+      dispatch(action);
+      embedStates.set(id, 'saved');
+    },
+    state: id => embedStates.get(id),
+    subscribe: (id, listener) => embedStates.subscribe(id, listener),
+    openPage: id => openPageRef.current(id),
+    createWhiteboard: async () => {
+      const parent = stateRef.current.pages.find(p => p.id === stateRef.current.currentId);
+      const page: Page = { id: crypto.randomUUID(), title: '未命名白板', parentId: parent && (parent.kind ?? 'document') === 'document'
+        ? parent.id : null, markdown: '', starred: false, deleted: false, dirty: true, icon: null, cover: null,
+        kind: 'whiteboard', board: whiteboardContent([]) };
+      stateRef.current = { ...stateRef.current, pages: [...stateRef.current.pages, page] };
+      dispatch({ type: 'insert', page });
+      return page.id;
+    },
+    editor: { databases: databaseEmbedding },
+    imageUrl: demoImageUrl,
+    uploadImages: demoUploadImages,
+    notice,
+  }), [readOnly, summaries, notice, databaseEmbedding]);
   const favoriteSet = useMemo(() => new Set(state.pages.filter(p => p.starred && !p.deleted).map(p => p.id)), [state.pages]);
   const favoritePages = useMemo(() => state.pages.filter(p => p.starred && !p.deleted).map(toSummary), [state.pages]);
   const recentPages = useMemo(() => state.recent.slice(0, 5).flatMap(id => state.pages.filter(p => p.id === id && !p.deleted).map(toSummary)), [state.pages, state.recent]);
@@ -391,8 +429,10 @@ export function WorkspaceApp() {
                 onChange={event => dispatch({ type: 'rename', id: current.id, title: event.target.value })}
                 onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing) event.currentTarget.blur(); }} />}
             <span className="wb-host-note">演示 · 刷新后重置</span></div>
+          <EmbeddedPagesProvider value={embeddedPages}><EmbedPathProvider pageId={current.id}>
           <LazyWhiteboard key={current.id} boardId={current.id} content={current.board} readOnly={readOnly} title={current.title}
             pages={summaries} onChange={onBoardChange} onOpenPage={openPage} imageUrl={demoImageUrl} onUploadImages={demoUploadImages} onNotice={notice} />
+          </EmbedPathProvider></EmbeddedPagesProvider>
         </div> : isDocument && current.kind === 'database' ? <>
           <div className="nb-doc-wide-head">
             <PageHeader icon={current.icon ?? '🗃️'} cover={current.cover} editable={!readOnly}
@@ -424,7 +464,7 @@ export function WorkspaceApp() {
             <DocumentEditor key={current.id} ref={editorRef} documentId={current.id}
               title={current.title} onReplaceTitle={value => dispatch({ type: 'rename', id: current.id, title: value })}
               initialContent={current.snapshot?.content} initialMarkdown={current.markdown}
-              readOnly={readOnly} onChange={onChange} onReady={onReady} onNotice={notice} databases={databaseEmbedding} />
+              readOnly={readOnly} onChange={onChange} onReady={onReady} onNotice={notice} databases={databaseEmbedding} embeds={embeddedPages} />
           </div>
           <Toc outline={current.snapshot?.outline ?? []} onJump={id => editorRef.current?.jumpToHeading(id)} />
         </> : <section className="nb-home">

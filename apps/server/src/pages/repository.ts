@@ -449,7 +449,8 @@ export class PgPageRepository {
       );
       const parentKind = parent.rows[0]?.kind;
       if (!parentKind) throw new PageError(422, 'PAGE_TREE_INVALID');
-      if (parentKind === 'row' || parentKind === 'whiteboard' || (parentKind === 'database' && requestedKind === 'database')) {
+      // Rows are pages too, so they can hold pages, databases and whiteboards; a whiteboard holds none.
+      if (parentKind === 'whiteboard' || (parentKind === 'database' && requestedKind === 'database')) {
         throw new PageError(422, 'PAGE_KIND_INVALID');
       }
       if (parentKind === 'database') {
@@ -496,8 +497,8 @@ export class PgPageRepository {
   private async validateParent(client: PoolClient, workspaceId: string, pageId: string, parentId: string): Promise<void> {
     const target = await client.query<{ kind: PageKind }>(
       'SELECT kind FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL', [workspaceId, parentId]);
-    // Moving pages into a database or under a row is not supported; rows are created in place.
-    if (target.rows[0] && target.rows[0].kind !== 'document') throw new PageError(422, 'PAGE_KIND_INVALID');
+    // A whiteboard has no child pages. Moving into a database turns the page into a row; see updateInTransaction.
+    if (target.rows[0]?.kind === 'whiteboard') throw new PageError(422, 'PAGE_KIND_INVALID');
     let candidate: string | null = parentId;
     const visited = new Set<string>();
     while (candidate !== null) {
@@ -530,20 +531,43 @@ export class PgPageRepository {
     if (row.content_schema_version !== 1) throw new PageError(422, 'CONTENT_VERSION_UNSUPPORTED');
     if (row.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', row.revision);
     if (body.content && (row.kind === 'database' || !contentMatchesKind(row.kind, body.content))) throw new PageError(422, 'PAGE_KIND_INVALID');
-    if (body.properties !== undefined && row.kind !== 'row') throw new PageError(422, 'PAGE_KIND_INVALID');
-    if (row.kind === 'row' && body.parentId !== undefined && body.parentId !== row.parent_id) {
-      throw new PageError(422, 'PAGE_KIND_INVALID');
-    }
     if (body.content) await this.validateAttachments(client, workspaceId, body.content);
     const index = body.content ? extractDocumentIndex(body.content) : null;
     if (index) await this.validatePageReferenceTargets(client, workspaceId, index.references);
     const parentId = body.parentId === undefined ? row.parent_id : body.parentId;
-    if (parentId !== null && parentId !== row.parent_id) await this.validateParent(client, workspaceId, pageId, parentId);
+    const moving = parentId !== row.parent_id;
+    if (moving && parentId !== null) await this.validateParent(client, workspaceId, pageId, parentId);
+    // A page moved into a database becomes a row of it; a row moved anywhere else becomes a plain page again.
+    let kind: PageKind = row.kind ?? 'document';
+    let joined: string | null = null;
+    const left = moving && row.kind === 'row' ? row.parent_id : null;
+    if (moving) {
+      const target = parentId === null ? null : await client.query<{ kind: PageKind }>(
+        'SELECT kind FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL', [workspaceId, parentId]);
+      if (target?.rows[0]?.kind === 'database') {
+        if (kind !== 'document' && kind !== 'row') throw new PageError(422, 'PAGE_KIND_INVALID');
+        const count = await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM pages
+          WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL`, [workspaceId, parentId]);
+        if ((count.rows[0]?.n ?? 0) >= databaseRowLimit) throw new PageError(409, 'DATABASE_ROW_LIMIT');
+        kind = 'row';
+        joined = parentId;
+      } else if (kind === 'row') kind = 'document';
+    }
+    if (body.properties !== undefined && kind !== 'row') throw new PageError(422, 'PAGE_KIND_INVALID');
     const icon = body.icon === undefined ? row.icon : body.icon;
     const cover = body.cover === undefined ? row.cover : body.cover;
     let rowProperties = row.row_properties;
     let searchText = index?.searchText ?? null;
-    if (row.kind === 'row' && (index || body.properties)) {
+    if (joined) {
+      // Values belong to the fields of the database they were entered in, so a row starts empty in a new one.
+      const schema = await loadDatabaseSchema(client, workspaceId, joined);
+      if (!schema) throw new PageError(422, 'DATABASE_UNAVAILABLE');
+      rowProperties = this.mergeProperties(schema.properties_json, {}, body.properties ?? {});
+      searchText = rowIndexText(index?.searchText ?? extractDocumentIndex(row.content_json).searchText, schema.properties_json, rowProperties);
+    } else if (left) {
+      rowProperties = null;
+      searchText = index?.searchText ?? extractDocumentIndex(row.content_json).searchText;
+    } else if (row.kind === 'row' && (index || body.properties)) {
       const schema = row.parent_id ? await loadDatabaseSchema(client, workspaceId, row.parent_id) : null;
       if (!schema) throw new PageError(422, 'DATABASE_UNAVAILABLE');
       if (body.properties) rowProperties = this.mergeProperties(schema.properties_json, row.row_properties ?? {}, body.properties);
@@ -554,21 +578,28 @@ export class PgPageRepository {
     const result = await client.query<PageRow>(`
       UPDATE pages SET title = $3, parent_id = $4, content_json = $5::jsonb,
         content_schema_version = 1, search_text = COALESCE($7, search_text), icon = $8, cover = $9,
-        row_properties = $10::jsonb,
+        row_properties = $10::jsonb, kind = $11,
         sort_position = CASE WHEN parent_id IS DISTINCT FROM $4::uuid THEN nextval('pages_sort_position_seq') * 1024 ELSE sort_position END,
         revision = revision + 1, updated_at = now()
       WHERE workspace_id = $1 AND id = $2 AND revision = $6::bigint AND deleted_at IS NULL
       RETURNING ${pageColumns}
     `, [workspaceId, pageId, body.title ?? row.title, parentId,
       JSON.stringify(body.content ?? row.content_json), body.expectedRevision,
-      searchText, icon, cover, rowProperties ? JSON.stringify(rowProperties) : null]);
+      searchText, icon, cover, rowProperties ? JSON.stringify(rowProperties) : null, kind]);
     if (!result.rows[0]) throw new PageError(409, 'REVISION_CONFLICT');
+    if (left) {
+      // Links and cached results belong to the row; the plain page it became has neither.
+      await client.query('DELETE FROM database_row_links WHERE workspace_id = $1 AND (source_row_id = $2 OR target_row_id = $2)', [workspaceId, pageId]);
+      await client.query('DELETE FROM database_computed WHERE workspace_id = $1 AND row_id = $2', [workspaceId, pageId]);
+    }
     await refreshPagePinyin(client, workspaceId, pageId,
       { title: body.title !== undefined && body.title !== row.title ? body.title : undefined, searchText });
     const tagIds = body.tagIds === undefined ? row.tag_ids : await this.replaceTags(client, workspaceId, pageId, body.tagIds);
     if (index) await replacePageLinks(client, workspaceId, pageId, index.references);
     await this.snapshot(client, workspaceId, [pageId], actorId, 'update');
-    if (row.kind === 'row' && row.parent_id && (body.properties || body.title !== undefined)) await this.rowChanged(client, workspaceId, row.parent_id, [pageId]);
+    if (left) await this.rowChanged(client, workspaceId, left, [pageId]);
+    if (joined) await this.rowChanged(client, workspaceId, joined, [pageId]);
+    else if (!left && row.kind === 'row' && row.parent_id && (body.properties || body.title !== undefined)) await this.rowChanged(client, workspaceId, row.parent_id, [pageId]);
     return { statusCode: 200, body: pageFromRow({ ...result.rows[0], tag_ids: tagIds ?? [] }) };
   }
 
@@ -588,10 +619,11 @@ export class PgPageRepository {
       if (row.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', row.revision);
       if (body.expectedSubtreeIds) {
         // Clients see the page tree, which lists databases but not their rows; rows go along with them.
+        // Pages kept under a row are not in the tree either, so the walk stops at rows as well.
         const actual = await client.query<{ id: string }>(`WITH RECURSIVE subtree AS (
-          SELECT id FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
-          UNION ALL SELECT child.id FROM pages child JOIN subtree parent ON child.parent_id = parent.id
-          WHERE child.workspace_id = $1 AND child.deleted_at IS NULL AND child.kind <> 'row'
+          SELECT id, kind FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL
+          UNION ALL SELECT child.id, child.kind FROM pages child JOIN subtree parent ON child.parent_id = parent.id
+          WHERE child.workspace_id = $1 AND child.deleted_at IS NULL AND child.kind <> 'row' AND parent.kind <> 'row'
         ) SELECT id FROM subtree`, [workspaceId, pageId]);
         const expected = body.expectedSubtreeIds.map(id => id.toLowerCase()).sort();
         if (JSON.stringify(actual.rows.map(item => item.id).sort()) !== JSON.stringify(expected)) {

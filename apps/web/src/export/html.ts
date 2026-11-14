@@ -225,6 +225,10 @@ const builtins: Record<string, HtmlRenderer> = {
     const title = c.resources.pageTitle?.(str(node.databaseId).toLowerCase());
     return `<div class="nb-placeholder nb-block-placeholder"><strong>数据库视图${title ? `：${escapeHtml(title)}` : ''}</strong><br>导出不包含数据库行，请在 NBase 中查看或导出该数据库。</div>`;
   },
+  'whiteboard-view': (node, c) => {
+    const title = c.resources.pageTitle?.(str(node.pageId).toLowerCase());
+    return `<div class="nb-placeholder nb-block-placeholder"><strong>白板${title ? `：${escapeHtml(title)}` : ''}</strong><br>导出不包含白板内容，请在 NBase 中打开该白板并导出图片。</div>`;
+  },
   table,
   tablerow: (node, c) => `<tr>${c.children(node)}</tr>`,
   tablecell: (node, c) => `<td>${c.children(node)}</td>`,

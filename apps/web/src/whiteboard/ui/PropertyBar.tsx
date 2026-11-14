@@ -19,13 +19,17 @@ const fontSizes = [12, 14, 16, 20, 24, 32, 48, 64, 96];
 const strokeStyles: [WhiteboardStrokeStyle, string][] = [['solid', '实线'], ['dashed', '虚线'], ['dotted', '点线']];
 const arrowheads: [WhiteboardArrowhead, string][] = [['none', '无'], ['arrow', '箭头'], ['triangle', '三角'], ['dot', '圆点'], ['diamond', '菱形']];
 
-export function PropertyBar({ store, controller, onMore, onPresentFrame }: { store: BoardStore; controller: Controller; onMore: (x: number, y: number) => void; onPresentFrame: (id: string) => void }) {
+export function PropertyBar({ store, controller, onMore, onPresentFrame, onFitCard }: {
+  store: BoardStore; controller: Controller; onMore: (x: number, y: number) => void; onPresentFrame: (id: string) => void;
+  /** Present where page previews can be shown; resizes a preview card to its content. */
+  onFitCard?: ((id: string) => void) | undefined;
+}) {
   useBoard(store);
   const [panel, setPanel] = useState<Panel>(null);
   const selectionKey = [...store.selection].join(',');
   useEffect(() => { setPanel(null); }, [selectionKey]);
   const selected = [...store.selection].map(id => store.index.get(id)).filter((el): el is El => Boolean(el));
-  if (!selected.length || store.editingId || store.inGesture || store.readOnly) return null;
+  if (!selected.length || store.editingId || store.activeEmbedId || store.inGesture || store.readOnly) return null;
   const bounds = controller.selectionBounds();
   if (!bounds) return null;
   const top = toScreen({ x: bounds.x + bounds.w / 2, y: bounds.y }, store.view);
@@ -69,6 +73,13 @@ export function PropertyBar({ store, controller, onMore, onPresentFrame }: { sto
     if (shapes.length || texts.length) items.push(<Btn key="color" label="文字颜色" on={panel === 'text'} onClick={() => toggle('text')}><span className="wb-tc" style={{ '--wb-swatch': shapes[0]?.textColor ?? texts[0]?.color ?? '#1f2328' } as React.CSSProperties}>A</span></Btn>);
     if (texts.length) items.push(<Btn key="bold" icon="bold" label="加粗" on={texts.every(el => el.bold)} onClick={() => controller.style({ bold: !texts.every(el => el.bold) })} />);
     if (cards.length === 1 && !multi) items.push(<Btn key="open" icon="open" label="打开页面" onClick={() => controller.openCard(cards[0]!.id)} />);
+    if (cards.length === 1 && !multi && onFitCard) {
+      const preview = cards[0]!.view === 'preview';
+      items.push(<Btn key="view" label={preview ? '显示为标签' : '显示为正文预览（双击可就地编辑）'} on={preview}
+        onClick={() => controller.setCardView(cards[0]!.id, preview ? 'chip' : 'preview')}><span className="wb-fs">预览</span></Btn>);
+      if (preview) items.push(<Btn key="fit" label="高度适应内容" onClick={() => onFitCard(cards[0]!.id)}><span className="wb-fs">适高</span></Btn>);
+    }
+    if (selected.length === 1 && selected[0]!.type === 'database') items.push(<Btn key="open-db" icon="open" label="打开数据库" onClick={() => controller.openCard(selected[0]!.id)} />);
     if (frames.length === 1 && !multi) items.push(<Btn key="present" icon="play" label="从此框架开始放映" onClick={() => onPresentFrame(frames[0]!.id)} />);
     if (multi) {
       items.push(<Btn key="alignment" icon="alignLeft" label="对齐与分布" on={panel === 'align'} onClick={() => toggle('align')} />);

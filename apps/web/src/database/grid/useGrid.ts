@@ -19,7 +19,7 @@ function isReadOnly(def: PropertyDefinition): boolean {
 
 /** Cells that take a value by paste or clear; a relation changes only through its picker. */
 function acceptsValue(def: PropertyDefinition): boolean {
-  return !isReadOnly(def) && def.type !== 'relation';
+  return !isReadOnly(def) && def.type !== 'relation' && def.type !== 'tags';
 }
 
 /** Spreadsheet-style cursor and range. Keys, IME text and clipboard all land in one hidden input that follows the cursor. */

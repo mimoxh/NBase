@@ -5,11 +5,17 @@ import type { PoolClient } from 'pg';
 export interface RowRecord {
   id: string; title: string; icon: string | null; row_properties: RowProperties | null; revision: string;
   created_at: Date; updated_at: Date;
+  /** Only selected by reads that show rows of a database. */
+  tag_ids?: string[] | null;
 }
+
+/** Selects the workspace tags of row `p` as `tag_ids`. */
+export const rowTagIdsColumn = `ARRAY(SELECT pt.tag_id FROM page_tags pt WHERE pt.workspace_id = p.workspace_id AND pt.page_id = p.id ORDER BY pt.tag_id) AS tag_ids`;
 
 export function databaseRow(row: RowRecord): DatabaseRow {
   return { id: row.id, title: row.title, icon: row.icon ?? null, properties: row.row_properties ?? {}, revision: row.revision,
-    createdAt: row.created_at.toISOString(), updatedAt: row.updated_at.toISOString() };
+    createdAt: row.created_at.toISOString(), updatedAt: row.updated_at.toISOString(),
+    ...(row.tag_ids?.length ? { tagIds: row.tag_ids } : {}) };
 }
 
 export interface DatabaseSchemaRow {

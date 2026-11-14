@@ -32,12 +32,17 @@ export function DataMenu({ source, state, store, doc, view, databaseId, canWrite
 
   const allIds = async () => (await source.query(databaseId, { filters: [], sorts: [] })).order;
 
+  const tagName = () => {
+    const names = new Map(source.workspaceTags?.().map(tag => [tag.id, tag.name]));
+    return (id: string) => names.get(id);
+  };
+
   const exportCsv = async (scope: 'view' | 'all') => {
     onClose();
     try {
       const order = scope === 'view' ? store.order : await allIds();
       const rows = await collectRows(source, databaseId, order, done => setProgress(`正在导出 ${done} / ${order.length}`));
-      download(title, rowsToCsv(rows, scope === 'view' ? viewColumns(doc.properties, view) : all), 'text/csv', '.csv');
+      download(title, rowsToCsv(rows, scope === 'view' ? viewColumns(doc.properties, view) : all, tagName()), 'text/csv', '.csv');
       source.notice(`已导出 ${rows.length} 行。`);
     } catch { source.notice('导出未完成，请重试。'); } finally { setProgress(null); }
   };
@@ -50,7 +55,7 @@ export function DataMenu({ source, state, store, doc, view, databaseId, canWrite
       if (order.length > packageRowLimit) { source.notice(`含正文的 ZIP 最多 ${packageRowLimit} 行，这个数据库有 ${order.length} 行。请导出 CSV，或使用完整备份保留正文。`); return; }
       const rows = await collectRows(source, databaseId, order, done => setProgress(`正在读取 ${done} / ${order.length}`));
       setProgress('正在打包…');
-      await source.packageRows(doc, rows, rowsToCsv(rows, all));
+      await source.packageRows(doc, rows, rowsToCsv(rows, all, tagName()));
       source.notice('ZIP 已发起下载。');
     } catch (failure) { source.notice(failure instanceof Error && failure.message ? failure.message : '导出未完成，请重试。'); } finally { setProgress(null); }
   };

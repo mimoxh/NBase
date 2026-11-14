@@ -24,7 +24,8 @@ async function withReceipt<T>(workspaceId: string, mutationId: string, send: () 
 
 export function rowFromPage(page: PageDocument): DatabaseRow {
   return { id: page.id, title: page.title, icon: page.icon ?? null, properties: page.properties ?? {},
-    revision: page.revision, createdAt: page.createdAt, updatedAt: page.updatedAt };
+    revision: page.revision, createdAt: page.createdAt, updatedAt: page.updatedAt,
+    ...(page.tagIds?.length ? { tagIds: page.tagIds } : {}) };
 }
 
 export const databaseClient = {
@@ -54,6 +55,8 @@ export interface PersistentSourceOptions {
   canWrite: boolean;
   openPage: (pageId: string) => void;
   notice: (text: string) => void;
+  /** Workspace tags as they are now, for a `tags` property. */
+  tags?: () => readonly { id: string; name: string }[];
   /** Row deletion uses the workspace's durable trash action. */
   trashRow: (row: DatabaseRow) => Promise<void>;
   /** Keeps the workspace's cached page in step when a row it holds changes elsewhere. */
@@ -102,6 +105,7 @@ export function createPersistentSource(options: PersistentSourceOptions): Databa
       options.onRowSaved?.(page);
       return rowFromPage(page);
     },
+    ...(options.tags ? { workspaceTags: options.tags } : {}),
     moveRow: (_databaseId, rowId, afterRowId) => pageClient.setPosition(workspaceId, rowId, afterRowId, csrfToken),
     trashRow: row => options.trashRow(row),
     ...(options.packageRows ? { packageRows: options.packageRows } : {}),

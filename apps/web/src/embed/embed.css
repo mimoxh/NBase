@@ -1,0 +1,23 @@
+/* Pages shown inside other pages: a whiteboard block in a document, live cards on a whiteboard. */
+.nbase-whiteboard-node { margin: 12px 0; }
+.nb-embed { border: 1px solid var(--nb-line); border-radius: var(--nb-radius); background: var(--nb-bg); overflow: hidden; font-size: 14px; line-height: 1.5; }
+.nb-embed-head { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 2px 8px; border-bottom: 1px solid var(--nb-line); }
+.nb-embed-title { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 60%; border: 0; background: transparent; color: var(--nb-text);
+  font: inherit; font-weight: 650; padding: 3px 6px; border-radius: 5px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nb-embed-title:hover:not(:disabled) { background: var(--nb-hover); }
+.nb-embed-title:disabled { cursor: default; }
+.nb-embed-state, .nb-embed-note { font-size: 12px; color: var(--nb-muted); white-space: nowrap; }
+.nb-embed-state-conflict, .nb-embed-state-error { color: var(--nb-danger, #c0392b); }
+.nb-embed-spacer { flex: 1; }
+.nb-embed-body { position: relative; display: flex; flex-direction: column; min-height: 0; }
+.nb-embed-body .wb-root { min-height: 0; }
+.nb-embed-message { display: flex; align-items: center; justify-content: center; gap: 8px; height: 100%; min-height: 80px; color: var(--nb-muted); font-size: 13px; }
+.nb-embed-resize { height: 8px; cursor: ns-resize; border-top: 1px solid var(--nb-line); background: var(--nb-hover); touch-action: none; }
+.nb-embed-resize:hover { background: var(--nb-accent-soft); }
+.nb-embed-link { display: flex; align-items: center; gap: 8px; border: 1px solid var(--nb-line); border-radius: var(--nb-radius); padding: 6px 8px; font-size: 14px; }
+.nb-embed-placeholder { border: 1px dashed var(--nb-line); border-radius: var(--nb-radius); padding: 10px 14px; color: var(--nb-muted); font-size: 13px; }
+.nb-embed-picker { display: flex; flex-direction: column; max-height: 320px; overflow-y: auto; margin-top: 8px; }
+
+@media print {
+  .nb-embed-resize, .nb-embed-state { display: none; }
+}

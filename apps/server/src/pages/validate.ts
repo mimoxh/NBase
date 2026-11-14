@@ -1,4 +1,4 @@
-import { attachmentPresentationOf, isAttachmentPresentation, isCalloutKind, isSerializedDatabaseView, isCalloutTitle, isFootnoteId, isMarkdownFrontMatter, isSerializedBookmark, blockIdKey, isBlockId, isSerializedBlockReference, isStoredMermaidSource, isTextStyle, markdownFrontMatterKey, pageCoverIds, quickCaptureMarker, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
+import { attachmentPresentationOf, isAttachmentPresentation, isCalloutKind, isSerializedDatabaseView, isSerializedWhiteboardView, isCalloutTitle, isFootnoteId, isMarkdownFrontMatter, isSerializedBookmark, blockIdKey, isBlockId, isSerializedBlockReference, isStoredMermaidSource, isTextStyle, markdownFrontMatterKey, pageCoverIds, quickCaptureMarker, type PageCoverId, type StoredDocumentContent } from '@nbase/contracts';
 import { isPageReference } from './search-text.js';
 import { isWhiteboardContent, whiteboardAttachmentReferences, whiteboardProblem } from '../whiteboards/content.js';
 
@@ -9,7 +9,9 @@ const elementTypes = new Set([
   'root', 'paragraph', 'heading', 'quote', 'callout', 'toggle', 'list', 'listitem', 'code',
   'link', 'autolink', 'table', 'tablerow', 'tablecell', 'footnote-definition',
 ]);
-const leafTypes = new Set(['text', 'code-highlight', 'linebreak', 'tab', 'horizontalrule', 'image-reference', 'attachment', 'equation', 'page-reference', 'footnote-reference', 'mermaid', 'database-view', 'bookmark', 'block-reference']);
+const leafTypes = new Set(['text', 'code-highlight', 'linebreak', 'tab', 'horizontalrule', 'image-reference', 'attachment', 'equation', 'page-reference', 'footnote-reference', 'mermaid', 'database-view', 'whiteboard-view', 'bookmark', 'block-reference']);
+/** Blocks that may hold an embedded database or whiteboard; tables, lists and quotes may not. */
+const embedContainers = new Set(['root', 'toggle', 'callout']);
 const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype']);
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -45,7 +47,7 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
 
   let count = 0;
   let captureHeading = false;
-  function visit(node: unknown, depth: number, inTable: boolean, inLinkOrCode: boolean): void {
+  function visit(node: unknown, depth: number, inTable: boolean, inLinkOrCode: boolean, embedAllowed: boolean): void {
     if (!object(node) || depth > maxDepth || ++count > maxNodes) invalid();
     if (Object.keys(node).some((key) => forbiddenKeys.has(key))) invalid();
     if (typeof node.type !== 'string' || node.version !== 1) invalid();
@@ -78,7 +80,8 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
     if (node.type === 'equation' && (typeof node.equation !== 'string' || node.equation.length > 10_000
       || typeof node.inline !== 'boolean')) invalid();
     if (node.type === 'mermaid' && (inTable || inLinkOrCode || !isStoredMermaidSource(node.source))) invalid();
-    if (node.type === 'database-view' && (depth !== 1 || !isSerializedDatabaseView(node))) invalid();
+    if (node.type === 'database-view' && (!embedAllowed || !isSerializedDatabaseView(node))) invalid();
+    if (node.type === 'whiteboard-view' && (!embedAllowed || !isSerializedWhiteboardView(node))) invalid();
     if (node.type === 'bookmark' && (inTable || inLinkOrCode || !isSerializedBookmark(node) || !safeLinkUrl(String(node.url)))) invalid();
     if (node.type === 'block-reference' && (inLinkOrCode || !isSerializedBlockReference(node))) invalid();
     // A block anchor belongs to a block element, never to the root or to a leaf.
@@ -99,7 +102,8 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
     if (elementTypes.has(node.type)) {
       if (!Array.isArray(node.children)) invalid();
       const childInLinkOrCode = inLinkOrCode || node.type === 'link' || node.type === 'autolink' || node.type === 'code';
-      for (const child of node.children) visit(child, depth + 1, inTable || node.type === 'table', childInLinkOrCode);
+      const childEmbedAllowed = (depth === 0 || embedAllowed) && embedContainers.has(node.type);
+      for (const child of node.children) visit(child, depth + 1, inTable || node.type === 'table', childInLinkOrCode, childEmbedAllowed);
       return;
     }
     if (!leafTypes.has(node.type) || node.children !== undefined) invalid();
@@ -107,7 +111,7 @@ export function validateDocumentContent(value: unknown): StoredDocumentContent {
   }
 
   if (value.editorState.root.type !== 'root') invalid();
-  visit(value.editorState.root, 0, false, false);
+  visit(value.editorState.root, 0, false, false, false);
   return value as unknown as StoredDocumentContent;
 }
 

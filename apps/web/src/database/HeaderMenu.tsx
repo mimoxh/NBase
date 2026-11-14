@@ -63,7 +63,7 @@ export function HeaderMenu({ def, view, state, source, onClose, onSaveProperties
       onSave={formula => onSaveProperties(doc.properties.map(p => p.id === def.id ? { ...p, formula } : p), retyped(formula.resultType))} />}
     {def.type === 'rollup' && <RollupEditor def={def} properties={doc.properties} source={source}
       onSave={rollup => onSaveProperties(doc.properties.map(p => p.id === def.id ? { ...p, rollup } : p), retyped(rollup.resultType))} />}
-    {def.type !== 'title' && def.type !== 'relation' && !isComputedProperty(def) && <label className="nb-db-field-row">类型
+    {def.type !== 'title' && def.type !== 'relation' && def.type !== 'tags' && !isComputedProperty(def) && <label className="nb-db-field-row">类型
       <select className="nb-db-select" value={def.type} onChange={event => setType(event.target.value as PropertyType)}>
         {creatableTypes.map(type => <option key={type} value={type}>{typeLabels[type]}</option>)}
       </select></label>}

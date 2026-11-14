@@ -1,5 +1,5 @@
 import { $createCodeNode } from '@lexical/code';
-import { isCalloutKind, isCalloutTitle, isMarkdownFrontMatter, markdownFrontMatterKey, pageIdFromReferenceUrl, pageReferenceUrl } from '@nbase/contracts';
+import { isCalloutKind, isCalloutTitle, isMarkdownFrontMatter, markdownFrontMatterKey, pageIdFromReferenceUrl, pageReferenceUrl, whiteboardViewHeight } from '@nbase/contracts';
 import { createEditor, createState, $setState } from 'lexical';
 import type { EditorState } from 'lexical';
 import { $isLinkNode } from '@lexical/link';
@@ -32,6 +32,8 @@ import { normalizeCodeBlockLanguage } from './codeLanguages';
 import { MERMAID_TRANSFORMER } from './mermaidMarkdown';
 import { $createDatabaseViewNode, $isDatabaseViewNode, DatabaseViewNode, databaseViewMarkdown,
   databaseViewMarkdownPattern } from './nodes/DatabaseViewNode';
+import { $createWhiteboardViewNode, $isWhiteboardViewNode, WhiteboardViewNode, whiteboardViewMarkdown,
+  whiteboardViewMarkdownPattern } from './nodes/WhiteboardViewNode';
 import { normalizeDocumentContent } from './normalize';
 import { $tableGrid, $tableLayoutComment } from './tableLayout';
 import { $blockIdOf } from './blockAnchors';
@@ -139,6 +141,19 @@ const DATABASE_VIEW: ElementTransformer = {
   replace(parent, _children, match, isImport) {
     if (!isImport) return false;
     parent.replace($createDatabaseViewNode(match[1]!, match[2] ?? null));
+  },
+};
+
+/** A whiteboard block is written the same way: a link on its own line. */
+const WHITEBOARD_VIEW: ElementTransformer = {
+  type: 'element', dependencies: [WhiteboardViewNode],
+  regExp: whiteboardViewMarkdownPattern,
+  export: node => $isWhiteboardViewNode(node) ? whiteboardViewMarkdown(node.getPageId(), node.getHeight()) : null,
+  replace(parent, _children, match, isImport) {
+    if (!isImport) return false;
+    const height = match[2] ? Number(match[2]) : null;
+    if (height !== null && (height < whiteboardViewHeight.min || height > whiteboardViewHeight.max)) return false;
+    parent.replace($createWhiteboardViewNode(match[1]!, height));
   },
 };
 
@@ -418,7 +433,7 @@ const INLINE_TRANSFORMERS: Transformer[] = [IMAGE, BLOCK_REFERENCE, PAGE_REFEREN
   ...TRANSFORMERS.filter(item => item.type === 'text-format')];
 const BLOCK_ANCHOR = createBlockAnchorTransformer(() => MARKDOWN_TRANSFORMERS);
 export const MARKDOWN_TRANSFORMERS: Transformer[] = [
-  BLOCK_ANCHOR, DATABASE_VIEW, BOOKMARK_BLOCK, CALLOUT, TOGGLE, ALIGNED_BLOCK, EQUATION_BLOCK, TABLE, HORIZONTAL_RULE, CHECK_LIST, FOOTNOTE_DEFINITION,
+  BLOCK_ANCHOR, DATABASE_VIEW, WHITEBOARD_VIEW, BOOKMARK_BLOCK, CALLOUT, TOGGLE, ALIGNED_BLOCK, EQUATION_BLOCK, TABLE, HORIZONTAL_RULE, CHECK_LIST, FOOTNOTE_DEFINITION,
   ATTACHMENT, IMAGE, BLOCK_REFERENCE, PAGE_REFERENCE, LITERAL_LEGACY_REFERENCE, SAFE_LINK, FOOTNOTE_REFERENCE, EQUATION_INLINE, LITERAL_INLINE_CODE, DELIMITER_ESCAPE,
   MERMAID_TRANSFORMER, CODE_ALIASED, ...TRANSFORMERS.filter(item => item !== LINK && item !== CHECK_LIST && item !== CODE),
 ];

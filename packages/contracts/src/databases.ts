@@ -8,10 +8,14 @@ export const pageKinds = ['document', 'database', 'row', 'whiteboard'] as const;
 export type PageKind = typeof pageKinds[number];
 
 export const propertyTypes = ['title', 'text', 'number', 'select', 'multi_select', 'date', 'checkbox', 'url',
-  'created_time', 'updated_time', 'relation', 'formula', 'rollup'] as const;
+  'created_time', 'updated_time', 'relation', 'formula', 'rollup', 'tags'] as const;
 export type PropertyType = typeof propertyTypes[number];
 
-/** Types whose value is stored in `row.properties`. Title lives in the page title; times come from the page. */
+/**
+ * Types whose value is stored in `row.properties`. Title lives in the page title; times come from the page.
+ * `tags` shows the workspace tags of the row page: the same tags the page carries outside the database,
+ * written through the page's `tagIds`. A database has at most one such property.
+ */
 export const storedPropertyTypes = ['text', 'number', 'select', 'multi_select', 'date', 'checkbox', 'url'] as const;
 export type StoredPropertyType = typeof storedPropertyTypes[number];
 
@@ -179,6 +183,8 @@ export interface DatabaseRow {
   revision: string;
   createdAt: string;
   updatedAt: string;
+  /** Workspace tag ids of the row page, for a `tags` property. */
+  tagIds?: string[];
   /** Linked rows per relation property, only in responses that read rows of a database. */
   relations?: Record<string, RelationCell>;
   /** Formula and rollup results; absent keys are empty. */
@@ -354,6 +360,8 @@ const operatorsByType: Record<PropertyType, readonly FilterOperator[]> = {
   updated_time: ['equals', 'gt', 'gte', 'lt', 'lte'],
   checkbox: ['is_checked', 'is_not_checked'],
   relation: ['contains', 'not_contains', 'is_empty', 'is_not_empty'],
+  // The filter value is a workspace tag id.
+  tags: ['contains', 'not_contains', 'is_empty', 'is_not_empty'],
   // Computed properties use the operators of their result type; see effectiveType.
   formula: [],
   rollup: [],
@@ -420,6 +428,7 @@ export function databaseSchemaProblem(properties: unknown, views: unknown): stri
   if (new Set(defs.map(p => p.id)).size !== defs.length) return 'property-duplicate';
   const titles = defs.filter(p => p.type === 'title');
   if (titles.length !== 1 || titles[0]?.deletedAt) return 'title-property';
+  if (defs.filter(p => p.type === 'tags' && !p.deletedAt).length > 1) return 'tags-property';
   if (!Array.isArray(views) || views.length === 0 || views.length > databaseViewLimit) return 'view-count';
   if (!views.every(isDatabaseView)) return 'view-invalid';
   const list = views as DatabaseView[];
@@ -487,6 +496,7 @@ export function cellValue(row: DatabaseRow, def: PropertyDefinition): PropertyVa
   if (def.type === 'title') return row.title.trim() ? row.title : undefined;
   if (def.type === 'created_time') return row.createdAt;
   if (def.type === 'updated_time') return row.updatedAt;
+  if (def.type === 'tags') return row.tagIds?.length ? row.tagIds : undefined;
   const value = row.properties[def.id];
   // A value written under an earlier type of this property reads as empty until it is replaced.
   // An option id is a valid string, so a former select needs its options checked as well.
@@ -662,6 +672,10 @@ function matches(row: DatabaseRow, condition: ResolvedCondition, context: QueryC
       const has = Array.isArray(value) && value.some(title => title.toLocaleLowerCase().includes(needle));
       return op === 'contains' ? has : !has;
     }
+    case 'tags': {
+      const has = Array.isArray(value) && value.includes(String(target).toLowerCase());
+      return op === 'contains' ? has : !has;
+    }
     case 'date': case 'created_time': case 'updated_time': {
       if (value === undefined) return false;
       const day = datePart(def, value, context.timeZone);
@@ -683,6 +697,7 @@ function compare(a: DatabaseRow, b: DatabaseRow, def: PropertyDefinition): numbe
     case 'number': return (av as number) - (bv as number);
     case 'checkbox': return Number(av === true) - Number(bv === true);
     case 'relation': return (a.relations?.[def.id]?.total ?? 0) - (b.relations?.[def.id]?.total ?? 0);
+    case 'tags': return (a.tagIds?.length ?? 0) - (b.tagIds?.length ?? 0);
     case 'select': case 'multi_select': {
       const rank = (value: PropertyValue | undefined) => {
         const first = Array.isArray(value) ? value[0] : value;

@@ -229,7 +229,7 @@ export class RowStore {
     const used = this.usedProperties();
     if (this.usesComputed()) return true;
     return (patch.title !== undefined && !!this.titlePropertyId && used.has(this.titlePropertyId))
-      || Object.keys(patch.properties ?? {}).some(id => used.has(id));
+      || patch.tagIds !== undefined || Object.keys(patch.properties ?? {}).some(id => used.has(id));
   }
 
   private fail(failure: unknown, fallback: string): void {
@@ -254,6 +254,7 @@ export class RowStore {
     // Show the value right away, marked as unconfirmed, and replace it with the server's row.
     const current = this.rows.get(rowId);
     if (current) this.rows.set(rowId, { ...current, ...(patch.title !== undefined ? { title: patch.title } : {}),
+      ...(patch.tagIds !== undefined ? { tagIds: patch.tagIds } : {}),
       properties: patch.properties ? applyRowPatch(current.properties, patch.properties) : current.properties });
     if (this.touchesView(patch)) this.orderStale = true;
     this.emit();
@@ -265,6 +266,7 @@ export class RowStore {
         const saved = await this.source.updateRow(rowId, row.revision, patch);
         const latest = this.rows.get(rowId);
         if (latest) this.rows.set(rowId, { ...saved, title: latest.title, properties: latest.properties,
+          ...(latest.tagIds ? { tagIds: latest.tagIds } : {}),
           ...(latest.relations ? { relations: latest.relations } : {}), ...(latest.computed ? { computed: latest.computed } : {}) });
         announceDatabaseChange(this.databaseId, this.origin);
         this.refreshComputed(rowId);

@@ -11,7 +11,7 @@ const chunkBytes = 1_400_000;
 const encoder = new TextEncoder();
 
 export function guessTarget(header: string, properties: PropertyDefinition[]): ColumnTarget {
-  const match = activeProperties(properties).find(p => p.name === header.trim() && !['created_time', 'updated_time', 'relation', 'formula', 'rollup'].includes(p.type));
+  const match = activeProperties(properties).find(p => p.name === header.trim() && !['created_time', 'updated_time', 'relation', 'formula', 'rollup', 'tags'].includes(p.type));
   return match ? { kind: 'field', id: match.id } : { kind: 'new', type: 'text' };
 }
 

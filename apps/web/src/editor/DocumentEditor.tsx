@@ -31,6 +31,8 @@ import { PageReferencePlugin } from './plugins/PageReferencePlugin';
 import { MermaidPlugin } from './plugins/MermaidPlugin';
 import { DatabaseViewPlugin } from './plugins/DatabaseViewPlugin';
 import { DatabaseEmbeddingProvider } from './nodes/DatabaseViewNode';
+import { WhiteboardViewPlugin } from './plugins/WhiteboardViewPlugin';
+import { EmbeddedPagesProvider, EmbedPathProvider } from '../embed/source';
 import { ListIndentPlugin } from './plugins/ListIndentPlugin';
 import { LinkInteractionPlugin } from './plugins/LinkInteractionPlugin';
 import { FloatingToolbarPlugin } from './plugins/FloatingToolbarPlugin';
@@ -214,6 +216,7 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
   }; }, []);
   return <AttachmentWorkspaceContext.Provider value={props.workspaceId ?? null}>
     <PageReferencesProvider references={props.pageReferences}><DatabaseEmbeddingProvider value={props.databases}>
+    <EmbeddedPagesProvider value={props.embeds}><EmbedPathProvider pageId={props.documentId}>
     <BlockResolverContext.Provider value={resolverContext}>
     <LexicalComposer initialConfig={config}>
     <div className="document-editor" data-readonly={Boolean(props.readOnly)}>
@@ -230,7 +233,7 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <HorizontalRulePlugin /><MarkdownShortcutPlugin transformers={MARKDOWN_TRANSFORMERS} />
       <CodeHighlightPlugin /><CodeCopyPlugin onNotice={props.onNotice} />
       <EquationPlugin /><SlashCommandPlugin onPickAttachment={props.onPickAttachment} /><CalloutPlugin /><PageReferencePlugin historyState={history} />
-      <MermaidPlugin historyState={history} /><DatabaseViewPlugin />
+      <MermaidPlugin historyState={history} /><DatabaseViewPlugin /><WhiteboardViewPlugin documentId={props.documentId} />
       <ListIndentPlugin /><LinkInteractionPlugin onNotice={props.onNotice} />
       <FloatingToolbarPlugin /><BlockHandlePlugin onBeforeMove={element => folding.current?.expand(element)} documentId={props.documentId} onNotice={props.onNotice} />
       <ShortcutsPlugin /><WordCountPlugin /><TogglePlugin documentId={props.documentId} /><TableColumnResizePlugin /><BookmarkPlugin onLinkPreview={props.onLinkPreview} onNotice={props.onNotice} />
@@ -240,7 +243,7 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <SectionFoldingPlugin ref={folding} />
       <StateBridge props={props} editorRef={editorRef} folding={folding} history={history} />
     </div>
-  </LexicalComposer></BlockResolverContext.Provider></DatabaseEmbeddingProvider></PageReferencesProvider></AttachmentWorkspaceContext.Provider>;
+  </LexicalComposer></BlockResolverContext.Provider></EmbedPathProvider></EmbeddedPagesProvider></DatabaseEmbeddingProvider></PageReferencesProvider></AttachmentWorkspaceContext.Provider>;
 }
 
 export const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(function DocumentEditor(props, ref) {

@@ -16,6 +16,8 @@ import { $applyToggle } from '../nodes/ToggleNode';
 import { REQUEST_BOOKMARK_COMMAND } from '../nodes/BookmarkNode';
 import { INSERT_MERMAID_COMMAND } from '../nodes/MermaidNode';
 import { REQUEST_DATABASE_VIEW_COMMAND, useDatabaseEmbedding } from '../nodes/DatabaseViewNode';
+import { REQUEST_WHITEBOARD_VIEW_COMMAND } from '../nodes/WhiteboardViewNode';
+import { useEmbeddedPages } from '../../embed/source';
 import { calloutKinds, type CalloutKind } from '@nbase/contracts';
 import type { AttachmentPickKind } from '../types';
 
@@ -27,6 +29,7 @@ type SlashAction =
   | { kind: 'toggle' }
   | { kind: 'bookmark' }
   | { kind: 'database'; mode: 'new' | 'link' }
+  | { kind: 'whiteboard'; mode: 'new' | 'link' }
   | { kind: 'attachment'; value: AttachmentPickKind }
   | { kind: 'callout'; value: CalloutKind }
   | { kind: 'equation'; inline: boolean };
@@ -54,6 +57,10 @@ const COMMANDS: SlashCommand[] = [
     action: { kind: 'database', mode: 'new' }, hideInTable: true },
   { key: 'database-link', label: '关联数据库', hint: '插入已有数据库的视图', keywords: ['database', 'link', 'db', '数据库', '关联', '多维表格', 'guanlianshujuku', 'glsjk', 'shujuku', 'sjk', 'guanlian', 'gl'],
     action: { kind: 'database', mode: 'link' }, hideInTable: true },
+  { key: 'whiteboard', label: '白板', hint: '新建白板并嵌入正文', keywords: ['whiteboard', 'board', 'canvas', '白板', '画布', '画板', 'baiban', 'bb', 'huabu', 'hb'],
+    action: { kind: 'whiteboard', mode: 'new' }, hideInTable: true },
+  { key: 'whiteboard-link', label: '关联白板', hint: '嵌入已有白板', keywords: ['whiteboard', 'link', 'board', '白板', '关联', '画布', 'guanlianbaiban', 'glbb', 'baiban', 'bb', 'guanlian', 'gl'],
+    action: { kind: 'whiteboard', mode: 'link' }, hideInTable: true },
   { key: 'image', label: '图片', hint: '上传图片', keywords: ['image', 'img', 'picture', 'photo', '图片', '图像', '照片', 'tupian', 'tp', 'tuxiang', 'zhaopian'], action: { kind: 'attachment', value: 'image' } },
   { key: 'attachment', label: '附件', hint: '上传文件', keywords: ['file', 'attachment', 'upload', '附件', '文件', '上传', 'fujian', 'fj', 'wenjian', 'wj', 'shangchuan', 'sc'], action: { kind: 'attachment', value: 'file' } },
   ...calloutKinds.map((kind): SlashCommand => ({
@@ -87,13 +94,15 @@ function rank(command: SlashCommand, query: string): number {
   return Number.POSITIVE_INFINITY;
 }
 
-export function filterSlashCommands(query: string, inTable: boolean, canUpload = false, canDatabase = false): SlashCommand[] {
+export function filterSlashCommands(query: string, inTable: boolean, canUpload = false, canDatabase = false,
+  whiteboards: 'none' | 'link' | 'all' = 'none'): SlashCommand[] {
   const q = query.trim().toLowerCase();
   return COMMANDS
     .map((command, index) => ({ command, index, order: rank(command, q) }))
     .filter(item => item.order < Infinity && !(inTable && item.command.hideInTable)
       && (canUpload || item.command.action.kind !== 'attachment')
-      && (canDatabase || item.command.action.kind !== 'database'))
+      && (canDatabase || item.command.action.kind !== 'database')
+      && (item.command.action.kind !== 'whiteboard' || whiteboards === 'all' || (whiteboards === 'link' && item.command.action.mode === 'link')))
     .sort((a, b) => a.order - b.order || a.index - b.index)
     .map(item => item.command);
 }
@@ -153,9 +162,11 @@ export function SlashCommandPlugin({ onPickAttachment }: { onPickAttachment?: ((
   pickAttachment.current = onPickAttachment;
   const canUpload = Boolean(onPickAttachment);
   const canDatabase = Boolean(useDatabaseEmbedding());
+  const embeds = useEmbeddedPages();
+  const whiteboards = !embeds ? 'none' : embeds.createWhiteboard ? 'all' : 'link';
   const options = useMemo(
-    () => filterSlashCommands(query ?? '', selectionInTable(editor), canUpload, canDatabase).map(command => new SlashOption(command)),
-    [canUpload, canDatabase, editor, query]);
+    () => filterSlashCommands(query ?? '', selectionInTable(editor), canUpload, canDatabase, whiteboards).map(command => new SlashOption(command)),
+    [canUpload, canDatabase, whiteboards, editor, query]);
 
   const selectOption = useCallback((option: SlashOption, nodeToRemove: TextNode | null, closeMenu: () => void) => {
     editor.update(() => {
@@ -182,6 +193,7 @@ export function SlashCommandPlugin({ onPickAttachment }: { onPickAttachment?: ((
       }
       else if (action.kind === 'mermaid') editor.dispatchCommand(INSERT_MERMAID_COMMAND, undefined);
       else if (action.kind === 'database') editor.dispatchCommand(REQUEST_DATABASE_VIEW_COMMAND, action.mode);
+      else if (action.kind === 'whiteboard') editor.dispatchCommand(REQUEST_WHITEBOARD_VIEW_COMMAND, action.mode);
       else if (action.kind === 'callout') $applyCallout(action.value);
       else if (action.kind === 'toggle') $applyToggle();
       else if (action.kind === 'bookmark') editor.dispatchCommand(REQUEST_BOOKMARK_COMMAND, undefined);

@@ -14,6 +14,8 @@ import { BoardIcon } from './ui/icons';
 import { ContextMenu, Minimap, PagePicker, Presentation, ZoomBar, type ContextItem, type PickablePage } from './ui/Panels';
 import { PropertyBar } from './ui/PropertyBar';
 import { TextEditor } from './ui/TextEditor';
+import { EmbedLayer, embedContentHeight } from './ui/EmbedLayer';
+import { useEmbeddedPages } from '../embed/source';
 import { Toolbar, useBoard } from './ui/Toolbar';
 import './whiteboard.css';
 
@@ -33,6 +35,8 @@ export interface WhiteboardViewProps {
   /** Absent where images cannot be uploaded (viewers, history previews). */
   onUploadImages?: ((files: File[]) => Promise<UploadedImage[]>) | undefined;
   onNotice: (text: string) => void;
+  /** Inside another page: the wheel scrolls the host page until the board has focus. */
+  embedded?: boolean | undefined;
   /** Called once with the loaded content, before any change. */
   onReady?: ((boardId: string, content: WhiteboardContent) => void) | undefined;
 }
@@ -79,7 +83,9 @@ export function WhiteboardView(props: WhiteboardViewProps) {
   }, []);
   const images = useMemo(() => new ImageCache(id => propsRef.current.imageUrl(id), schedule), [schedule]);
   const [menu, setMenu] = useState<{ x: number; y: number; targetId: string | null } | null>(null);
-  const [picker, setPicker] = useState(false);
+  const [picker, setPicker] = useState<'page' | 'database' | null>(null);
+  const embeds = useEmbeddedPages();
+  const canDatabase = Boolean(embeds?.editor?.databases);
   const [presenting, setPresenting] = useState<number | null>(null);
   const [cursor, setCursor] = useState('default');
 
@@ -165,6 +171,7 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const wheel = (event: WheelEvent) => {
+      if (propsRef.current.embedded && !containerRef.current?.contains(document.activeElement)) return;
       event.preventDefault();
       const box = canvas.getBoundingClientRect();
       controller.wheel({ x: event.clientX - box.left, y: event.clientY - box.top }, event.deltaX, event.deltaY, event.deltaMode, event.ctrlKey || event.metaKey, event.shiftKey);
@@ -207,8 +214,9 @@ export function WhiteboardView(props: WhiteboardViewProps) {
   };
 
   const insertCard = (page: PickablePage, at?: { x: number; y: number }) => {
-    setPicker(false);
-    controller.insert([controller.cardElement(page)], at);
+    const database = picker === 'database';
+    setPicker(null);
+    controller.insert([database ? controller.databaseElement(page) : controller.cardElement(page)], at);
     containerRef.current?.focus();
   };
 
@@ -244,7 +252,7 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     const parsed = parseElements(payload);
     if (parsed) {
       // Cards to pages this workspace does not have would make the save fail; drop them.
-      const kept = parsed.filter(el => el.type !== 'card' || pageMap.has(el.pageId));
+      const kept = parsed.filter(el => el.type === 'card' ? pageMap.has(el.pageId) : el.type !== 'database' || pageMap.has(el.databaseId));
       if (kept.length < parsed.length) propsRef.current.onNotice('已跳过指向本工作区以外页面的卡片。');
       controller.insert(controller.pasteClones(kept, { x: 0, y: 0 }), pasteAt());
       return;
@@ -261,7 +269,8 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     const active = () => {
       const container = containerRef.current;
       const focused = document.activeElement;
-      return Boolean(container && focused && container.contains(focused) && !isTyping(focused));
+      // A live page on the board handles its own clipboard.
+      return Boolean(container && focused && container.contains(focused) && !isTyping(focused) && !focused.closest('.wb-embed-layer'));
     };
     const onCopy = (event: ClipboardEvent) => { if (active()) copySelection(event, false); };
     const onCut = (event: ClipboardEvent) => { if (active() && !store.readOnly) copySelection(event, true); };
@@ -316,7 +325,7 @@ export function WhiteboardView(props: WhiteboardViewProps) {
       'divider', ...exportItems,
     ];
     return [
-      ...(target?.type === 'card' ? [{ key: 'open', label: '打开页面', shortcut: 'Enter', onSelect: () => controller.openCard(target.id) }, 'divider' as const] : []),
+      ...(target?.type === 'card' || target?.type === 'database' ? [{ key: 'open', label: target.type === 'card' ? '打开页面' : '打开数据库', onSelect: () => controller.openCard(target.id) }, 'divider' as const] : []),
       ...(target?.type === 'frame' && frames.length ? [{ key: 'present', label: '从此框架放映', onSelect: () => presentFrom(target.id) }] : []),
       ...(editable && target && controller.canEdit(target) ? [{ key: 'edit', label: '编辑文字', shortcut: 'Enter', onSelect: () => controller.startEditing(target.id) }] : []),
       ...(editable && isMindNode(target) ? [{ key: 'child', label: '添加子主题', shortcut: 'Tab', onSelect: () => controller.addMindNode('child') }] : []),
@@ -343,10 +352,15 @@ export function WhiteboardView(props: WhiteboardViewProps) {
 
   const pickable = useMemo(() => props.pages.filter(page => page.id !== props.boardId), [props.pages, props.boardId]);
 
-  return <div ref={containerRef} className={`wb-root ${props.readOnly ? 'wb-readonly' : ''}`} tabIndex={0} aria-label="白板画布"
+  return <div ref={containerRef} className={`wb-root ${props.readOnly ? 'wb-readonly' : ''} ${props.embedded ? 'wb-embedded' : ''}`} tabIndex={0} aria-label="白板画布"
     aria-roledescription="白板" style={{ cursor }}
     onKeyDown={event => {
-      if (isTyping(event.target) || menu || picker) return;
+      // While a live page has the input, the board's own shortcuts stay off; Esc hands the input back.
+      if (store.activeEmbedId) {
+        if (event.key === 'Escape' && !event.nativeEvent.isComposing && !(event.target as HTMLElement).closest?.('.wb-embed-layer')) controller.deactivateEmbed();
+        return;
+      }
+      if (isTyping(event.target) || menu || picker || (event.target as HTMLElement).closest?.('.wb-embed-layer')) return;
       if (event.key === ' ' && !event.repeat) { controller.setSpace(true); setCursor('grab'); event.preventDefault(); return; }
       if (controller.keyDown(event)) event.preventDefault();
     }}
@@ -373,8 +387,13 @@ export function WhiteboardView(props: WhiteboardViewProps) {
       onPointerCancel={event => controller.pointerCancel(input(event))}
       onDoubleClick={event => controller.doubleClick(local(event))}
       onContextMenu={event => { event.preventDefault(); controller.contextMenu(local(event)); }} />
+    <EmbedLayer store={store} controller={controller} onExit={() => containerRef.current?.focus({ preventScroll: true })} />
     <TextEditor store={store} controller={controller} measure={measure} />
     <PropertyBar store={store} controller={controller} onPresentFrame={id => presentFrom(id)}
+      onFitCard={embeds ? id => {
+        const height = embedContentHeight(containerRef.current, id);
+        if (height) controller.setHeight(id, height); else props.onNotice('请先放大到能看清卡片正文，再调整高度。');
+      } : undefined}
       onMore={(x, y) => setMenu({ x, y, targetId: [...store.selection][0] ?? null })} />
     <div className="wb-topbar" role="toolbar" aria-label="白板">
       <button type="button" className="wb-pbtn wb-labelled" title="按框架放映" disabled={!frames.length} onClick={() => presentFrom(null)}>
@@ -384,13 +403,16 @@ export function WhiteboardView(props: WhiteboardViewProps) {
         setMenu({ x: box.left - root.left, y: box.bottom - root.top + 4, targetId: null });
       }}><BoardIcon name="download" size={16} /><span>导出</span></button>
     </div>
-    <Toolbar store={store} canUpload={Boolean(props.onUploadImages)} onImage={chooseImages} onCard={() => setPicker(true)} />
+    <Toolbar store={store} canUpload={Boolean(props.onUploadImages)} onImage={chooseImages} onCard={() => setPicker('page')}
+      onDatabase={canDatabase ? () => setPicker('database') : undefined} />
     <div className="wb-corner">
       <Minimap store={store} dark={dark} />
       <ZoomBar store={store} onFit={() => store.zoomToFit()} />
     </div>
     {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems()} bounds={store.size} onClose={() => { setMenu(null); containerRef.current?.focus({ preventScroll: true }); }} />}
-    {picker && <PagePicker pages={pickable} onPick={page => insertCard(page)} onClose={() => { setPicker(false); containerRef.current?.focus(); }} />}
+    {picker && <PagePicker pages={picker === 'database' ? pickable.filter(page => page.kind === 'database') : pickable}
+      {...(picker === 'database' ? { label: '插入数据库视图', placeholder: '搜索数据库' } : {})}
+      onPick={page => insertCard(page)} onClose={() => { setPicker(null); containerRef.current?.focus(); }} />}
     {presenting !== null && <Presentation elements={store.elements} index={store.index} start={presenting} measure={measure} images={images}
       pageInfo={pageInfo} dark={dark} onClose={() => { setPresenting(null); containerRef.current?.focus(); }} />}
   </div>;

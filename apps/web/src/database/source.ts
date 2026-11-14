@@ -5,6 +5,8 @@ import type { ChangeRelationRequest, ChangeRelationResponse, CreateRelationReque
 export interface RowPatch {
   title?: string;
   properties?: Record<string, PropertyValue | null>;
+  /** Replaces the workspace tags of the row page; shown by a `tags` property. */
+  tagIds?: string[];
 }
 
 export interface DatabaseSchema {
@@ -18,6 +20,8 @@ export interface DatabaseSchema {
  */
 export interface DatabaseDataSource {
   readonly canWrite: boolean;
+  /** Workspace tags, for a `tags` property. Absent where the host has no tags; the property is then not offered. */
+  workspaceTags?(): readonly { id: string; name: string }[];
   /** Schema and views; rows come from `query`. */
   load(databaseId: string, signal?: AbortSignal): Promise<DatabaseDocument>;
   query(databaseId: string, request: DatabaseQueryRequest): Promise<DatabaseQueryResponse>;
