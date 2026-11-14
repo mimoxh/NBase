@@ -21,6 +21,7 @@ import { ToolbarPlugin } from './plugins/ToolbarPlugin';
 import { SafePastePlugin } from './plugins/SafePastePlugin';
 import { CodeHighlightPlugin } from './plugins/CodeHighlightPlugin';
 import { CodeCopyPlugin } from './plugins/CodeCopyPlugin';
+import { BlockContextMenuPlugin } from './plugins/BlockContextMenuPlugin';
 import { EquationPlugin } from './plugins/EquationPlugin';
 import { SlashCommandPlugin } from './plugins/SlashCommandPlugin';
 import { CalloutPlugin } from './plugins/CalloutPlugin';
@@ -47,6 +48,7 @@ import { BlockResolverContext } from './nodes/BlockReferenceNode';
 import { FootnoteNavigationPlugin } from './nodes/FootnoteNodes';
 import { $insertAttachments, AttachmentWorkspaceContext } from './nodes/AttachmentNode';
 import 'katex/dist/katex.min.css';
+import { listTheme } from './listTheme';
 import './editor.css';
 import './formats.css';
 
@@ -54,7 +56,7 @@ const theme = {
   paragraph: 'nbase-paragraph', quote: 'nbase-quote', link: 'nbase-link',
   heading: { h1: 'nbase-heading-1', h2: 'nbase-heading-2', h3: 'nbase-heading-3' },
   text: { bold: 'nbase-bold', italic: 'nbase-italic', strikethrough: 'nbase-strikethrough', code: 'nbase-inline-code', highlight: 'nbase-highlight' },
-  list: { ul: 'nbase-list-ul', ol: 'nbase-list-ol', listitem: 'nbase-list-item', listitemChecked: 'nbase-check-checked', listitemUnchecked: 'nbase-check-unchecked', nested: { listitem: 'nbase-list-nested' } },
+  list: listTheme,
   code: 'nbase-code-block', table: 'nbase-table', tableCell: 'nbase-table-cell', tableCellHeader: 'nbase-table-header', tableCellSelected: 'nbase-table-selected', tableSelection: 'nbase-table-selection', tableRow: 'nbase-table-row', hr: 'nbase-rule',
   codeHighlight: {
     atrule: 'nbase-token-attr', attr: 'nbase-token-attr', boolean: 'nbase-token-property', builtin: 'nbase-token-selector',
@@ -231,7 +233,7 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <LinkPlugin validateUrl={isSafeLinkUrl} attributes={{ rel: 'noopener noreferrer' }} />
       <TablePlugin hasTabHandler hasHorizontalScroll hasNestedTables={false} />
       <HorizontalRulePlugin /><MarkdownShortcutPlugin transformers={MARKDOWN_TRANSFORMERS} />
-      <CodeHighlightPlugin /><CodeCopyPlugin onNotice={props.onNotice} />
+      <CodeHighlightPlugin /><CodeCopyPlugin onNotice={props.onNotice} /><BlockContextMenuPlugin onNotice={props.onNotice} />
       <EquationPlugin /><SlashCommandPlugin onPickAttachment={props.onPickAttachment} /><CalloutPlugin /><PageReferencePlugin historyState={history} />
       <MermaidPlugin historyState={history} /><DatabaseViewPlugin /><WhiteboardViewPlugin documentId={props.documentId} />
       <ListIndentPlugin /><LinkInteractionPlugin onNotice={props.onNotice} />

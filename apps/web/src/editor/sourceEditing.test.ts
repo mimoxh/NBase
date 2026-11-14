@@ -331,13 +331,20 @@ it('blocks original unexpressed text styles and layout attributes', () => {
     text[key] = value;
     expect(prepareSourceEdit(original).canApply, key).toBe(false);
   }
-  const original = createContentFromMarkdown('正文');
+  // A quote has no Markdown form for an indent; paragraphs and headings do (`<div style="margin-left">`).
+  const original = createContentFromMarkdown('> 引用');
   root(original).children[0]!.indent = 2;
   expect(prepareSourceEdit(original).canApply).toBe(false);
+  const indented = createContentFromMarkdown('正文');
+  root(indented).children[0]!.indent = 2;
+  expect(prepareSourceEdit(indented).canApply).toBe(true);
   // Alignment has a Markdown form (`<div align>`), so it no longer blocks the source editor.
   const aligned = createContentFromMarkdown('正文');
   root(aligned).children[0]!.format = 'right';
   expect(prepareSourceEdit(aligned).canApply).toBe(true);
+  const heading = createContentFromMarkdown('## 标题');
+  Object.assign(root(heading).children[0]!, { format: 'center', indent: 1 });
+  expect(prepareSourceEdit(heading).canApply).toBe(true);
 });
 
 it('rejects ambiguous quick capture headings and malformed original marker locations', () => {

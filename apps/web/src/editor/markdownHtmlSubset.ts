@@ -38,8 +38,9 @@ import { $isFootnoteDefinitionNode } from './nodes/FootnoteNodes';
 import { $createToggleNode, $isToggleNode, ToggleNode } from './nodes/ToggleNode';
 
 /**
- * Markdown has no syntax for text colour, alignment or collapsible blocks, so NBase writes a
- * fixed HTML subset for them: `<span style="color:#…">`, `<div align="…">` and `<details>`.
+ * Markdown has no syntax for text colour, alignment, indentation or collapsible blocks, so NBase
+ * writes a fixed HTML subset for them: `<span style="color:#…">`, `<div align="…" style="margin-left:…em">`
+ * and `<details>`.
  * Import swaps exactly those forms for private-use markers before the Markdown conversion and
  * resolves the markers afterwards; any other HTML still keeps the whole document as source.
  */
@@ -47,6 +48,9 @@ const OPEN = '', CLOSE = '', BLOCK = '';
 const reserved = /[-]/;
 const spanOpen = /<span style="(?:color:(#[0-9a-f]{6}))?;?(?:background-color:(#[0-9a-f]{6}))?">/g;
 const alignments: Record<string, ElementFormatType> = { c: 'center', r: 'right', j: 'justify' };
+/** One indent level is 2em, as in the HTML export; the attribute order is fixed. */
+const divOpen = /^<div(?: align="(center|right|justify)")?(?: style="margin-left:([1-9]\d?)em")?>$/;
+const divMarker = /^A([crjn])(\d{0,2})$/;
 
 const colorByHex = (hex: string | undefined, kind: 'text' | 'background') =>
   hex ? textColorIds.find(id => textColorHex[id][kind] === hex) : undefined;
@@ -101,7 +105,10 @@ function encodeBlocks(markdown: string): string | null {
       continue;
     }
     if (prose === undefined) { output.push(line.raw); continue; }
-    const align = /^<div align="(center|right|justify)">$/.exec(prose);
+    const div = divOpen.exec(prose);
+    const em = div?.[2] ? Number(div[2]) : 0;
+    const align = div && (div[1] || em) && em % 2 === 0 ? div : null;
+    if (div && !align) return null;
     const layout = prose.startsWith('<!-- nbase-table ') ? parseTableLayoutComment(prose) : null;
     const anchor = /^<!-- \^([a-z0-9]{8}) -->$/.exec(prose);
     if (anchor) { emit(BLOCK + 'I' + anchor[1]); continue; }
@@ -123,7 +130,7 @@ function encodeBlocks(markdown: string): string | null {
       emit(BLOCK + 'T');
     } else if (align) {
       stack.push({ kind: 'align', quote, summary: true });
-      emit(BLOCK + 'A' + align[1]![0]);
+      emit(BLOCK + 'A' + (align[1]?.[0] ?? 'n') + (em ? String(em / 2) : ''));
     } else if (prose === '</details>' || prose === '</div>') {
       if (top?.kind !== (prose === '</div>' ? 'align' : 'toggle') || top.quote !== quote) return null;
       stack.pop();
@@ -149,7 +156,7 @@ function $blockMarker(node: LexicalNode): string | null {
 }
 
 function $resolveBlocks(container: ElementNode): boolean {
-  const stack: ({ align: ElementFormatType } | { toggle: ToggleNode })[] = [];
+  const stack: ({ align: ElementFormatType | null; indent: number } | { toggle: ToggleNode })[] = [];
   let layout: TableLayout | null = null;
   let bookmark: { description: string; siteName: string } | null = null;
   let anchorId: string | null = null;
@@ -195,7 +202,8 @@ function $resolveBlocks(container: ElementNode): boolean {
     const toggle = stack.findLast((frame): frame is { toggle: ToggleNode } => 'toggle' in frame)?.toggle;
     if (marker !== null) {
       const top = stack.at(-1);
-      if (marker[0] === 'A' && alignments[marker[1]!] && marker.length === 2) { stack.push({ align: alignments[marker[1]!]! }); child.remove(); }
+      const div = divMarker.exec(marker);
+      if (div) { stack.push({ align: alignments[div[1]!] ?? null, indent: Number(div[2] || 0) }); child.remove(); }
       else if (marker === 'a' && top && 'align' in top) { stack.pop(); child.remove(); }
       else if (marker === 'T') {
         const node = $createToggleNode();
@@ -218,8 +226,11 @@ function $resolveBlocks(container: ElementNode): boolean {
       if (toggle.isEmpty()) return false;
       toggle.append(child);
     }
-    const align = stack.findLast((frame): frame is { align: ElementFormatType } => 'align' in frame)?.align;
-    if (align && ($isParagraphNode(child) || $isHeadingNode(child))) child.setFormat(align);
+    const div = stack.findLast((frame): frame is { align: ElementFormatType | null; indent: number } => 'align' in frame);
+    if (div && ($isParagraphNode(child) || $isHeadingNode(child))) {
+      if (div.align) child.setFormat(div.align);
+      if (div.indent) child.setIndent(div.indent);
+    }
     if ($isElementNode(child) && (child.isShadowRoot() || $isFootnoteDefinitionNode(child)) && !$resolveBlocks(child)) return false;
   }
   return stack.length === 0 && !layout && !bookmark && !anchorId;
@@ -270,8 +281,9 @@ export function $resolveHtmlSubset(root: ElementNode): boolean {
   return !reserved.test(root.getTextContent());
 }
 
+const alignedFormat = (node: ElementNode) => ['center', 'right', 'justify'].includes(node.getFormatType()) ? node.getFormatType() : null;
 const aligned = (node: LexicalNode): node is ParagraphNode | HeadingNode =>
-  ($isParagraphNode(node) || $isHeadingNode(node)) && ['center', 'right', 'justify'].includes(node.getFormatType())
+  ($isParagraphNode(node) || $isHeadingNode(node)) && (alignedFormat(node) !== null || node.getIndent() > 0)
   && !$isTableCellNode(node.getParent());
 
 export const ALIGNED_BLOCK: ElementTransformer = {
@@ -280,7 +292,9 @@ export const ALIGNED_BLOCK: ElementTransformer = {
   export(node, traverseChildren) {
     if (!aligned(node)) return null;
     const body = ($isHeadingNode(node) ? '#'.repeat(Number(node.getTag().slice(1))) + ' ' : '') + traverseChildren(node);
-    return `<div align="${node.getFormatType()}">\n\n${body}\n\n</div>`;
+    const format = alignedFormat(node), indent = node.getIndent();
+    const attributes = (format ? ` align="${format}"` : '') + (indent > 0 ? ` style="margin-left:${indent * 2}em"` : '');
+    return `<div${attributes}>\n\n${body}\n\n</div>`;
   },
 };
 

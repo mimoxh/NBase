@@ -35,10 +35,10 @@ export function $canonicalizeTextStyle(node: TextNode): void {
 }
 
 /**
- * Only paragraphs and headings outside tables take an alignment: list items, quotes and table
- * cells have no Markdown form for it, and a toggle summary stays unaligned.
+ * Only paragraphs and headings outside tables take an alignment or indent: list items, quotes and
+ * table cells have no Markdown form for them, and a toggle summary stays unaligned.
  */
-function $alignable(node: LexicalNode): ElementNode | null {
+export function $alignable(node: LexicalNode): ElementNode | null {
   const block = $findMatchingParent(node, item => $isParagraphNode(item) || $isHeadingNode(item)) as ElementNode | null;
   if (!block) return null;
   const parent = block.getParent();

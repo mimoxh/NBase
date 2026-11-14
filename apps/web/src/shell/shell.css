@@ -411,7 +411,7 @@
 
 @media print {
   .nb-sidebar, .nb-topbar, .nb-toc, .nb-notice, .nbase-editor-tools, .nbase-section-toggle, .nbase-block-handle,
-  .nbase-word-count, .nbase-attachment-download, .nbase-code-copy, .nbase-link-card, .nbase-floating-toolbar,
+  .nbase-word-count, .nbase-attachment-download, .nbase-code-controls, .nbase-link-card, .nbase-floating-toolbar,
   .nb-cover, .nb-toast { display: none !important; }
   html, body, #root, .nb-app, .nb-main, .nb-scroll { display: block !important; height: auto !important; overflow: visible !important; background: #fff !important; }
   .nb-doc-head, .nb-doc-body { max-width: none !important; padding-inline: 0 !important; }

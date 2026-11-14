@@ -17,6 +17,7 @@ import { REQUEST_BOOKMARK_COMMAND } from '../nodes/BookmarkNode';
 import { INSERT_MERMAID_COMMAND } from '../nodes/MermaidNode';
 import { REQUEST_DATABASE_VIEW_COMMAND, useDatabaseEmbedding } from '../nodes/DatabaseViewNode';
 import { REQUEST_WHITEBOARD_VIEW_COMMAND } from '../nodes/WhiteboardViewNode';
+import { OPEN_LINK_FORM_COMMAND } from './FloatingToolbarPlugin';
 import { useEmbeddedPages } from '../../embed/source';
 import { calloutKinds, type CalloutKind } from '@nbase/contracts';
 import type { AttachmentPickKind } from '../types';
@@ -28,6 +29,7 @@ type SlashAction =
   | { kind: 'mermaid' }
   | { kind: 'toggle' }
   | { kind: 'bookmark' }
+  | { kind: 'link' }
   | { kind: 'database'; mode: 'new' | 'link' }
   | { kind: 'whiteboard'; mode: 'new' | 'link' }
   | { kind: 'attachment'; value: AttachmentPickKind }
@@ -50,6 +52,7 @@ const COMMANDS: SlashCommand[] = [
   { key: 'code', label: '代码块', hint: '``` 代码', keywords: ['code', 'codeblock', '代码', 'daima', 'dm', 'daimakuai', 'dmk'], action: { kind: 'block', value: 'code' } },
   { key: 'hr', label: '分割线', hint: '--- 水平线', keywords: ['hr', 'divider', 'line', '分割线', '分隔线', 'fengexian', 'fgx'], action: { kind: 'hr' } },
   { key: 'table', label: '表格', hint: '3 × 3 表格', keywords: ['table', '表格', 'biaoge', 'bg'], action: { kind: 'table' }, hideInTable: true },
+  { key: 'link', label: '链接', hint: '插入或编辑文字链接', keywords: ['link', 'url', 'hyperlink', '链接', '超链接', 'lianjie', 'lj', 'chaolianjie', 'clj'], action: { kind: 'link' } },
   { key: 'toggle', label: '折叠块', hint: '可展开和收起的内容', keywords: ['toggle', 'details', 'collapse', 'fold', '折叠', '折叠块', '收起', 'zhedie', 'zhediekuai', 'zd', 'zdk'], action: { kind: 'toggle' }, hideInTable: true },
   { key: 'bookmark', label: '网页书签', hint: '网址卡片，显示标题和简介', keywords: ['bookmark', 'link', 'url', 'web', '书签', '网页', '链接卡片', 'shuqian', 'sq', 'wangye', 'wy'], action: { kind: 'bookmark' }, hideInTable: true },
   { key: 'mermaid', label: '图表', hint: 'Mermaid 流程图或时序图', keywords: ['mermaid', 'diagram', '图表', '流程图', '时序图', 'tubiao', 'tb', 'liuchengtu', 'lct', 'shixutu', 'sxt'], action: { kind: 'mermaid' }, hideInTable: true },
@@ -197,6 +200,7 @@ export function SlashCommandPlugin({ onPickAttachment }: { onPickAttachment?: ((
       else if (action.kind === 'callout') $applyCallout(action.value);
       else if (action.kind === 'toggle') $applyToggle();
       else if (action.kind === 'bookmark') editor.dispatchCommand(REQUEST_BOOKMARK_COMMAND, undefined);
+      else if (action.kind === 'link') editor.dispatchCommand(OPEN_LINK_FORM_COMMAND, undefined);
       else if (action.kind === 'attachment') { /* The file picker opens after this update. */ }
       else $requestEquationEdit($insertEquationNode('', false));
       closeMenu();

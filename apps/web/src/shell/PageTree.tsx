@@ -103,7 +103,7 @@ export const PageTree = memo(function PageTree({ pages, activeId, favorites, act
           {page.kind !== 'database' && page.kind !== 'whiteboard' && <button className="nb-tree-act" aria-label={`在「${page.title || '未命名页面'}」下新建子页面`}
             onClick={() => actions.onAddChild(page.id)}><Icon name="plus" size={14} /></button>}
           <Menu label={`「${page.title || '未命名页面'}」页面操作`} align="end"
-            trigger={<Icon name="more" size={14} />} items={[
+            trigger={<Icon name="more" size={16} />} items={[
               { key: 'fav', label: favorite ? '取消收藏' : '收藏', icon: 'star', onSelect: () => actions.onFavorite(page.id) },
               ...(page.kind !== 'database' && page.kind !== 'whiteboard' ? [{ key: 'child', label: '添加子页面', icon: 'plus' as const, onSelect: () => actions.onAddChild(page.id) },
                 ...(actions.onAddDatabase ? [{ key: 'database', label: '添加数据库', icon: 'table' as const,

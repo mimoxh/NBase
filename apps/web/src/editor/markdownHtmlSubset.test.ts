@@ -43,6 +43,23 @@ describe('colour, alignment and toggle Markdown subset', () => {
     expect(markdown).toContain('<div align="center">\n\n## 居中标题\n\n</div>');
   });
 
+  it('round-trips indented paragraphs and headings, alone and with an alignment', () => {
+    const { content, markdown } = roundTrip('<div style="margin-left:2em">\n\n缩进一级\n\n</div>\n\n<div align="center" style="margin-left:6em">\n\n### 居中三级\n\n</div>\n\n> [!NOTE]\n> <div style="margin-left:4em">\n>\n> 提示内\n>\n> </div>\n\n普通');
+    const blocks = rootOf(content).children!;
+    expect(blocks.map(node => [node.type, node.format, node.indent])).toEqual([
+      ['paragraph', '', 1], ['heading', 'center', 3], ['callout', '', 0], ['paragraph', '', 0]]);
+    expect(blocks[2]!.children!.map(node => [node.type, node.indent])).toEqual([['paragraph', 2]]);
+    expect(markdown).toContain('<div style="margin-left:2em">\n\n缩进一级\n\n</div>');
+    expect(markdown).toContain('<div align="center" style="margin-left:6em">\n\n### 居中三级\n\n</div>');
+  });
+
+  it('keeps indents it would not write as source', () => {
+    for (const source of ['<div style="margin-left:3em">\n\n奇数\n\n</div>', '<div style="margin-left:2em" align="center">\n\n顺序\n\n</div>',
+      '<div style="margin-left:2px">\n\n单位\n\n</div>', '<div>\n\n无属性\n\n</div>']) {
+      expect(parseMarkdownImport(source).preservedAsSource, source).toBe(true);
+    }
+  });
+
   it('round-trips nested toggles with bodies, also inside a callout', () => {
     const source = '<details>\n<summary>外层 **标题**</summary>\n\n正文一\n\n- 列表\n\n<details>\n<summary>内层</summary>\n\n内层正文\n\n</details>\n\n</details>\n\n> [!NOTE]\n> <details>\n> <summary>提示内</summary>\n>\n> 内容\n>\n> </details>';
     const { content } = roundTrip(source);

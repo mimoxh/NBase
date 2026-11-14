@@ -17,7 +17,7 @@ import { copyBlockReference } from './BlockReferencePlugin';
 import './blockHandle.css';
 
 type Props = { onBeforeMove?: ((element: HTMLElement) => void) | undefined; documentId?: string | undefined; onNotice?: ((message: string) => void) | undefined };
-type Hover = { key: NodeKey; top: number };
+type Hover = { key: NodeKey; top: number; height: number };
 type Menu = { key: NodeKey; top: number; canConvert: boolean; canCopy: boolean; canReference: boolean };
 type DropTarget = { key: NodeKey; placement: BlockPlacement; top: number };
 
@@ -80,7 +80,7 @@ export function BlockHandlePlugin({ onBeforeMove, documentId, onNotice }: Props)
           const node = $getNearestNodeFromDOMNode(element);
           return node ? $topLevelBlock(node)?.getKey() ?? null : null;
         });
-        if (key) setHover({ key, top: offsetTop(element) });
+        if (key) setHover({ key, top: offsetTop(element), height: element.getBoundingClientRect().height });
       });
     };
     const onLeave = () => { if (!dragged.current) setHover(null); };
@@ -219,6 +219,8 @@ export function BlockHandlePlugin({ onBeforeMove, documentId, onNotice }: Props)
 
   if (!surface || !editable) return null;
   return createPortal(<>
+    {/* The handle sits outside the editor box; this strip keeps the pointer "inside" while it crosses the gap. */}
+    {hover && <div className="nbase-block-gutter" aria-hidden="true" style={{ top: hover.top, height: hover.height }} />}
     {hover && <button type="button" className="nbase-block-handle" aria-label="拖动移动，单击打开块菜单" title="拖动移动，单击打开块菜单"
       aria-haspopup="menu" aria-expanded={Boolean(menu)} draggable style={{ top: hover.top }}
       onMouseDown={event => { if (event.button !== 0) event.preventDefault(); }}

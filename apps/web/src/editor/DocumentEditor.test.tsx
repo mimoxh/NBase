@@ -2,6 +2,8 @@
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { INSERT_TABLE_COMMAND } from '@lexical/table';
+import type { LexicalEditor } from 'lexical';
 import { DocumentEditor } from './DocumentEditor';
 import { createContentFromMarkdown } from './markdown';
 import { parseSourceEdit, prepareSourceEdit } from './sourceEditing';
@@ -25,6 +27,12 @@ afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
+
+/** Dispatches the same command as the `/表格` slash command. */
+function insertTableFromSlash(host: HTMLElement) {
+  const editor = (host.querySelector('[aria-label="文档正文"]') as HTMLElement & { __lexicalEditor: LexicalEditor }).__lexicalEditor;
+  editor.dispatchCommand(INSERT_TABLE_COMMAND, { columns: '3', rows: '3', includeHeaders: { rows: true, columns: false } });
+}
 
 describe('mounted document editor', () => {
   it('applies a whole source conversion as one undoable edit, and ignores unchanged or read-only applications', async () => {
@@ -95,7 +103,8 @@ describe('mounted document editor', () => {
     await act(() => root.render(<DocumentEditor ref={ref} documentId="a" initialMarkdown="保留内容" onChange={onChange} />));
     await act(() => root.render(<DocumentEditor ref={ref} documentId="a" initialMarkdown="不应重新加载" readOnly onChange={onChange} />));
     expect(host.querySelector('[aria-label="文档正文"]')?.getAttribute('contenteditable')).toBe('false');
-    expect((host.querySelector('[aria-label="插入 3 × 3 表格"]') as HTMLButtonElement).disabled).toBe(true);
+    expect((host.querySelector('[aria-label="粗体 Ctrl+B"]') as HTMLButtonElement).disabled).toBe(true);
+    expect(host.querySelector('[aria-label="插入 3 × 3 表格"],[aria-label="编辑链接"],[aria-label="插入分割线"]')).toBeNull();
     expect(ref.current!.getSnapshot().plainText).toBe('保留内容');
     expect(onChange).not.toHaveBeenCalled();
   });
@@ -142,7 +151,7 @@ describe('mounted document editor', () => {
     const ref = createRef<DocumentEditorHandle>();
     await act(() => root.render(<DocumentEditor ref={ref} documentId="table" initialMarkdown="表格示例" onChange={() => {}} />));
     await act(() => ref.current!.focus());
-    await act(() => (host.querySelector('[aria-label="插入 3 × 3 表格"]') as HTMLButtonElement).click());
+    await act(() => insertTableFromSlash(host));
     expect(host.querySelectorAll('table tr')).toHaveLength(3);
     expect(host.querySelectorAll('table td,table th')).toHaveLength(9);
     expect(ref.current!.getSnapshot().markdown).toContain('| --- | --- | --- |');
@@ -154,12 +163,12 @@ describe('mounted document editor', () => {
     expect(host.querySelectorAll('table tr')).toHaveLength(3);
   });
 
-  it('applies and undoes source changes around a table inserted from the toolbar', async () => {
+  it('applies and undoes source changes around an inserted table', async () => {
     const ref = createRef<DocumentEditorHandle>();
     await act(() => root.render(<DocumentEditor ref={ref} documentId="table-source"
       initialMarkdown="表格外的原正文" onChange={() => {}} />));
     await act(() => ref.current!.focus());
-    await act(() => host.querySelector<HTMLButtonElement>('[aria-label="插入 3 × 3 表格"]')!.click());
+    await act(() => insertTableFromSlash(host));
     const before = ref.current!.getSnapshot();
     const prepared = prepareSourceEdit(before.content);
     expect(prepared.diagnostics).toEqual([]);

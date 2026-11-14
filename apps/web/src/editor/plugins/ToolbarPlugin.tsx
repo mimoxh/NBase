@@ -1,48 +1,35 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { TableActions } from './TableActions';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
-import { blockAlignments, calloutKinds, calloutTitleMaxLength, isCalloutKind, isCalloutTitle, type BlockAlignment, type CalloutKind, type TextStyle } from '@nbase/contracts';
-import { $createTextNode, $getNodeByKey, $getRoot, $getSelection, $isRangeSelection, $setSelection, CAN_REDO_COMMAND, CAN_UNDO_COMMAND, COMMAND_PRIORITY_LOW, FORMAT_TEXT_COMMAND, REDO_COMMAND, UNDO_COMMAND } from 'lexical';
+import { blockAlignments, type BlockAlignment, type TextStyle } from '@nbase/contracts';
+import { $createTextNode, $getRoot, $getSelection, $isRangeSelection, $setSelection, CAN_REDO_COMMAND, CAN_UNDO_COMMAND, COMMAND_PRIORITY_LOW, FORMAT_TEXT_COMMAND, REDO_COMMAND, UNDO_COMMAND } from 'lexical';
 import type { BaseSelection, LexicalNode, TextFormatType } from 'lexical';
 import { $isHeadingNode } from '@lexical/rich-text';
 import { $isCodeNode } from '@lexical/code';
 import { $isListNode } from '@lexical/list';
 import { $createLinkNode, $isLinkNode, TOGGLE_LINK_COMMAND } from '@lexical/link';
-import { $deleteTableColumnAtSelection, $deleteTableRowAtSelection, $getTableCellNodeFromLexicalNode, $insertTableColumnAtSelection, $insertTableRowAtSelection, $isTableSelection, INSERT_TABLE_COMMAND } from '@lexical/table';
-import { INSERT_HORIZONTAL_RULE_COMMAND } from '@lexical/react/LexicalHorizontalRuleNode';
+import { $isTableSelection } from '@lexical/table';
 import { mergeRegister } from '@lexical/utils';
 import { isSafeLinkUrl } from '../markdown';
 import { $applyBlockStyle } from '../blockStyles';
 import type { BlockStyle } from '../blockStyles';
-import { CODE_LANGUAGES } from '../codeLanguages';
-import { $changeListIndent, $selectedListItems } from '../listIndent';
+import { $changeIndent, $selectedIndentBlocks, $selectedListItems } from '../listIndent';
 import { OPEN_LINK_FORM_COMMAND } from './FloatingToolbarPlugin';
-import { $calloutForNode, $isCalloutNode, $unwrapCallout, calloutLabels } from '../nodes/CalloutNode';
 import { $applyTextStyle, $selectionAlignment, $selectionTextStyle, $setAlignment } from '../textFormatting';
 import { TextColorMenu } from './TextColorMenu';
-import { $canMergeSelection, $canSplitSelection, $hasMergedCells } from '../tableLayout';
-import { $getTableNodeFromLexicalNodeOrThrow } from '@lexical/table';
 import { Popover } from '../../components/Popover';
 
 const alignmentLabels: Record<BlockAlignment, string> = { left: '左对齐', center: '居中', right: '右对齐', justify: '两端对齐' };
 
 type Props = { readOnly: boolean; onNotice?: ((message: string) => void) | undefined; findPanel?: ReactNode };
-type CalloutState = { key: string; kind: CalloutKind; title: string };
-type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; highlight: boolean; code: boolean; link: string; table: boolean; listItem: boolean; codeKey: string; codeLanguage: string; callout: CalloutState | null; textStyle: TextStyle; align: BlockAlignment | null; canMerge: boolean; canSplit: boolean; merged: boolean };
-const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, highlight: false, code: false, link: '', table: false, listItem: false, codeKey: '', codeLanguage: '', callout: null, textStyle: {}, align: null, canMerge: false, canSplit: false, merged: false };
+type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; highlight: boolean; code: boolean; link: string; indentable: boolean; inCodeBlock: boolean; textStyle: TextStyle; align: BlockAlignment | null };
+const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, highlight: false, code: false, link: '', indentable: false, inCodeBlock: false, textStyle: {}, align: null };
 
 function $enclosingCodeBlock(node: LexicalNode): LexicalNode | null {
   for (let current: LexicalNode | null = node; current; current = current.getParent()) {
     if ($isCodeNode(current)) return current;
   }
   return null;
-}
-
-function $tableState(node: LexicalNode) {
-  const cell = $getTableCellNodeFromLexicalNode(node);
-  return { canMerge: $canMergeSelection(), canSplit: $canSplitSelection(),
-    merged: cell ? $hasMergedCells($getTableNodeFromLexicalNodeOrThrow(cell)) : false };
 }
 
 export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
@@ -56,6 +43,13 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
   const [colorOpen, setColorOpen] = useState(false);
   const savedSelection = useRef<BaseSelection | null>(null);
   const openLinkForm = useRef(() => {});
+  const linkInput = useRef<HTMLInputElement>(null);
+  // Opened from a slash command, the editor reclaims focus as its update settles, after autoFocus ran.
+  useEffect(() => {
+    if (!linkOpen) return;
+    const frame = requestAnimationFrame(() => linkInput.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [linkOpen]);
   useEffect(() => {
     const update = () => {
       const selection = $getSelection();
@@ -72,17 +66,11 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
           else if (['paragraph', 'quote', 'code'].includes(parent.getType())) block = parent.getType();
           parent = parent.getParent();
         }
-        const codeBlock = $enclosingCodeBlock(node);
-        const callout = $calloutForNode(node);
-        setState({ block, bold: selection.hasFormat('bold'), italic: selection.hasFormat('italic'), strikethrough: selection.hasFormat('strikethrough'), highlight: selection.hasFormat('highlight'), code: selection.hasFormat('code'), link, table: Boolean($getTableCellNodeFromLexicalNode(node)),
-          listItem: $selectedListItems() !== null,
-          codeKey: codeBlock?.getKey() ?? '', codeLanguage: $isCodeNode(codeBlock) ? codeBlock.getLanguage() ?? '' : '',
-          callout: callout ? { key: callout.getKey(), kind: callout.getKind(), title: callout.getTitle() } : null,
-          textStyle: $selectionTextStyle(), align: $selectionAlignment(), ...$tableState(node) });
+        setState({ block, bold: selection.hasFormat('bold'), italic: selection.hasFormat('italic'), strikethrough: selection.hasFormat('strikethrough'), highlight: selection.hasFormat('highlight'), code: selection.hasFormat('code'), link,
+          indentable: $selectedListItems() !== null || $selectedIndentBlocks() !== null, inCodeBlock: $enclosingCodeBlock(node) !== null,
+          textStyle: $selectionTextStyle(), align: $selectionAlignment() });
       } else if ($isTableSelection(selection)) {
-        // Read Lexical state here; the React updater runs outside the editor read.
-        const table = $tableState(selection.anchor.getNode());
-        setState((previous) => ({ ...previous, table: true, listItem: false, codeKey: '', codeLanguage: '', callout: null, textStyle: {}, align: null, ...table }));
+        setState((previous) => ({ ...previous, indentable: false, inCodeBlock: false, textStyle: {}, align: null }));
       }
     };
     editor.read('latest', update);
@@ -103,39 +91,9 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
     editor.focus();
   };
   const blockChange = (value: string) => edit(() => $applyBlockStyle(editor, value as BlockStyle));
-  const codeLanguageChange = (value: string) => edit(() => {
-    const node = $getNodeByKey(state.codeKey);
-    if ($isCodeNode(node)) node.setLanguage(value);
-  });
-  const copyCode = () => {
-    const text = editor.read('latest', () => {
-      const node = $getNodeByKey(state.codeKey);
-      return $isCodeNode(node) ? node.getTextContent() : null;
-    });
-    if (text === null) return;
-    void navigator.clipboard.writeText(text).then(
-      () => onNotice?.('已复制代码。'),
-      () => onNotice?.('复制失败，请在代码块中手动选择内容复制。'));
-  };
   const button = (label: string, content: ReactNode, action: () => void, active = false, disabled = false) => <button type="button" title={label} aria-label={label} aria-pressed={active} disabled={readOnly || disabled} className={active ? 'is-active' : ''} onMouseDown={(event) => event.preventDefault()} onClick={action}>{content}</button>;
   const format = (type: TextFormatType) => edit(() => editor.dispatchCommand(FORMAT_TEXT_COMMAND, type));
   openLinkForm.current = () => { setLinkUrl(state.link); setLinkError(''); setLinkOpen(true); };
-  const callout = state.callout;
-  const changeCalloutTitle = (input: HTMLInputElement) => {
-    if (!callout || !editor.isEditable()) return;
-    const title = input.value.trim();
-    if (!isCalloutTitle(title)) {
-      input.value = callout.title;
-      onNotice?.('提示块标题须为单行文字。');
-      return;
-    }
-    input.value = title;
-    if (title === callout.title) return;
-    editor.update(() => {
-      const node = $getNodeByKey(callout.key);
-      if ($isCalloutNode(node)) node.setTitle(title);
-    });
-  };
   const applyLink = () => {
     const url = linkUrl.trim();
     if (url && !isSafeLinkUrl(url)) { setLinkError('请输入 http、https、mailto 或安全的相对链接。'); return; }
@@ -158,19 +116,19 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
         <select aria-label="段落样式" value={state.block in { paragraph: 1, h1: 1, h2: 1, h3: 1, bullet: 1, number: 1, check: 1, quote: 1, code: 1 } ? state.block : 'paragraph'} disabled={readOnly} onChange={(event) => blockChange(event.target.value)}>
           <option value="paragraph">正文</option><option value="h1">标题 1</option><option value="h2">标题 2</option><option value="h3">标题 3</option><option value="bullet">项目列表</option><option value="number">编号列表</option><option value="check">待办列表</option><option value="quote">引用</option><option value="code">代码块</option>
         </select>
-        {button('减少缩进 Shift+Tab', '⇤', () => edit(() => { $changeListIndent(editor, -1); }), false, !state.listItem)}
-        {button('增加缩进 Tab', '⇥', () => edit(() => { $changeListIndent(editor, 1); }), false, !state.listItem)}
+        {button('减少缩进 Shift+Tab', '⇤', () => edit(() => { $changeIndent(editor, -1); }), false, !state.indentable)}
+        {button('增加缩进 Tab', '⇥', () => edit(() => { $changeIndent(editor, 1); }), false, !state.indentable)}
       </div>
       <div className="nbase-tool-group">
         {button('粗体 Ctrl+B', <b>B</b>, () => format('bold'), state.bold)}
         {button('斜体 Ctrl+I', <i>I</i>, () => format('italic'), state.italic)}
         {button('删除线', <s>S</s>, () => format('strikethrough'), state.strikethrough)}
-        {button('文字高亮', <mark className="nbase-highlight">高亮</mark>, () => format('highlight'), state.highlight, state.code || Boolean(state.codeKey))}
+        {button('文字高亮', <mark className="nbase-highlight">高亮</mark>, () => format('highlight'), state.highlight, state.code || state.inCodeBlock)}
         {button('行内代码', <span className="nbase-code-icon">&lt;/&gt;</span>, () => format('code'), state.code)}
         <span className="nbase-color-anchor">
           {button('文字和背景颜色', <span className="nbase-color-icon" style={{ ...(state.textStyle.color ? { color: `var(--nb-c-${state.textStyle.color})` } : {}),
             ...(state.textStyle.background ? { backgroundColor: `var(--nb-bg-${state.textStyle.background})` } : {}) }}>A</span>,
-          () => setColorOpen(open => !open), Boolean(state.textStyle.color || state.textStyle.background), Boolean(state.codeKey))}
+          () => setColorOpen(open => !open), Boolean(state.textStyle.color || state.textStyle.background), state.inCodeBlock)}
           {colorOpen && !readOnly && <Popover label="文字和背景颜色" className="nbase-color-popover" portal width={292} onClose={() => setColorOpen(false)}>
             <TextColorMenu value={state.textStyle} onPick={patch => { edit(() => $applyTextStyle(patch)); setColorOpen(false); }} />
           </Popover>}
@@ -182,60 +140,12 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
           {blockAlignments.map(value => <option key={value} value={value}>{alignmentLabels[value]}</option>)}
         </select>
       </div>
-      <div className="nbase-tool-group">
-        {button('编辑链接', '链接', () => { setLinkUrl(state.link); setLinkError(''); setLinkOpen((open) => !open); }, Boolean(state.link))}
-        {button('插入分割线', '—', () => edit(() => editor.dispatchCommand(INSERT_HORIZONTAL_RULE_COMMAND, undefined)))}
-        {button('插入 3 × 3 表格', '表格', () => {
-          if (state.table) { onNotice?.('请先将光标移到表格外；暂不支持嵌套表格。'); return; }
-          edit(() => editor.dispatchCommand(INSERT_TABLE_COMMAND, { columns: '3', rows: '3', includeHeaders: { rows: true, columns: false } }));
-        })}
-      </div>
       {readOnly && <span className="nbase-readonly-label">只读</span>}
     </div>
     {findPanel}
-    {state.table && !readOnly && <div className="nbase-table-toolbar" role="toolbar" aria-label="表格操作">
-      <span>表格</span>
-      {button('在上方插入行', '上方插行', () => edit(() => { $insertTableRowAtSelection(false); }))}
-      {button('在下方插入行', '下方插行', () => edit(() => { $insertTableRowAtSelection(true); }))}
-      {button('在左侧插入列', '左侧插列', () => edit(() => { $insertTableColumnAtSelection(false); }))}
-      {button('在右侧插入列', '右侧插列', () => edit(() => { $insertTableColumnAtSelection(true); }))}
-      {button('删除当前行', '删除行', () => edit($deleteTableRowAtSelection))}
-      {button('删除当前列', '删除列', () => edit($deleteTableColumnAtSelection))}
-      <TableActions edit={edit} canMerge={state.canMerge} canSplit={state.canSplit} merged={state.merged} onNotice={onNotice} />
-      <small>Tab 切换单元格</small>
-    </div>}
-    {callout && !readOnly && <div className="nbase-callout-toolbar" role="toolbar" aria-label="提示块操作">
-      <select aria-label="提示块类型" value={callout.kind} onChange={event => {
-        const kind = event.target.value;
-        if (isCalloutKind(kind)) edit(() => {
-          const node = $getNodeByKey(callout.key);
-          if ($isCalloutNode(node)) node.setKind(kind);
-        });
-      }}>
-        {calloutKinds.map(kind => <option key={kind} value={kind}>{calloutLabels[kind]}</option>)}
-      </select>
-      <input key={callout.key + ':' + callout.title} aria-label="提示块标题" placeholder="可选标题" maxLength={calloutTitleMaxLength}
-        defaultValue={callout.title} onBlur={event => changeCalloutTitle(event.currentTarget)}
-        onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) event.currentTarget.blur(); }} />
-      {button('转换为普通正文', '转为正文', () => edit(() => {
-        const node = $getNodeByKey(callout.key);
-        if ($isCalloutNode(node)) $unwrapCallout(node);
-      }))}
-    </div>}
-    {state.codeKey && !readOnly && <div className="nbase-code-toolbar" role="toolbar" aria-label="代码操作">
-      <span>代码</span>
-      <select aria-label="代码语言" value={state.codeLanguage || 'plain'}
-        onChange={(event) => codeLanguageChange(event.target.value)}>
-        {CODE_LANGUAGES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-        {state.codeLanguage && !CODE_LANGUAGES.some(([value]) => value === state.codeLanguage)
-          && <option value={state.codeLanguage}>{state.codeLanguage}</option>}
-      </select>
-      {button('复制代码', '复制代码', copyCode)}
-      <small>Tab 缩进</small>
-    </div>}
     {linkOpen && !readOnly && <form className="nbase-link-form" onSubmit={(event) => { event.preventDefault(); applyLink(); }}>
       <label htmlFor={`link-${editor.getKey()}`}>链接地址</label>
-      <input id={`link-${editor.getKey()}`} autoFocus value={linkUrl} placeholder="https://example.com" onChange={(event) => setLinkUrl(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setLinkOpen(false); editor.focus(); } }} />
+      <input ref={linkInput} id={`link-${editor.getKey()}`} autoFocus value={linkUrl} placeholder="https://example.com" onChange={(event) => setLinkUrl(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') { setLinkOpen(false); editor.focus(); } }} />
       <button type="submit">应用</button><button type="button" onClick={() => { edit(() => editor.dispatchCommand(TOGGLE_LINK_COMMAND, null)); setLinkOpen(false); }}>移除</button><button type="button" onClick={() => { setLinkOpen(false); editor.focus(); }}>取消</button>
       {linkError && <span role="alert">{linkError}</span>}
     </form>}

@@ -22,6 +22,12 @@ pre.nb-code[data-language]::before{content:attr(data-language);display:block;col
 blockquote{margin:.8em 0;padding:.1em 0 .1em 1em;border-left:3px solid var(--line);color:var(--muted)}
 hr{border:0;border-top:1px solid var(--line);margin:2em 0}
 ul,ol{padding-left:1.6em;margin:.4em 0}li{margin:.15em 0}li.nb-nested{list-style:none}
+ul{list-style-type:disc}ol{list-style-type:decimal}
+:is(ul,ol) ul{list-style-type:circle}:is(ul,ol) ol{list-style-type:lower-alpha}
+:is(ul,ol) :is(ul,ol) ul{list-style-type:square}:is(ul,ol) :is(ul,ol) ol{list-style-type:lower-roman}
+:is(ul,ol) :is(ul,ol) :is(ul,ol) ul{list-style-type:disc}:is(ul,ol) :is(ul,ol) :is(ul,ol) ol{list-style-type:decimal}
+:is(ul,ol) :is(ul,ol) :is(ul,ol) :is(ul,ol) ul{list-style-type:circle}:is(ul,ol) :is(ul,ol) :is(ul,ol) :is(ul,ol) ol{list-style-type:lower-alpha}
+:is(ul,ol) :is(ul,ol) :is(ul,ol) :is(ul,ol) :is(ul,ol) ul{list-style-type:square}:is(ul,ol) :is(ul,ol) :is(ul,ol) :is(ul,ol) :is(ul,ol) ol{list-style-type:lower-roman}
 ul.nb-tasks{list-style:none;padding-left:.3em}li.nb-task input{margin:0 .4em 0 0;vertical-align:-1px}
 .nb-tab{white-space:pre}
 .nb-callout{margin:1em 0;padding:12px 16px;border:1px solid var(--line);border-left:4px solid #6f8fb0;border-radius:8px;background:var(--soft)}

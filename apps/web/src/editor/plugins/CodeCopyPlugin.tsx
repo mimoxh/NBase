@@ -1,23 +1,31 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
+import { useLexicalEditable } from '@lexical/react/useLexicalEditable';
 import { $getNodeByKey } from 'lexical';
 import type { NodeKey } from 'lexical';
 import { $isCodeNode, CodeNode } from '@lexical/code';
 import { Icon } from '../../components/Icon';
+import { CODE_LANGUAGES } from '../codeLanguages';
+import { EditorMenu } from './EditorMenu';
+import { codeLanguageEntries, menuHost, setCodeLanguage } from './BlockContextMenuPlugin';
 
 type Props = { onNotice?: ((message: string) => void) | undefined };
-type Block = { key: string; top: number; left: number };
+type Block = { key: string; top: number; right: number; language: string };
 
 function sameBlocks(a: Block[], b: Block[]): boolean {
   return a.length === b.length && a.every((item, index) => {
     const other = b[index]!;
-    return item.key === other.key && item.top === other.top && item.left === other.left;
+    return item.key === other.key && item.top === other.top && item.right === other.right && item.language === other.language;
   });
 }
 
+function languageLabel(language: string): string {
+  return CODE_LANGUAGES.find(([value]) => value === (language || 'plain'))?.[1] ?? language;
+}
+
 /**
- * Copy buttons pinned to the top-right of each code block. The buttons live in
+ * A language badge and copy button pinned to the top-right of each code block. The buttons live in
  * `.nbase-editor-surface`, outside the contentEditable DOM, so they never
  * disturb Lexical's reconciler — and they also work in read-only previews.
  * Code-node keys are tracked by the mutation listener; rectangle measurement
@@ -26,6 +34,10 @@ function sameBlocks(a: Block[], b: Block[]): boolean {
  */
 export function CodeCopyPlugin({ onNotice }: Props) {
   const [editor] = useLexicalComposerContext();
+  const editable = useLexicalEditable();
+  const [languageMenu, setLanguageMenu] = useState<{ key: string; language: string; x: number; y: number } | null>(null);
+  // The menu's outside-click handler closes it before the badge's click, which must not reopen it.
+  const closedByBadge = useRef(false);
   const [surface, setSurface] = useState<HTMLElement | null>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [copied, setCopied] = useState('');
@@ -43,12 +55,16 @@ export function CodeCopyPlugin({ onNotice }: Props) {
       if (!surfaceElement || !keys.size) { setBlocks(previous => previous.length ? [] : previous); return; }
       const surfaceRect = surfaceElement.getBoundingClientRect();
       const items: Block[] = [];
+      const languages = editor.read('latest', () => new Map([...keys].map(key => {
+        const node = $getNodeByKey(key);
+        return [key, $isCodeNode(node) ? node.getLanguage() ?? '' : ''];
+      })));
       for (const key of keys) {
         const element = editor.getElementByKey(key);
         if (!element) { keys.delete(key); continue; }
         if (element.closest('[data-nbase-folded]')) continue;
         const rect = element.getBoundingClientRect();
-        items.push({ key, top: rect.top - surfaceRect.top + 6, left: rect.right - surfaceRect.left - 34 });
+        items.push({ key, top: rect.top - surfaceRect.top + 6, right: surfaceRect.right - rect.right + 10, language: languages.get(key) ?? '' });
       }
       items.sort((a, b) => a.top - b.top);
       setBlocks(previous => sameBlocks(previous, items) ? previous : items);
@@ -113,11 +129,27 @@ export function CodeCopyPlugin({ onNotice }: Props) {
 
   if (!surface || !blocks.length) return null;
   return <>{blocks.map(block => createPortal(
-    <button key={block.key} type="button"
-      className={`nbase-code-copy${copied === block.key ? ' is-copied' : ''}`}
-      style={{ top: block.top, left: block.left }} onClick={() => void copy(block.key)}
-      title={copied === block.key ? '已复制' : '复制代码'}
-      aria-label={copied === block.key ? '已复制' : '复制代码'}>
-      <Icon name={copied === block.key ? 'check' : 'copy'} size={14} />
-    </button>, surface))}</>;
+    <div key={block.key} className="nbase-code-controls" style={{ top: block.top, right: block.right }}>
+      {editable
+        ? <button type="button" className="nbase-code-lang" aria-haspopup="menu" title="切换代码语言"
+          aria-label={`代码语言：${languageLabel(block.language)}`} aria-expanded={languageMenu?.key === block.key}
+          onMouseDown={event => { event.preventDefault(); closedByBadge.current = languageMenu?.key === block.key; }}
+          onClick={event => {
+            if (closedByBadge.current) { closedByBadge.current = false; return; }
+            const rect = event.currentTarget.getBoundingClientRect();
+            setLanguageMenu({ key: block.key, language: block.language, x: rect.left, y: rect.bottom + 4 });
+          }}>{languageLabel(block.language)}</button>
+        : <span className="nbase-code-lang">{languageLabel(block.language)}</span>}
+      <button type="button"
+        className={`nbase-code-copy${copied === block.key ? ' is-copied' : ''}`}
+        onClick={() => void copy(block.key)}
+        title={copied === block.key ? '已复制' : '复制代码'}
+        aria-label={copied === block.key ? '已复制' : '复制代码'}>
+        <Icon name={copied === block.key ? 'check' : 'copy'} size={14} />
+      </button>
+    </div>, surface))}
+    {languageMenu && <EditorMenu label="代码语言" x={languageMenu.x} y={languageMenu.y} host={menuHost(editor)}
+      items={codeLanguageEntries(languageMenu.language, language => { setCodeLanguage(editor, languageMenu.key, language); editor.focus(); })}
+      onClose={restore => { setLanguageMenu(null); if (restore) editor.focus(); }} />}
+  </>;
 }

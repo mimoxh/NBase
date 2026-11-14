@@ -1,6 +1,7 @@
 .nbase-block-handle { position:absolute; left:-46px; display:grid; place-items:center; width:20px; height:26px; padding:0; border:0; border-radius:4px; background:transparent; color:var(--nb-faint,#a0a496); font-size:14px; line-height:1; cursor:grab; }
 .nbase-block-handle:hover,.nbase-block-handle:focus-visible { background:var(--nb-hover,#f3f4f0); color:var(--nb-text,#30332e); }
 .nbase-block-handle:active { cursor:grabbing; }
+.nbase-block-gutter { position:absolute; left:-46px; width:46px; }
 .nbase-block-drop-line { position:absolute; left:0; right:0; height:2px; margin-top:-1px; border-radius:1px; background:var(--nb-accent-text,#647a45); pointer-events:none; }
 .nbase-block-menu { position:absolute; left:-46px; z-index:30; display:flex; flex-direction:column; min-width:136px; max-height:min(420px,70vh); overflow:auto; padding:4px; background:var(--nb-bg,#fff); color:var(--nb-text,#2e3229); border:1px solid var(--editor-line); border-radius:8px; box-shadow:var(--nb-shadow-sm,0 3px 12px rgba(60,64,55,.14)); font-size:13px; }
 .nbase-block-menu button { border:0; border-radius:5px; padding:5px 9px; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer; }
@@ -8,4 +9,4 @@
 .nbase-block-menu button:disabled { opacity:.4; cursor:default; }
 .nbase-block-menu button.is-danger { color:var(--nb-danger,#9c4f37); }
 .nbase-block-menu-label { margin:6px 0 2px; padding:4px 9px 0; border-top:1px solid var(--editor-line); color:var(--nb-muted,#656d76); font-size:11px; }
-@media (hover:none),(max-width:720px) { .nbase-block-handle { display:none; } }
+@media (hover:none),(max-width:720px) { .nbase-block-handle,.nbase-block-gutter { display:none; } }

@@ -179,10 +179,11 @@ function context(original: DocumentContent) {
       node.replace($createAttachmentNode(reference.attachmentId, alt, reference.fileName, reference.mediaType, attachmentPresentationOf(reference)));
     },
   };
+  // Other headings fall through, so aligned or indented ones still get their `<div>` wrapper.
   const captureHeading: ElementTransformer = { ...HEADING, export(node, ...args) {
+    if ((node.exportJSON() as unknown as JsonNode).$?.[quickCaptureMarker] !== true) return null;
     const rendered = HEADING.export?.(node, ...args) ?? null;
-    return rendered !== null && (node.exportJSON() as unknown as JsonNode).$?.[quickCaptureMarker] === true
-      ? quickCaptureSourceMarker + '\n' + rendered : rendered;
+    return rendered === null ? null : quickCaptureSourceMarker + '\n' + rendered;
   } };
   return { diagnostics, attachments, capture, trailingParagraphs, transforms: withMarkdownTransformers([attachment, captureHeading]) };
 }

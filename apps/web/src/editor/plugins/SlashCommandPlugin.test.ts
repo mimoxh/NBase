@@ -23,4 +23,11 @@ it('matches static pinyin aliases and initials for Chinese command names', () =>
   expect(keys('fgx')).toEqual(['hr']);
   expect(keys('db')).not.toContain('check');
   expect(keys('tupian', false, true)).toEqual(['image']);
+  expect(keys('lianjie')).toEqual(['link']);
+  expect(keys('链接')[0]).toBe('link');
+});
+
+it('keeps link, divider and table reachable from the slash menu', () => {
+  expect(keys('')).toEqual(expect.arrayContaining(['link', 'hr', 'table']));
+  expect(keys('lj', true)).toEqual(['link']);
 });

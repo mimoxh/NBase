@@ -1,7 +1,7 @@
-import { $createParagraphNode, $getSelection, $isRangeSelection } from 'lexical';
+import { $createParagraphNode, $findMatchingParent, $getSelection, $isElementNode, $isRangeSelection } from 'lexical';
 import type { LexicalEditor, LexicalNode } from 'lexical';
-import { $createCodeNode } from '@lexical/code';
-import { $createHeadingNode, $createQuoteNode } from '@lexical/rich-text';
+import { $createCodeNode, $isCodeNode } from '@lexical/code';
+import { $createHeadingNode, $createQuoteNode, $isQuoteNode } from '@lexical/rich-text';
 import { $isListNode, INSERT_CHECK_LIST_COMMAND, INSERT_ORDERED_LIST_COMMAND, INSERT_UNORDERED_LIST_COMMAND, REMOVE_LIST_COMMAND } from '@lexical/list';
 import { $setBlocksType } from '@lexical/selection';
 
@@ -27,7 +27,14 @@ export function $applyBlockStyle(editor: LexicalEditor, value: BlockStyle): void
   const current = $getSelection();
   if (!$isRangeSelection(current)) return;
   if (value === 'h1' || value === 'h2' || value === 'h3') $setBlocksType(current, () => $createHeadingNode(value));
-  else if (value === 'quote') $setBlocksType(current, () => $createQuoteNode());
-  else if (value === 'code') $setBlocksType(current, () => $createCodeNode());
-  else $setBlocksType(current, () => $createParagraphNode());
+  else if (value === 'quote' || value === 'code') {
+    $setBlocksType(current, () => value === 'quote' ? $createQuoteNode() : $createCodeNode());
+    // $setBlocksType copies alignment and indent, which quotes and code blocks cannot write to Markdown.
+    const after = $getSelection();
+    if (!$isRangeSelection(after)) return;
+    for (const node of after.getNodes()) {
+      const block = $findMatchingParent(node, item => $isQuoteNode(item) || $isCodeNode(item));
+      if ($isElementNode(block) && (block.getIndent() || block.getFormatType())) block.setIndent(0).setFormat('');
+    }
+  } else $setBlocksType(current, () => $createParagraphNode());
 }

@@ -68,6 +68,7 @@ export function WhiteboardView(props: WhiteboardViewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef(0);
   const drawRef = useRef<() => void>(() => undefined);
+  const devicePixelsRef = useRef<{ width: number; height: number } | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const schedule = useCallback(() => {
     if (frameRef.current || timerRef.current) return;
@@ -120,10 +121,17 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     if (!canvas || !ctx) return;
     const dpr = window.devicePixelRatio || 1;
     const { width, height } = store.size;
-    if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
-      canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
+    // The exact device-pixel box keeps one canvas pixel per screen pixel; a rounded CSS size
+    // at fractional scales makes the browser resample, and blur, the whole board. A box that
+    // disagrees with the current ratio is stale (or emulated) and falls back to rounding.
+    const device = devicePixelsRef.current;
+    const usable = device && Math.abs(device.width - width * dpr) <= 1 && Math.abs(device.height - height * dpr) <= 1;
+    const pixelWidth = Math.max(1, usable ? device.width : Math.round(width * dpr));
+    const pixelHeight = Math.max(1, usable ? device.height : Math.round(height * dpr));
+    if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+      canvas.width = pixelWidth; canvas.height = pixelHeight;
     }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(pixelWidth / width, 0, 0, pixelHeight / height, 0, 0);
     const theme = dark ? darkTheme : lightTheme;
     drawScene(ctx, store.elements, store.index, store.view, width, height, {
       theme, measure, images, pageInfo, background: store.background, faded: store.faded,
@@ -165,6 +173,27 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     observer.observe(container);
     return () => observer.disconnect();
   }, [store]);
+
+  // Track the canvas size in device pixels so a scale change (another monitor, OS or browser zoom) redraws sharply.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = new ResizeObserver(entries => {
+      const size = entries.at(-1)?.devicePixelContentBoxSize?.[0];
+      devicePixelsRef.current = size ? { width: size.inlineSize, height: size.blockSize } : null;
+      schedule();
+    });
+    try { observer.observe(canvas, { box: 'device-pixel-content-box' }); } catch { observer.observe(canvas); }
+    let media: MediaQueryList | null = null;
+    const watchScale = () => {
+      media?.removeEventListener('change', onScale);
+      media = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      media.addEventListener('change', onScale);
+    };
+    function onScale() { watchScale(); schedule(); }
+    watchScale();
+    return () => { observer.disconnect(); media?.removeEventListener('change', onScale); };
+  }, [schedule]);
 
   // Wheel needs a non-passive listener to stop the page from scrolling or zooming.
   useEffect(() => {

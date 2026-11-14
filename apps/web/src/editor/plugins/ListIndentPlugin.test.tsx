@@ -10,10 +10,12 @@ import { LexicalErrorBoundary } from '@lexical/react/LexicalErrorBoundary';
 import { HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin';
 import { ListPlugin } from '@lexical/react/LexicalListPlugin';
 import { $isListItemNode, $isListNode, type ListItemNode } from '@lexical/list';
-import { $getRoot, $isElementNode, KEY_TAB_COMMAND, UNDO_COMMAND, type LexicalEditor, type LexicalNode } from 'lexical';
+import { $getRoot, $isElementNode, INSERT_PARAGRAPH_COMMAND, KEY_TAB_COMMAND, UNDO_COMMAND, type ElementNode, type LexicalEditor, type LexicalNode } from 'lexical';
 import { createContentFromMarkdown, markdownFromContent, readEditorSnapshot } from '../markdown';
 import { EDITOR_NODES } from '../nodes';
 import { prepareSourceEdit } from '../sourceEditing';
+import { $applyBlockStyle } from '../blockStyles';
+import { listTheme } from '../listTheme';
 import { ListIndentPlugin } from './ListIndentPlugin';
 
 let host: HTMLDivElement;
@@ -28,7 +30,7 @@ function Capture() {
 async function mount(markdown: string) {
   const initial = createContentFromMarkdown(markdown);
   await act(() => root.render(<LexicalComposer initialConfig={{
-    namespace: 'list-indent-test', nodes: EDITOR_NODES, editorState: JSON.stringify(initial.editorState),
+    namespace: 'list-indent-test', nodes: EDITOR_NODES, theme: { list: listTheme }, editorState: JSON.stringify(initial.editorState),
     onError: error => { throw error; },
   }}>
     <RichTextPlugin contentEditable={<ContentEditable />} ErrorBoundary={LexicalErrorBoundary} />
@@ -117,8 +119,8 @@ it('refuses to nest the first item of a level or past the depth limit, without l
   expect(depths()['七']).toBe(5);
 });
 
-it('indents every item in a multi-item selection and leaves Tab alone outside lists', async () => {
-  await mount('- 一\n- 二\n- 三\n\n普通段落');
+it('indents every item in a multi-item selection', async () => {
+  await mount('- 一\n- 二\n- 三');
   await act(() => editor.update(() => {
     const [, second, third] = $items();
     const selection = second!.select(0, 0);
@@ -126,7 +128,93 @@ it('indents every item in a multi-item selection and leaves Tab alone outside li
   }, { discrete: true }));
   await press();
   expect(depths()).toEqual({ 一: 0, 二: 1, 三: 1 });
+});
 
-  await act(() => editor.update(() => { $getRoot().getLastChild()!.selectEnd(); }, { discrete: true }));
+it('cycles bullet and number markers by nesting depth as items are indented and outdented', async () => {
+  await mount('- 一\n- 二\n- 三\n- 四\n\n1. 甲\n2. 乙\n3. 丙');
+  for (const [text, steps] of [['二', 1], ['三', 2], ['四', 3], ['乙', 1], ['丙', 2]] as const) {
+    await caretIn(text);
+    for (let step = 0; step < steps; step += 1) await press();
+  }
+  const marker = (text: string) => {
+    const item = [...host.querySelectorAll('li:not(.nbase-list-nested)')].find(li => li.textContent === text);
+    return [...item!.parentElement!.classList].find(name => /^nbase-(ul|ol)-/.test(name));
+  };
+  expect(['一', '二', '三', '四', '甲', '乙', '丙'].map(marker))
+    .toEqual(['nbase-ul-disc', 'nbase-ul-circle', 'nbase-ul-square', 'nbase-ul-disc', 'nbase-ol-decimal', 'nbase-ol-alpha', 'nbase-ol-roman']);
+  await caretIn('四');
+  await press(true);
+  await press(true);
+  expect(depths()['四']).toBe(1);
+  expect(marker('四')).toBe('nbase-ul-circle');
+  await caretIn('丙');
+  await press(true);
+  expect(depths()['丙']).toBe(1);
+  expect(marker('丙')).toBe('nbase-ol-alpha');
+});
+
+const blockIndents = () => editor.read('latest', () => $getRoot().getChildren().map(block => [block.getTextContent(), $isElementNode(block) ? block.getIndent() : null]));
+
+it('indents paragraphs and headings up to the limit and keeps them through Markdown and source editing', async () => {
+  await mount('## 标题\n\n第一段\n\n第二段');
+  const caretInBlock = (index: number) => act(() => editor.update(() => { $getRoot().getChildAtIndex(index)!.selectEnd(); }, { discrete: true }));
+  await caretInBlock(1);
+  expect((await press()).defaultPrevented).toBe(true);
+  await caretInBlock(1);
+  await press();
+  expect(blockIndents()).toEqual([['标题', 0], ['第一段', 2], ['第二段', 0]]);
+  await act(() => { editor.dispatchCommand(UNDO_COMMAND, undefined); });
+  expect(blockIndents()[1]).toEqual(['第一段', 1]);
+  await caretInBlock(1);
+  await press(true);
+  expect(blockIndents()[1]).toEqual(['第一段', 0]);
+  // Shift+Tab at the left edge stays in the editor and changes nothing.
+  await caretInBlock(1);
+  expect((await press(true)).defaultPrevented).toBe(true);
+  expect(blockIndents()[1]).toEqual(['第一段', 0]);
+
+  await act(() => editor.update(() => {
+    const selection = $getRoot().getFirstChild()!.selectStart();
+    selection.focus.set($getRoot().getLastChildOrThrow<ElementNode>().getFirstDescendant()!.getKey(), 1, 'text');
+  }, { discrete: true }));
+  for (let step = 0; step < 7; step += 1) {
+    await act(() => editor.update(() => {
+      const selection = $getRoot().getFirstChild()!.selectStart();
+      selection.focus.set($getRoot().getLastChildOrThrow<ElementNode>().getFirstDescendant()!.getKey(), 1, 'text');
+    }, { discrete: true }));
+    await press();
+  }
+  expect(blockIndents()).toEqual([['标题', 5], ['第一段', 5], ['第二段', 5]]);
+
+  const content = readEditorSnapshot(editor.getEditorState()).content;
+  const exported = markdownFromContent(content);
+  expect(exported).toContain('<div style="margin-left:10em">\n\n## 标题\n\n</div>');
+  expect(markdownFromContent(createContentFromMarkdown(exported))).toBe(exported);
+  expect(prepareSourceEdit(content).canApply).toBe(true);
+});
+
+it('keeps the indent on a paragraph split off with Enter', async () => {
+  await mount('第一段');
+  await act(() => editor.update(() => { $getRoot().getFirstChildOrThrow<ElementNode>().setIndent(2).selectEnd(); }, { discrete: true }));
+  await act(() => { editor.dispatchCommand(INSERT_PARAGRAPH_COMMAND, undefined); });
+  expect(blockIndents()).toEqual([['第一段', 2], ['', 2]]);
+});
+
+it('drops indent and alignment when a paragraph becomes a quote or code block', async () => {
+  await mount('第一段\n\n第二段');
+  for (const [index, style] of [[0, 'quote'], [1, 'code']] as const) {
+    await act(() => editor.update(() => {
+      $getRoot().getChildAtIndex<ElementNode>(index)!.setIndent(2).setFormat('center').selectEnd();
+      $applyBlockStyle(editor, style);
+    }, { discrete: true }));
+  }
+  expect(editor.read('latest', () => $getRoot().getChildren<ElementNode>().map(block => [block.getType(), block.getIndent(), block.getFormatType()])))
+    .toEqual([['quote', 0, ''], ['code', 0, '']]);
+  expect(prepareSourceEdit(readEditorSnapshot(editor.getEditorState()).content).canApply).toBe(true);
+});
+
+it('leaves Tab to the browser where nothing can be indented', async () => {
+  await mount('> 引用文字');
+  await act(() => editor.update(() => { $getRoot().getFirstChild()!.selectEnd(); }, { discrete: true }));
   expect((await press()).defaultPrevented).toBe(false);
 });

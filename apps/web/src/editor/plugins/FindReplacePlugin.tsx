@@ -80,7 +80,7 @@ export function FindReplacePlugin(props: Props) {
   visible.current = open;
   const panel = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLInputElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
+  const returnFocus = useRef<Element | null>(null);
   // Keep title changes alongside in-memory editor history, separate from persisted body JSON.
   const titleEdits = useRef<WeakMap<RootNode, TitleEdit> | null>(null);
 
@@ -118,7 +118,7 @@ export function FindReplacePlugin(props: Props) {
       if (dialog !== (panel.current?.closest('dialog') ?? null)) return;
       event.preventDefault();
       if (visible.current) input.current?.focus({ preventScroll: true });
-      else setOpen(true);
+      else { returnFocus.current = document.activeElement; setOpen(true); }
     };
     document.addEventListener('keydown', keydown);
     return () => document.removeEventListener('keydown', keydown);
@@ -142,7 +142,15 @@ export function FindReplacePlugin(props: Props) {
     if (index.count) setPosition((currentPosition + direction + index.count) % index.count);
     setStatus('');
   };
-  const close = () => { setOpen(false); setStatus(''); queueMicrotask(() => trigger.current?.focus({ preventScroll: true })); };
+  const close = () => {
+    setOpen(false); setStatus('');
+    const previous = returnFocus.current;
+    returnFocus.current = null;
+    queueMicrotask(() => {
+      const target = previous instanceof HTMLElement && previous.isConnected ? previous : editor.getRootElement();
+      target?.focus({ preventScroll: true });
+    });
+  };
 
   const replace = (all: boolean) => {
     if (readOnly || !editor.isEditable() || !query || editor.isComposing() || composing.current) return;
@@ -175,12 +183,13 @@ export function FindReplacePlugin(props: Props) {
     setStatus(status);
   };
 
-  return <div ref={panel} className="nbase-page-find" onKeyDown={event => {
+  // Stays mounted while closed: the Ctrl/Cmd+F listener is bound through this element's document.
+  return <div ref={panel} className="nbase-page-find" hidden={!open} onKeyDown={event => {
     if (open && event.key === 'Escape' && !event.nativeEvent.isComposing && !composing.current) {
       event.preventDefault(); event.stopPropagation(); close();
     }
   }}>
-    {!open ? <button type="button" ref={trigger} onClick={() => setOpen(true)} title="页内查找 Ctrl/Cmd+F">页内查找</button> :
+    {open &&
       <div className="nbase-page-find-panel" role="search" aria-label="页内查找与替换">
         <div className="nbase-page-find-row">
           <input ref={input} aria-label="查找内容" placeholder="查找内容" value={rawQuery} maxLength={1024}
