@@ -27,6 +27,8 @@ export type {
   UpdatePageRequest,
 } from './pages.js';
 export * from './databases.js';
+export * from './dateCells.js';
+export * from './calendar.js';
 export * from './whiteboards.js';
 export { computeRow, formulaFromDisplay, formulaFunctionNames, formulaLengthLimit, formulaToDisplay, parseFormula } from './formula.js';
 export type { FormulaResult, FormulaType, FormulaValue, RollupSource } from './formula.js';

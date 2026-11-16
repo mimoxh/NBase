@@ -28,7 +28,7 @@ export interface Page {
   createdAt?: string;
   updatedAt?: string;
 }
-export type Collection = 'overview' | 'recent' | 'favorites' | 'trash';
+export type Collection = 'overview' | 'recent' | 'favorites' | 'trash' | 'calendar';
 export interface Workspace { pages: Page[]; currentId: string | null; view: 'document' | Collection; recent: string[]; }
 export type Action =
   | { type: 'open'; id: string }

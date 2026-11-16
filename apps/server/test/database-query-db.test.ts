@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import pg from 'pg';
-import { aggregateRows, aggregatesFor, evaluateView, filterOperatorsFor, groupRows, operatorNeedsValue, relativeDateTokens, type DatabaseDocument, type DatabaseQueryResponse, type DatabaseRowGroup,
+import { aggregateRows, aggregatesFor, evaluateView, filterOperatorsFor, groupRows, isDateCellValue, operatorNeedsValue, relativeDateTokens, type DatabaseDocument, type DatabaseQueryRange, type DatabaseQueryResponse, type DatabaseRowGroup,
   type DatabaseView, type PropertyDefinition, type ViewFilterEntry, type ViewSort } from '@nbase/contracts';
 import { buildApp } from '../src/app.js';
 import { initializeOwner } from '../src/auth/initialize-owner.js';
@@ -223,6 +223,137 @@ test('server query matches evaluateView for every filter and sort', {
     await pool.query(`UPDATE workspace_memberships SET role = 'viewer' WHERE user_id = $1`, [owner.userId]);
     assert.equal((await bulk({ clientMutationId: randomUUID(), operation: 'trash', ids: [one!.id] })).statusCode, 403);
     assert.equal((await instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/query`, headers: write, payload: { filters: [], sorts: [] } })).statusCode, 200);
+  } finally {
+    await app?.close();
+    await pool?.end();
+    if (created) await admin.query(`DROP DATABASE "${name}"`);
+    await admin.end();
+  }
+});
+
+test('server date filters, sorts and calendar ranges match evaluateView in several zones', {
+  skip: !sourceUrl && 'Set NBASE_TEST_DATABASE_URL to a disposable local PostgreSQL instance',
+}, async () => {
+  assert.ok(sourceUrl);
+  const source = new URL(sourceUrl);
+  assert.equal(source.hostname, '127.0.0.1');
+  assert.equal(source.port, '54329');
+  assert.equal(source.pathname, '/nbase_p2');
+  const admin = new pg.Pool({ connectionString: sourceUrl, max: 2 });
+  const name = `nbase_p2_test_${randomUUID().replaceAll('-', '')}`;
+  let created = false;
+  let pool: pg.Pool | undefined;
+  let app: Awaited<ReturnType<typeof buildApp>> | undefined;
+  try {
+    await admin.query(`CREATE DATABASE "${name}"`);
+    created = true;
+    const url = new URL(sourceUrl);
+    url.pathname = `/${name}`;
+    pool = new pg.Pool({ connectionString: url.toString(), max: 4 });
+    await runMigrations(pool);
+    const owner = await initializeOwner(pool, 'owner', await hashPassword(ownerPassword), '测试');
+    app = await buildApp({ auth: { repository: new PgAuthRepository(pool), publicOrigin: origin }, pages: new PgPageRepository(pool), notesPool: pool });
+    const instance = app;
+    const base = `/api/workspaces/${owner.workspaceId}`;
+    const login = await instance.inject({ method: 'POST', url: '/api/auth/login', headers: { origin }, payload: { loginName: 'owner', password: ownerPassword } });
+    const cookie = String(login.headers['set-cookie']).split(';', 1)[0]!;
+    const write = { cookie, origin, 'x-csrf-token': login.json().csrfToken as string };
+
+    const db = (await instance.inject({ method: 'POST', url: `${base}/databases`, headers: write,
+      payload: { clientMutationId: randomUUID(), parentId: null, title: '日程' } })).json() as DatabaseDocument;
+    const date: PropertyDefinition = { id: randomUUID(), name: '时间', type: 'date' };
+    const created_: PropertyDefinition = { id: randomUUID(), name: '创建', type: 'created_time' };
+    const properties: PropertyDefinition[] = [...db.properties, date, created_];
+    const saved = await instance.inject({ method: 'PATCH', url: `${base}/databases/${db.page.id}`, headers: write,
+      payload: { clientMutationId: randomUUID(), expectedRevision: db.schemaRevision, properties, views: db.views } });
+    assert.equal(saved.statusCode, 200, saved.body);
+
+    const valid: [string, string][] = [
+      ['单日', '2026-03-01'],
+      ['跨天', '2026-03-01/2026-03-05'],
+      ['跨月', '2026-02-27/2026-03-02'],
+      ['上海跨午夜', '2026-03-01T15:30:00Z/2026-03-01T17:00:00Z|tz=Asia/Shanghai'],
+      ['纽约跨午夜', '2026-03-02T03:30:00Z/2026-03-02T06:00:00Z|tz=America/New_York'],
+      ['时刻', '2026-02-28T23:59:59Z'],
+      ['每周至', '2026-02-02T01:00:00Z/2026-02-02T02:00:00Z|tz=Asia/Shanghai|rrule=FREQ=WEEKLY;UNTIL=20260223T000000Z'],
+      ['每日五次', '2026-02-26|rrule=FREQ=DAILY;COUNT=5'],
+      ['每月不止', '2025-12-15|rrule=FREQ=MONTHLY|remind=60'],
+      ['旧日期', '2025-01-01'],
+      ['提醒', '2026-03-03T01:00:00Z|tz=UTC|remind=10,30'],
+    ];
+    const invalid: [string, string][] = [
+      ['坏日', '2026-02-30'],
+      ['倒序', '2026-03-05/2026-03-01'],
+      ['混合', '2026-03-01/2026-03-02T00:00:00Z'],
+      ['毫秒', '2026-03-01T00:00:00.000Z'],
+      ['日带时区', '2026-03-01|tz=Asia/Shanghai'],
+      ['坏规则', '2026-03-01|rrule=FREQ=HOURLY'],
+      ['参数乱序', '2026-03-01|remind=10|rrule=FREQ=DAILY'],
+      ['尾竖线', '2026-03-01|'],
+    ];
+    for (const [label, value] of valid) assert.ok(isDateCellValue(value), label);
+    for (const [label, value] of invalid) assert.ok(!isDateCellValue(value), label);
+    for (const [title, value] of [...valid, ...invalid, ['空', ''] as [string, string]]) {
+      const row = await instance.inject({ method: 'POST', url: `${base}/pages`, headers: write,
+        payload: { clientMutationId: randomUUID(), parentId: db.page.id, title, content: emptyContent, properties: {} } });
+      assert.equal(row.statusCode, 201, row.body);
+      // Stored directly, so values the API would refuse are still covered.
+      await pool.query('UPDATE pages SET row_properties = $2::jsonb, created_at = $3 WHERE id = $1',
+        [row.json().id, JSON.stringify(value ? { [date.id]: value } : {}), '2026-03-01T16:30:00.000Z']);
+    }
+    const doc = (await instance.inject({ method: 'GET', url: `${base}/databases/${db.page.id}`, headers: write })).json() as DatabaseDocument;
+    const titleOf = (id: string) => doc.rows.find(row => row.id === id)?.title;
+    const view = (filters: ViewFilterEntry[], sorts: ViewSort[]): DatabaseView => ({ id: randomUUID(), name: 'v', type: 'table', filters, sorts,
+      hiddenPropertyIds: [], propertyOrder: [], widths: {} });
+
+    let cases = 0;
+    for (const zone of ['Asia/Shanghai', 'America/New_York', 'UTC']) {
+      const context = { timeZone: zone, weekStart: 1 as const };
+      const check = async (label: string, filters: ViewFilterEntry[], sorts: ViewSort[], range?: DatabaseQueryRange) => {
+        const response = await instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/query`, headers: write,
+          payload: { filters, sorts, context, ...(range ? { range } : {}) } });
+        assert.equal(response.statusCode, 200, `${zone} ${label}: ${response.body}`);
+        const body = response.json() as DatabaseQueryResponse;
+        const expected = evaluateView(doc.rows, properties, view(filters, sorts), context, range).rows.map(row => row.title);
+        assert.deepEqual(body.order.map(titleOf), expected, `${zone} ${label}`);
+        cases += 1;
+      };
+      for (const def of [date, created_]) {
+        for (const operator of filterOperatorsFor(def.type)) {
+          const values = operatorNeedsValue(operator)
+            ? ['2026-03-01', '2026-03-02', '2026-02-28', '2026-02-26', '2026-03-05', '@today', '@this_month'] : [undefined];
+          for (const value of values) {
+            await check(`${def.name} ${operator} ${String(value)}`, [{ propertyId: def.id, operator, ...(value === undefined ? {} : { value }) }],
+              [{ propertyId: date.id, direction: 'asc' }]);
+          }
+        }
+      }
+      for (const direction of ['asc', 'desc'] as const) await check(`sort ${direction}`, [], [{ propertyId: date.id, direction }]);
+      const ranges: [string, string][] = [['2026-03-01', '2026-03-01'], ['2026-03-02', '2026-03-02'], ['2026-02-23', '2026-03-08'],
+        ['2026-03-01', '2026-03-31'], ['2026-02-01', '2026-02-28'], ['2026-06-01', '2026-06-30'], ['2024-01-01', '2024-01-31']];
+      for (const [from, to] of ranges) {
+        await check(`range ${from}..${to}`, [], [{ propertyId: date.id, direction: 'asc' }], { propertyId: date.id, from, to });
+        await check(`created range ${from}..${to}`, [], [], { propertyId: created_.id, from, to });
+      }
+      await check('range with filter', [{ propertyId: date.id, operator: 'gte', value: '2026-03-01' }], [],
+        { propertyId: date.id, from: '2026-02-23', to: '2026-03-08' });
+      await check('range on unknown property', [], [], { propertyId: randomUUID(), from: '2026-03-01', to: '2026-03-31' });
+    }
+    assert.ok(cases > 100, `only ${cases} cases`);
+
+    // The shanghai event lands on the next day in Shanghai and the same day in UTC.
+    const day = async (timeZone: string, value: string) => ((await instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/query`,
+      headers: write, payload: { filters: [{ propertyId: date.id, operator: 'equals', value }], sorts: [], context: { timeZone } } })).json() as DatabaseQueryResponse)
+      .order.map(titleOf);
+    assert.ok((await day('Asia/Shanghai', '2026-03-02')).includes('上海跨午夜'));
+    assert.ok(!(await day('UTC', '2026-03-02')).includes('上海跨午夜'));
+    assert.ok((await day('America/New_York', '2026-03-01')).includes('纽约跨午夜'));
+    assert.ok((await day('America/New_York', '2026-03-02')).includes('纽约跨午夜'));
+    assert.ok(!(await day('UTC', '2026-03-01')).includes('纽约跨午夜'));
+
+    const badRange = await instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/query`, headers: write,
+      payload: { filters: [], sorts: [], range: { propertyId: date.id, from: '2026-03-31', to: '2026-03-01' } } });
+    assert.equal(badRange.statusCode, 400);
   } finally {
     await app?.close();
     await pool?.end();

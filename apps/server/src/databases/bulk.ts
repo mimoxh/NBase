@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { databaseRowLimit, type DatabaseBulkRequest, type DatabaseBulkResponse, type PropertyDefinition, type RowProperties } from '@nbase/contracts';
 import type { PoolClient } from 'pg';
 import { extractDocumentIndex } from '../pages/search-text.js';
-import { PageError } from '../pages/repository.js';
+import { PageError, syncedFieldError } from '../pages/repository.js';
+import { changesKeptField, syncLock } from '../calendar/locks.js';
 import { markRowsChanged } from './computed.js';
 import { loadDatabaseSchema, mergeRowProperties, RowPropertiesError, rowIndexText, syncRelationLinks } from './schema.js';
 
@@ -38,8 +39,10 @@ export async function applyBulk(client: PoolClient, workspaceId: string, actorId
   if (!schema) throw new PageError(404, 'NOT_FOUND');
   const properties = schema.properties_json;
   const done = (rows: RowResult): DatabaseBulkResponse => ({ pageId: databaseId, rows });
+  const lock = await syncLock(client, workspaceId, databaseId);
 
   if (body.operation === 'create') {
+    if (body.rows.some(row => changesKeptField(lock, { title: row.title, properties: row.properties }))) throw syncedFieldError();
     await assertRoom(client, workspaceId, databaseId, body.rows.length);
     const values = body.rows.map(row => merge(properties, {}, row.properties));
     const inserted = await client.query<{ id: string; revision: string; updated_at: Date }>(`
@@ -68,6 +71,9 @@ export async function applyBulk(client: PoolClient, workspaceId: string, actorId
       const row = byId.get(item.id.toLowerCase());
       if (!row) return []; // Trashed meanwhile; the caller re-reads the view.
       if (item.revision !== undefined && item.revision !== row.revision) throw new PageError(409, 'REVISION_CONFLICT', row.revision);
+      if (changesKeptField(lock, { title: item.title, previousTitle: row.title, properties: item.properties, previous: row.row_properties })) {
+        throw syncedFieldError();
+      }
       const values = item.properties ? merge(properties, row.row_properties, item.properties) : row.row_properties;
       const search = item.properties && touchesSearch
         ? rowIndexText(extractDocumentIndex(row.content_json!).searchText, properties, values) : row.search_text;
@@ -96,6 +102,8 @@ export async function applyBulk(client: PoolClient, workspaceId: string, actorId
     return done(resultRows(trashed.rows));
   }
 
+  // A copy would carry the kept values of an event without being one, and could never be edited by hand.
+  if (lock) throw syncedFieldError();
   await assertRoom(client, workspaceId, databaseId, body.ids.length);
   const pairs = body.ids.map(id => ({ source: id.toLowerCase(), copy: randomUUID() }));
   const sources = pairs.map(pair => pair.source);

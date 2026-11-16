@@ -27,6 +27,7 @@ function tablesForSchema(version) {
     ...(version >= 13 ? { databases: 'workspace_id, page_id' } : {}),
     ...(version >= 16 ? { database_row_links: 'workspace_id, property_id, source_row_id, target_row_id' } : {}),
     ...(version >= 17 ? { database_computed: 'workspace_id, row_id', database_computed_dirty: 'workspace_id, row_id' } : {}),
+    ...(version >= 21 ? { calendar_settings: 'workspace_id, user_id', calendar_sync_sources: 'id', calendar_sync_items: 'source_id, uid' } : {}),
   };
 }
 const backupLock = '2026110301';

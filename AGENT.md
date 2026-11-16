@@ -22,6 +22,9 @@ NBase 采用 Web-first，React 网页通过同源 API 访问 Fastify 服务。�
 - `apps/web/src/api.ts`：网页健康请求、8 秒超时和响应契约校验；健康状态只说明进程连通。
 - `apps/web/src/styles.css`：全局入口，主题来自 `shell/shell.css`；编辑器局部样式在 `editor/editor.css`，颜色使用 `--nb-*` 变量，以适配深色模式。
 - `apps/web/vite.config.ts`：构建时分出 react、lexical 与 katex 三个 vendor chunk；不靠调高 `chunkSizeWarningLimit` 消除体积提示。
+- `apps/web/src/calendar/`：通用日历组件（月/周/日/日程），不依赖数据库实现，只收事件与回调。日期值语法、RRULE 子集、展开与单次编辑在 `packages/contracts/src/dateCells.ts`；拖动与拉伸在 `useEventDrag.ts`，重复事件改动经 `RecurrenceScopeDialog` 询问作用范围（仅此次/此次及以后/全部）。`DateEditor` 同时用于单元格、行属性和日历弹层。
+- `apps/web/src/workspaceCalendar/`：侧栏全局日历页，`persistentSource.ts` 走日历接口（写行带修订号，409 后刷新），`demoSource.ts` 走演示内存；来源/颜色/新建目标设置经 `GET|PUT /calendar/settings` 按账号保存；`SyncDialog.tsx` 管 `.ics` 导入（丢响应时用同一个 clientMutationId 重试）与订阅；提醒调度在 `apps/web/src/reminders/`（只在持久化工作台运行，BroadcastChannel + localStorage 跨标签去重）。
+- `apps/server/src/calendar/`：日历接口（来源、设置、事件、提醒、导入、订阅）、ICS 解析（`ics.ts`）与同步引擎；订阅抓取复用 `net/guardedFetch.ts` 的地址防护，`NBASE_CALENDAR_FETCH=off` 关闭；订阅保管的标题与字段只读（422 `property-synced`），来源保管的字段不能删或改类型。迁移 v21 建 `calendar_settings`、`calendar_sync_sources`、`calendar_sync_items`。
 - `apps/server/src/app.ts`：可注入测试的 Fastify 应用工厂、健康检查、可选账号/文档/附件路由、静态文件入口。
 - `apps/server/src/config.ts` / `index.ts`：共用数据库 URL 或独立字段/密码文件配置；先校验 origin 和附件目录、运行迁移，再监听。Docker 强制数据库配置，缺失时不能降级演示；`/api/ready` 检查数据库与附件读写，`/api/health` 保持存活契约。连接池处理空闲断连，关闭时释放资源。
 - `apps/server/src/db/`：PostgreSQL 连接迁移和 schema 版本校验；搜索旧数据回填与历史基线在迁移事务内完成，失败时启动失败。

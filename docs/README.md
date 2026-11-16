@@ -6,6 +6,7 @@
 | --- | --- |
 | [product/requirements.md](product/requirements.md) | 用户确认的场景、约束、长期目标、未决事项和历史取舍 |
 | [product/v1-documents.md](product/v1-documents.md) | 第一版文档功能边界、验收和不做项 |
+| [product/calendar.md](product/calendar.md) | 日历与外部日历同步需求（2026-11-16 确认，一期已交付） |
 | [product/editing-gaps-roadmap.md](product/editing-gaps-roadmap.md) | 编辑体验补齐计划 N16～N27（待确认提案） |
 | [architecture/decisions.md](architecture/decisions.md) | 技术选型、Web-first、数据与扩展边界、官方资料 |
 | [architecture/p2-api.md](architecture/p2-api.md) | P2 最小账号与后续文档 API 契约 |
@@ -15,6 +16,7 @@
 | [architecture/search.md](architecture/search.md) | 当前页面搜索索引、授权、查询与定位契约 |
 | [architecture/graph.md](architecture/graph.md) | 双链关系图接口、边界与布局 |
 | [architecture/whiteboards.md](architecture/whiteboards.md) | 白板数据契约、存储、渲染与已知缺口 |
+| [architecture/calendar.md](architecture/calendar.md) | 日历一期：日期值语法、重复规则、接口、ICS 导入与订阅边界 |
 | [architecture/export.md](architecture/export.md) | HTML 与 Word 导出的节点映射、限制与损失 |
 | [architecture/history-trash.md](architecture/history-trash.md) | 历史快照、回收站子树、修订恢复与本机重试记录 |
 | [architecture/deployment.md](architecture/deployment.md) | Docker 持久卷、秘密文件、启动/就绪检查、账号恢复与会话撤销 |

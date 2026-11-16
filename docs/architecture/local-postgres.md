@@ -67,3 +67,28 @@ npm run test:db --workspace @nbase/server
 ```
 
 注意两点：Claude 桌面应用的命令环境会把写入 `AppData\Local` 的文件重定向到应用包缓存，因此目录放在 `NBaseData`；从该命令环境用 `pg_ctl` 启动时，后端进程会以 `0xC0000142` 退出，须在普通终端启动。这个实例不能代替 Docker 维护镜像里的备份恢复演练。
+
+## 2026-11-17：便携 PostgreSQL（当前用户环境，npm 嵌入式包）
+
+上一节的 EDB 实例位于旧用户目录（`C:\Users\mimox`），当前机器用户为 `16617`，该目录不存在。本轮日历验收改用 npm 包 `@embedded-postgres/windows-x64@18.6.0-beta.19`（MIT）自带的 PostgreSQL 18.6 二进制，只用于可丢弃的测试数据。
+
+| 项目 | 配置 |
+| --- | --- |
+| 目录 | `C:\Users\16617\NBaseData\pg18`（`package\native\bin` 程序、`data` 数据），不在仓库和 OneDrive 内 |
+| 地址 | 只监听 `127.0.0.1:54329` |
+| 账号 | 超级用户与初始库均为 `nbase_p2`，随机密码在 `C:\Users\16617\NBaseData\pg18\superuser.password`，不进仓库 |
+| 说明 | 包内只含 `postgres.exe`、`initdb.exe`、`pg_ctl.exe`，没有 `psql` 等客户端；查询用仓库里的 `pg` 驱动跑 Node 脚本 |
+
+启动（后台运行即可，停止用 `pg_ctl stop -D <data>` 或结束进程）：
+
+```powershell
+& 'C:\Users\16617\NBaseData\pg18\package\native\bin\postgres.exe' -D 'C:\Users\16617\NBaseData\pg18\data'
+```
+
+```powershell
+$pw = Get-Content 'C:\Users\16617\NBaseData\pg18\superuser.password' -Raw
+$env:NBASE_TEST_DATABASE_URL = "postgres://nbase_p2:$pw@127.0.0.1:54329/nbase_p2"
+npm run test:db --workspace @nbase/server
+```
+
+注意：该进程依附启动它的终端，终端关闭会被一并结束；再次验收前用 `Test-NetConnection 127.0.0.1 -Port 54329` 确认还活着。这个实例不能代替 Docker 维护镜像里的备份恢复演练。

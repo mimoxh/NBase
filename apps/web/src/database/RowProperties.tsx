@@ -2,6 +2,7 @@ import { activeProperties, type DatabaseRow, type PropertyDefinition, type Prope
 import { EditableCell } from './cells';
 import { typeGlyphs } from './labels';
 import type { RelationHost } from './RelationEditor';
+import { syncedReadOnlyHint } from './sync';
 import './database.css';
 
 /**
@@ -9,7 +10,9 @@ import './database.css';
  * title property is left out here. Writes go through the host, which owns the page revision.
  */
 export function RowProperties({ row, properties, editable, pending, onChange, onCreateOption, onOpenDatabase, databaseTitle,
-  databaseIcon, relationHostFor }: {
+  databaseIcon, relationHostFor, locked }: {
+  /** Properties a calendar subscription writes; they only show. */
+  locked?: ReadonlySet<string> | undefined;
   relationHostFor?: ((def: PropertyDefinition) => RelationHost) | undefined;
   row: DatabaseRow;
   properties: PropertyDefinition[];
@@ -28,9 +31,10 @@ export function RowProperties({ row, properties, editable, pending, onChange, on
     {shown.map(def => <div key={def.id} className="nb-db-row-prop">
       <span className="nb-db-row-label"><span className="nb-db-glyph">{typeGlyphs[def.type]}</span>{def.name}</span>
       <span className="nb-db-anchor nb-db-row-value">
-        <EditableCell row={row} def={def} editable={editable} onTitle={() => undefined} relationHost={relationHostFor?.(def)}
+        <EditableCell row={row} def={def} editable={editable} locked={locked?.has(def.id)} onTitle={() => undefined} relationHost={relationHostFor?.(def)}
           onChange={value => onChange(def.id, value)}
           onCreateOption={editable && onCreateOption ? (name: string) => onCreateOption(def, name) : undefined} />
+        {editable && locked?.has(def.id) && <span className="nb-db-locked-hint">{syncedReadOnlyHint}</span>}
       </span>
     </div>)}
     {!shown.length && <p className="nb-db-empty-note">这个数据库还没有其他字段。</p>}

@@ -10,6 +10,8 @@ import { publicOriginConfig } from '../auth/session.js';
 import { authorizeWorkspace, WorkspaceRouteError } from '../auth/workspace.js';
 import { isRevision, isUuid, PageError, type PgPageRepository } from '../pages/repository.js';
 import { sendError } from '../pages/routes.js';
+import { managedPropertyIds } from '../calendar/locks.js';
+import { sourceForDatabase, toSyncSource } from '../calendar/sources.js';
 import { validatePageIcon } from '../pages/validate.js';
 import { applyBulk } from './bulk.js';
 import { markSchemaChanged } from './computed.js';
@@ -73,15 +75,17 @@ async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorI
   `, [workspaceId, actorId, pageId]);
   const head = page.rows[0];
   if (!head) return null;
+  const source = await sourceForDatabase(db, workspaceId, pageId);
+  const sync = source ? { calendarSync: toSyncSource(source) } : {};
   if (!withRows) return { page: pageSummary(head), properties: head.properties_json, views: head.views_json,
-    schemaRevision: head.schema_revision, rows: [] };
+    schemaRevision: head.schema_revision, rows: [], ...sync };
   const rows = await db.query<RowRecord>(`
     SELECT p.id, p.title, p.icon, p.row_properties, p.revision::text AS revision, p.created_at, p.updated_at, ${rowTagIdsColumn} FROM pages p
     WHERE p.workspace_id = $1 AND p.parent_id = $2 AND p.deleted_at IS NULL AND p.kind = 'row'
     ORDER BY p.sort_position, p.id LIMIT $3
   `, [workspaceId, pageId, wholeReadLimit]);
   return { page: pageSummary(head), properties: head.properties_json, views: head.views_json,
-    schemaRevision: head.schema_revision, rows: rows.rows.map(databaseRow) };
+    schemaRevision: head.schema_revision, rows: rows.rows.map(databaseRow), ...sync };
 }
 
 /** Up to this many rows are reindexed in the schema transaction; larger databases go to the background worker. */
@@ -261,10 +265,15 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
           if (current.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', current.revision);
           // Properties are only soft-deleted, and the title property keeps its identity.
           const next = new Map(body.properties.map(property => [property.id, property]));
+          // Fields a calendar source writes keep their type and stay, so the next sync still has a place to write.
+          const managed = await managedPropertyIds(client, workspaceId, pageId);
           for (const property of current.properties_json) {
             const replacement = next.get(property.id);
             if (!replacement || (property.type === 'title') !== (replacement.type === 'title')) {
               throw new PageError(422, 'DATABASE_SCHEMA_INVALID');
+            }
+            if (managed.has(property.id) && (replacement.type !== property.type || (replacement.deletedAt && !property.deletedAt))) {
+              throw new PageError(422, 'DATABASE_SCHEMA_INVALID', undefined, 'property-synced');
             }
           }
           if (!relationsUnchanged(current.properties_json, body.properties)) throw new PageError(422, 'DATABASE_SCHEMA_INVALID');

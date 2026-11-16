@@ -21,7 +21,7 @@ export function ViewTabs({ views, view, canWrite, canBoard, canCalendar, open, o
         {item.type === 'table' ? <Icon name="table" size={13} /> : <span aria-hidden="true">{viewGlyphs[item.type]}</span>}{item.name}</button>)}
     {canWrite && <span className="nb-db-anchor">
       <button className="nb-db-tool" aria-label="视图设置" onClick={onOpen}><Icon name="more" size={14} /></button>
-      {open && <Popover label="视图设置" className="nb-db-pop" onClose={onClose}>
+      {open && <Popover label="视图设置" className="nb-db-pop" portal width={220} onClose={onClose}>
         <div className="nb-db-menu">
           <button onClick={() => { setRenaming(view.id); onClose(); }}>重命名当前视图</button>
           <button disabled={views.length >= databaseViewLimit} onClick={() => { onAdd('table'); onClose(); }}>新建表格视图</button>

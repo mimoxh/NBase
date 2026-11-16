@@ -8,10 +8,10 @@ import type { RowStore } from './rowStore';
 const editable = (def: PropertyDefinition) => !['created_time', 'updated_time', 'relation', 'formula', 'rollup'].includes(def.type);
 
 /** Actions for the rows ticked in the table. */
-export function BulkBar({ store, properties, selected, onClear, canSort, notice }: {
-  store: RowStore; properties: PropertyDefinition[]; selected: ReadonlySet<string>; onClear: () => void; canSort: boolean; notice: (text: string) => void;
+export function BulkBar({ store, properties, locked, selected, onClear, canSort, notice }: {
+  store: RowStore; properties: PropertyDefinition[]; locked?: ReadonlySet<string> | undefined; selected: ReadonlySet<string>; onClear: () => void; canSort: boolean; notice: (text: string) => void;
 }) {
-  const fields = activeProperties(properties).filter(editable);
+  const fields = activeProperties(properties).filter(def => editable(def) && !locked?.has(def.id));
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [fieldId, setFieldId] = useState(fields[0]?.id ?? '');

@@ -1,4 +1,6 @@
 import type { PageSummary } from './pages.js';
+import type { CalendarSyncSource } from './calendar.js';
+import { dateCellDays, dateCellMayTouch, isCalendarDay, isDateCellValue, parseDateCell, type DayRange } from './dateCells.js';
 
 /**
  * Databases are pages whose children are row pages. The schema and views live in a
@@ -240,6 +242,8 @@ export interface DatabaseDocument {
   schemaRevision: string;
   /** Active rows in manual order. */
   rows: DatabaseRow[];
+  /** Present when a calendar import or subscription keeps this database. */
+  calendarSync?: CalendarSyncSource;
 }
 
 export interface CreateDatabaseRequest {
@@ -264,7 +268,6 @@ export interface DatabaseSchemaResponse {
 }
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 
 export function isDatabaseId(value: unknown): value is string {
   return typeof value === 'string' && uuidPattern.test(value);
@@ -283,10 +286,9 @@ function isIsoTime(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 40 && !Number.isNaN(Date.parse(value));
 }
 
+/** A plain calendar day. Date properties accept the wider grammar of `isDateCellValue`. */
 export function isDateValue(value: unknown): value is string {
-  if (typeof value !== 'string' || !datePattern.test(value)) return false;
-  const date = new Date(`${value}T00:00:00Z`);
-  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
+  return isCalendarDay(value);
 }
 
 export function isUrlValue(value: unknown): value is string {
@@ -341,7 +343,7 @@ export function isPropertyValue(type: PropertyType, value: unknown): value is Pr
     case 'select': return isDatabaseId(value);
     case 'multi_select': return Array.isArray(value) && value.length > 0 && value.length <= databaseMultiSelectLimit
       && value.every(isDatabaseId) && new Set(value).size === value.length;
-    case 'date': return isDateValue(value);
+    case 'date': return isDateCellValue(value);
     case 'checkbox': return value === true;
     case 'url': return isUrlValue(value);
     default: return false;
@@ -533,12 +535,39 @@ export function localDay(time: Date, timeZone?: string): string {
   return formatter.format(time);
 }
 
-/** Calendar day to compare. Page times are UTC instants, shown and filtered as the reader's local day. */
-function datePart(def: PropertyDefinition, value: PropertyValue, timeZone?: string): string {
-  if (effectiveType(def) === 'date') return String(value);
+/**
+ * Days a value covers for a reader. A date cell covers its first occurrence; page times are UTC instants,
+ * shown and filtered as the reader's local day.
+ */
+function dateSpan(def: PropertyDefinition, value: PropertyValue, timeZone?: string): DayRange | null {
+  if (effectiveType(def) === 'date') {
+    const cell = parseDateCell(value);
+    return cell ? dateCellDays(cell, timeZone) : null;
+  }
   const time = new Date(String(value));
-  if (Number.isNaN(time.getTime())) return String(value).slice(0, 10);
-  return localDay(time, timeZone);
+  const day = Number.isNaN(time.getTime()) ? String(value).slice(0, 10) : localDay(time, timeZone);
+  return { from: day, to: day };
+}
+
+/** Sort key of a date-like value: the start point of a date cell, the time itself otherwise. */
+function dateSortKey(def: PropertyDefinition, value: PropertyValue | undefined): string {
+  if (effectiveType(def) === 'date') return parseDateCell(value)?.start ?? String(value);
+  return String(value);
+}
+
+/**
+ * Whether a row belongs on a calendar showing the inclusive days. Date cells use `dateCellMayTouch`, so a
+ * recurring row is kept when the series may reach the range; the client expands its occurrences.
+ */
+export function rowInRange(row: DatabaseRow, def: PropertyDefinition, range: DayRange, timeZone?: string): boolean {
+  const value = cellValue(row, def);
+  if (value === undefined) return false;
+  if (effectiveType(def) === 'date') {
+    const cell = parseDateCell(value);
+    return cell !== null && dateCellMayTouch(cell, range, timeZone);
+  }
+  const span = dateSpan(def, value, timeZone);
+  return span !== null && span.from >= range.from && span.from <= range.to;
 }
 
 function shiftDay(day: string, days: number): string {
@@ -554,7 +583,6 @@ function monthRange(day: string, months: number): DayRange {
   return { from: from.toISOString().slice(0, 10), to: to.toISOString().slice(0, 10) };
 }
 
-export interface DayRange { from: string; to: string }
 
 /** The inclusive days a relative token covers, or null for an unknown token. */
 export function resolveRelativeDate(token: string, today: string, weekStart: 0 | 1 = 1): DayRange | null {
@@ -677,11 +705,13 @@ function matches(row: DatabaseRow, condition: ResolvedCondition, context: QueryC
       return op === 'contains' ? has : !has;
     }
     case 'date': case 'created_time': case 'updated_time': {
+      // A span matches when any of its days does: on a day if it overlaps it, after a day if it ends after it.
       if (value === undefined) return false;
-      const day = datePart(def, value, context.timeZone);
+      const span = dateSpan(def, value, context.timeZone);
+      if (!span) return false;
       const { from, to } = days!;
-      return op === 'equals' ? day >= from && day <= to : op === 'gt' ? day > to : op === 'gte' ? day >= from
-        : op === 'lt' ? day < from : op === 'lte' ? day <= to : true;
+      return op === 'equals' ? span.from <= to && span.to >= from : op === 'gt' ? span.to > to : op === 'gte' ? span.to >= from
+        : op === 'lt' ? span.from < from : op === 'lte' ? span.from <= to : true;
     }
     default: return true;
   }
@@ -706,8 +736,11 @@ function compare(a: DatabaseRow, b: DatabaseRow, def: PropertyDefinition): numbe
       };
       return rank(av) - rank(bv);
     }
-    case 'date': case 'created_time': case 'updated_time':
-      return String(av) < String(bv) ? -1 : String(av) > String(bv) ? 1 : 0;
+    case 'date': case 'created_time': case 'updated_time': {
+      const ak = dateSortKey(def, av);
+      const bk = dateSortKey(def, bv);
+      return ak < bk ? -1 : ak > bk ? 1 : 0;
+    }
     default: return collator.compare(cellText(a, def), cellText(b, def));
   }
 }
@@ -722,15 +755,18 @@ export interface EvaluatedView {
  * manual order when no sort applies; empty values sort last in both directions.
  */
 export function evaluateView(rows: DatabaseRow[], properties: PropertyDefinition[], view: DatabaseView,
-  context: QueryContext = {}): EvaluatedView {
+  context: QueryContext = {}, range?: DatabaseQueryRange): EvaluatedView {
   const active = new Map(activeProperties(properties).map(p => [p.id, p]));
   const groups = resolveFilters(view.filters, properties, context);
+  const rangeDef = range ? active.get(range.propertyId) : undefined;
+  const inRange = (row: DatabaseRow) => !range || (rangeDef !== undefined && isCalendarProperty(rangeDef)
+    && rowInRange(row, rangeDef, range, context.timeZone));
   const sorts = view.sorts.flatMap(sort => {
     const def = active.get(sort.propertyId);
     return def ? [{ sort, def }] : [];
   });
   const kept = rows.map((row, index) => ({ row, index }))
-    .filter(({ row }) => groups.every(group => group.some(condition => matches(row, condition, context))));
+    .filter(({ row }) => inRange(row) && groups.every(group => group.some(condition => matches(row, condition, context))));
   if (sorts.length) {
     kept.sort((x, y) => {
       for (const { sort, def } of sorts) {
@@ -779,7 +815,7 @@ export function aggregateRows(rows: DatabaseRow[], properties: PropertyDefinitio
       if (fn === 'avg') return numbers.reduce((a, b) => a + b, 0) / numbers.length;
       return fn === 'min' ? Math.min(...numbers) : Math.max(...numbers);
     }
-    const sorted = (values as string[]).slice().sort();
+    const sorted = values.map(value => dateSortKey(def, value)).sort();
     return fn === 'min' ? sorted[0]! : sorted.at(-1)!;
   });
 }
@@ -793,6 +829,18 @@ export interface DatabaseQueryRequest {
   context?: Pick<QueryContext, 'timeZone' | 'weekStart'>;
   /** Returns `groups` as well: rows split by this single-select or checkbox property. */
   groupBy?: string;
+  /** Calendar views: only rows that may show on these days, see `rowInRange`. */
+  range?: DatabaseQueryRange;
+}
+
+/** Inclusive days in the reader's zone, at most `databaseRangeDayLimit` apart. */
+export interface DatabaseQueryRange extends DayRange { propertyId: string }
+export const databaseRangeDayLimit = 400;
+
+function isQueryRange(value: unknown): value is DatabaseQueryRange {
+  if (!isRecord(value) || !hasOnly(value, ['propertyId', 'from', 'to']) || !isDatabaseId(value.propertyId)) return false;
+  if (!isCalendarDay(value.from) || !isCalendarDay(value.to) || value.to < value.from) return false;
+  return (Date.parse(`${value.to}T00:00:00Z`) - Date.parse(`${value.from}T00:00:00Z`)) / 86400000 < databaseRangeDayLimit;
 }
 
 /** A board column. `key` is an option id, 'true' or 'false', or null for rows with no group. */
@@ -894,7 +942,8 @@ export interface DatabaseRowsResponse { rows: DatabaseRow[] }
 
 /** Checks a query body; conditions naming unknown properties are ignored when run, like saved views. */
 export function isDatabaseQueryRequest(value: unknown): value is DatabaseQueryRequest {
-  if (!isRecord(value) || !hasOnly(value, ['filters', 'sorts', 'context', 'groupBy'])) return false;
+  if (!isRecord(value) || !hasOnly(value, ['filters', 'sorts', 'context', 'groupBy', 'range'])) return false;
+  if (value.range !== undefined && !isQueryRange(value.range)) return false;
   if (!Array.isArray(value.filters) || !Array.isArray(value.sorts)) return false;
   if (!value.filters.every(isFilterEntry) || !value.sorts.every(isSort)) return false;
   // A calendar adds its month range on top of a view's own conditions.

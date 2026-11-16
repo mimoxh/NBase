@@ -12,6 +12,7 @@ import { contentMatchesKind, isWhiteboardContent } from '../whiteboards/content.
 import { extractDocumentIndex, type IndexedPageReference } from './search-text.js';
 import { searchPages } from '../search/search.js';
 import { refreshPagePinyin } from '../search/write.js';
+import { changesKeptField, syncLock } from '../calendar/locks.js';
 
 const maxRevision = 9223372036854775807n;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -24,6 +25,11 @@ export function isRevision(value: unknown): value is string {
   return typeof value === 'string' && /^[1-9][0-9]{0,18}$/.test(value) && BigInt(value) <= maxRevision;
 }
 
+/** A hand edit of a field that a calendar subscription keeps. */
+export function syncedFieldError(): PageError {
+  return new PageError(422, 'PROPERTY_INVALID', undefined, 'property-synced');
+}
+
 export class PageError extends Error {
   constructor(
     public readonly statusCode: number,
@@ -32,10 +38,13 @@ export class PageError extends Error {
       | 'FAVORITE_LIMIT' | 'PAGE_POSITION_INVALID' | 'TAG_INVALID' | 'TAG_NAME_CONFLICT' | 'PAGE_REFERENCE_INVALID'
       | 'PAGE_KIND_INVALID' | 'PROPERTY_INVALID' | 'DATABASE_ROW_LIMIT' | 'DATABASE_SCHEMA_INVALID' | 'DATABASE_UNAVAILABLE',
     public readonly currentRevision?: string,
+    /** Finer cause sent along with the code, such as 'property-synced' for a field kept by a calendar subscription. */
+    public readonly reason?: string,
   ) { super(code); }
 
-  response(): { error: PageError['code']; currentRevision?: string } {
-    return this.currentRevision ? { error: this.code, currentRevision: this.currentRevision } : { error: this.code };
+  response(): { error: PageError['code']; currentRevision?: string; reason?: string } {
+    return { error: this.code, ...(this.currentRevision ? { currentRevision: this.currentRevision } : {}),
+      ...(this.reason ? { reason: this.reason } : {}) };
   }
 }
 
@@ -460,6 +469,9 @@ export class PgPageRepository {
         const count = await client.query<{ n: number }>(`SELECT count(*)::int AS n FROM pages
           WHERE workspace_id = $1 AND parent_id = $2 AND deleted_at IS NULL`, [workspaceId, body.parentId]);
         if ((count.rows[0]?.n ?? 0) >= databaseRowLimit) throw new PageError(409, 'DATABASE_ROW_LIMIT');
+        if (changesKeptField(await syncLock(client, workspaceId, body.parentId), { title: body.title, properties: body.properties })) {
+          throw syncedFieldError();
+        }
         rowProperties = this.mergeProperties(schema.properties_json, {}, body.properties ?? {});
         searchText = rowIndexText(index.searchText, schema.properties_json, rowProperties);
       }
@@ -562,12 +574,19 @@ export class PgPageRepository {
       // Values belong to the fields of the database they were entered in, so a row starts empty in a new one.
       const schema = await loadDatabaseSchema(client, workspaceId, joined);
       if (!schema) throw new PageError(422, 'DATABASE_UNAVAILABLE');
+      if (changesKeptField(await syncLock(client, workspaceId, joined), { title: body.title ?? row.title, properties: body.properties })) {
+        throw syncedFieldError();
+      }
       rowProperties = this.mergeProperties(schema.properties_json, {}, body.properties ?? {});
       searchText = rowIndexText(index?.searchText ?? extractDocumentIndex(row.content_json).searchText, schema.properties_json, rowProperties);
     } else if (left) {
       rowProperties = null;
       searchText = index?.searchText ?? extractDocumentIndex(row.content_json).searchText;
-    } else if (row.kind === 'row' && (index || body.properties)) {
+    }
+    if (!moving && row.kind === 'row' && row.parent_id && (body.title !== undefined || body.properties)
+      && changesKeptField(await syncLock(client, workspaceId, row.parent_id), { title: body.title, previousTitle: row.title,
+        properties: body.properties, previous: row.row_properties })) throw syncedFieldError();
+    if (!joined && !left && row.kind === 'row' && (index || body.properties)) {
       const schema = row.parent_id ? await loadDatabaseSchema(client, workspaceId, row.parent_id) : null;
       if (!schema) throw new PageError(422, 'DATABASE_UNAVAILABLE');
       if (body.properties) rowProperties = this.mergeProperties(schema.properties_json, row.row_properties ?? {}, body.properties);
@@ -725,6 +744,11 @@ export class PgPageRepository {
         const schema = current.parent_id ? await loadDatabaseSchema(client, workspaceId, current.parent_id) : null;
         if (!schema) throw new PageError(422, 'DATABASE_UNAVAILABLE');
         rowProperties = version.row_properties ?? current.row_properties ?? {};
+        const lock = current.parent_id ? await syncLock(client, workspaceId, current.parent_id) : null;
+        const kept = Object.fromEntries([...lock?.propertyIds ?? []].map(id => [id, rowProperties?.[id] ?? null]));
+        if (changesKeptField(lock, { title: version.title, previousTitle: current.title, properties: kept, previous: current.row_properties })) {
+          throw syncedFieldError();
+        }
         searchText = rowIndexText(index.searchText, schema.properties_json, rowProperties);
       }
       // Restore title/body (and row values) and retain the current page metadata.

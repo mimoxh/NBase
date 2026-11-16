@@ -362,7 +362,7 @@ test('isolated PostgreSQL page path protects identity, revisions and retries', {
     assert.equal(spoofed.statusCode, 415);
     const tooLarge = await app.inject({ method: 'PUT',
       url: `${base}/attachments/${randomUUID()}?name=large.png`, headers: uploadHeaders,
-      payload: Buffer.alloc(10 * 1024 * 1024 + 1) });
+      payload: Buffer.concat([png, Buffer.alloc(10 * 1024 * 1024 + 1 - png.length)]) });
     assert.equal(tooLarge.statusCode, 413);
     const noAccess = await app.inject({ method: 'GET', url: `${base}/attachments/${attachmentId}/content` });
     assert.equal(noAccess.statusCode, 401);

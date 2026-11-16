@@ -1,4 +1,5 @@
-import { cellText, isDateValue, isUrlValue, type DatabaseRow, type PropertyDefinition, type PropertyValue } from '@nbase/contracts';
+import { parseDateText } from '../../calendar/parse';
+import { cellText, isUrlValue, type DatabaseRow, type PropertyDefinition, type PropertyValue } from '@nbase/contracts';
 
 /** Text for the clipboard. Tabs and line breaks inside a cell become spaces, so the block stays a rectangle. */
 export function toTsv(grid: string[][]): string {
@@ -31,13 +32,6 @@ export function cellClipboardText(row: DatabaseRow, def: PropertyDefinition): st
   return cellText(row, def);
 }
 
-function parseDate(text: string): string | null {
-  const match = /^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/.exec(text);
-  if (!match) return null;
-  const value = `${match[1]}-${match[2]!.padStart(2, '0')}-${match[3]!.padStart(2, '0')}`;
-  return isDateValue(value) ? value : null;
-}
-
 const trueWords = new Set(['✓', '√', 'true', 'yes', 'y', '1', '是', '勾选', '已勾选']);
 const falseWords = new Set(['', 'false', 'no', 'n', '0', '否', '未勾选']);
 
@@ -58,7 +52,7 @@ export function parseCellText(def: PropertyDefinition, raw: string): ParsedCell 
       const number = Number(text.replace(/[,，\s]/g, ''));
       return Number.isFinite(number) ? { ok: true, value: number } : { ok: false };
     }
-    case 'date': { const value = parseDate(text); return value ? { ok: true, value } : { ok: false }; }
+    case 'date': { const value = parseDateText(text); return value ? { ok: true, value } : { ok: false }; }
     case 'url': {
       const value = /^[a-z][a-z\d+.-]*:/i.test(text) ? text : `https://${text}`;
       return isUrlValue(value) ? { ok: true, value } : { ok: false };

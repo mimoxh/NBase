@@ -17,6 +17,8 @@ function headers(reply: FastifyReply): void {
 
 function failure(request: FastifyRequest, reply: FastifyReply, error: unknown, secure: boolean) {
   headers(reply);
+  // The content route may already have set the file's media type; errors are JSON.
+  reply.removeHeader('Content-Type');
   if (error instanceof WorkspaceRouteError) {
     if (error.clearCookie) reply.header('Set-Cookie', clearSessionCookie(secure));
     return reply.code(error.statusCode).send({ error: error.code });

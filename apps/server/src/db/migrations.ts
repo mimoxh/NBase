@@ -434,4 +434,70 @@ ALTER TABLE pages DROP CONSTRAINT pages_kind;
 ALTER TABLE pages ADD CONSTRAINT pages_kind CHECK (kind IN ('document', 'database', 'row', 'whiteboard'));
 `,
   },
+  {
+    version: 21,
+    name: 'calendar',
+    sql: `
+-- Workspace calendar preferences per account (docs/architecture/calendar.md); the last write wins.
+CREATE TABLE calendar_settings (
+  workspace_id uuid NOT NULL,
+  user_id uuid NOT NULL,
+  settings_json jsonb NOT NULL CHECK (jsonb_typeof(settings_json) = 'object'),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, user_id),
+  FOREIGN KEY (workspace_id, user_id) REFERENCES workspace_memberships (workspace_id, user_id) ON DELETE RESTRICT
+);
+
+-- A database kept by an .ics import or subscription. The URL may hold a secret and is never returned.
+CREATE TABLE calendar_sync_sources (
+  id uuid PRIMARY KEY,
+  workspace_id uuid NOT NULL,
+  database_id uuid NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('ics-file', 'ics-url')),
+  name text NOT NULL CHECK (char_length(name) BETWEEN 1 AND 100),
+  url text CHECK (url IS NULL OR char_length(url) BETWEEN 1 AND 2000),
+  interval_minutes integer CHECK (interval_minutes IS NULL OR interval_minutes BETWEEN 15 AND 1440),
+  fields_json jsonb NOT NULL CHECK (jsonb_typeof(fields_json) = 'object'),
+  status text NOT NULL DEFAULT 'idle' CHECK (status IN ('idle', 'running', 'error')),
+  running_since timestamptz,
+  last_synced_at timestamptz,
+  last_error text CHECK (last_error IS NULL OR char_length(last_error) BETWEEN 1 AND 32),
+  last_counts_json jsonb CHECK (last_counts_json IS NULL OR jsonb_typeof(last_counts_json) = 'object'),
+  warnings_json jsonb NOT NULL DEFAULT '[]' CHECK (jsonb_typeof(warnings_json) = 'array'),
+  event_count integer NOT NULL DEFAULT 0 CHECK (event_count >= 0),
+  next_run_at timestamptz,
+  http_etag text CHECK (http_etag IS NULL OR char_length(http_etag) <= 512),
+  http_last_modified text CHECK (http_last_modified IS NULL OR char_length(http_last_modified) <= 100),
+  created_by uuid NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
+  client_mutation_id uuid NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (workspace_id, id),
+  UNIQUE (workspace_id, database_id),
+  UNIQUE (workspace_id, created_by, client_mutation_id),
+  FOREIGN KEY (workspace_id, database_id) REFERENCES databases (workspace_id, page_id) ON DELETE RESTRICT,
+  CONSTRAINT calendar_sync_sources_subscription CHECK (
+    (kind = 'ics-url') = (url IS NOT NULL) AND (kind = 'ics-url') = (interval_minutes IS NOT NULL)),
+  CONSTRAINT calendar_sync_sources_running CHECK ((status = 'running') = (running_since IS NOT NULL))
+);
+CREATE INDEX calendar_sync_sources_due_idx ON calendar_sync_sources (next_run_at) WHERE kind = 'ics-url';
+
+-- One row per external event: the row it was written to, that row's revision right after, and a content digest.
+CREATE TABLE calendar_sync_items (
+  workspace_id uuid NOT NULL,
+  source_id uuid NOT NULL,
+  uid text COLLATE "C" NOT NULL CHECK (char_length(uid) BETWEEN 1 AND 1000),
+  row_id uuid NOT NULL,
+  synced_revision bigint NOT NULL CHECK (synced_revision > 0),
+  content_hash bytea NOT NULL CHECK (octet_length(content_hash) = 32),
+  -- Set when a subscription no longer lists the event and its row went to the trash.
+  removed_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (source_id, uid),
+  FOREIGN KEY (workspace_id, source_id) REFERENCES calendar_sync_sources (workspace_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, row_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT
+);
+CREATE INDEX calendar_sync_items_row_idx ON calendar_sync_items (workspace_id, row_id);
+`,
+  },
 ];

@@ -32,6 +32,9 @@ import { PageBacklinks } from './PageBacklinks';
 import { RowChildPages } from './RowChildPages';
 import { LazyGraphDialog, LazyLocalGraph, useGraphShortcut } from '../graph/lazy';
 import { createPersistentGraphSource } from '../graph/persistentSource';
+import { LazyWorkspaceCalendar } from '../workspaceCalendar/lazy';
+import { createPersistentCalendarSource } from '../workspaceCalendar/persistentSource';
+import { startReminderRunner } from '../reminders/runner';
 import { FolderImportDialog } from './FolderImportDialog';
 import { resolveImportTags } from './importTags';
 import { CopyNoteDialog, NewNoteDialog, TemplateManagerDialog } from './NoteTemplateDialogs';
@@ -96,6 +99,8 @@ export function PersistentWorkspace() {
   const [dialog, setDialog] = useState<'source' | 'import' | 'move' | 'search' | 'history' | 'trash' | 'delete' |
     'new' | 'templates' | 'copy' | 'tags' | 'today' | 'quick-capture' | 'settings' | 'folder-import' | 'graph' | null>(null);
   const [newParent, setNewParent] = useState<string | null>(null);
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  const [dailyNoteDate, setDailyNoteDate] = useState<string | undefined>(undefined);
   const [copyPreparing, setCopyPreparing] = useState(false);
   const [noteDialogError, setNoteDialogError] = useState('');
   const [templateSource, setTemplateSource] = useState<{ title: string; content: StoredDocumentContent }>();
@@ -264,6 +269,7 @@ export function PersistentWorkspace() {
 
   const openPage = useCallback(async (pageId: string, force = false) => {
     if (!session || !workspace) return false;
+    setCalendarOpen(false);
     if (pendingBacklinkRef.current?.link.sourcePageId !== pageId) pendingBacklinkRef.current = null;
     const previousId = activeIdRef.current;
     if (!force && previousId === pageId && editorRef.current) return true;
@@ -683,6 +689,30 @@ export function PersistentWorkspace() {
       return false;
     }
   };
+  const updatePageMetaRef = useRef(updatePageMeta);
+  updatePageMetaRef.current = updatePageMeta;
+  const calendarTimeZone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', []);
+  const calendarSource = useMemo(() => session && workspace ? createPersistentCalendarSource({
+    workspaceId: workspace.id, csrfToken: session.csrfToken, canWrite: canWrite && !readOnly,
+    context: { timeZone: calendarTimeZone, weekStart: 1 },
+    notice: setNotice,
+    openRow: id => void openPageRef.current(id),
+    openDailyNote: (date, pageId) => {
+      if (pageId) { void openPageRef.current(pageId); return; }
+      setDailyNoteDate(date); setDialog('today');
+    },
+    isRowOpen: id => activeIdRef.current === id,
+    writeOpenRowDate: (id, propertyId, value) => updatePageMetaRef.current(id, { properties: { [propertyId]: value } }, ''),
+    onDatabaseChanged: id => announceDatabaseChange(id),
+  }) : null, [session, workspace, canWrite, readOnly, calendarTimeZone]);
+  const calendarParents = useMemo(() => pages.filter(page => (page.kind ?? 'document') === 'document')
+    .map(page => ({ id: page.id, title: page.title })), [pages]);
+
+  useEffect(() => {
+    if (!session || !workspace || sessionPhase !== 'ready') return;
+    return startReminderRunner({ workspaceId: workspace.id, csrfToken: session.csrfToken,
+      openRow: id => void openPageRef.current(id), toast: setNotice });
+  }, [session, workspace, sessionPhase]);
 
   /** Rows of the open row page are written here so the page's revision stays in step with its body saves. */
   const [rowSaving, setRowSaving] = useState(false);
@@ -1066,8 +1096,9 @@ export function PersistentWorkspace() {
       theme={theme} onTheme={setTheme} onLogout={() => void logout()}
       onSearch={() => setDialog('search')} onTrash={() => openTrash()}
       noteActions={<>
+        <button className="nb-nav-row" onClick={() => setCalendarOpen(open => !open)}><Icon name="calendar" size={15} /><span>日历</span></button>
         <button className="nb-nav-row" onClick={() => setDialog('graph')}><Icon name="link" size={15} /><span>关系图</span></button>
-        <button className="nb-nav-row" onClick={() => setDialog('today')}><Icon name="clock" size={15} /><span>今天</span></button>
+        <button className="nb-nav-row" onClick={() => { setDailyNoteDate(undefined); setDialog('today'); }}><Icon name="clock" size={15} /><span>今天</span></button>
         {canWrite && <>
           <button className="nb-nav-row" disabled={!noteWrites.ready} onClick={() => setDialog('quick-capture')}><Icon name="plus" size={15} /><span>快速记录</span></button>
           <button className="nb-nav-row" onClick={() => openTemplates()}><Icon name="page" size={15} /><span>笔记模板</span></button>
@@ -1084,7 +1115,7 @@ export function PersistentWorkspace() {
       treeLoading={treeLoading} treeError={treeError} onTreeRetry={() => void reloadTree(session)}
       treeActions={treeActions} open={mobileOpen} onClose={() => setMobileOpen(false)} />
     <section className="nb-main">
-      {activeId && <Topbar status={saveStatus} hasDraft={Boolean(current && draftsRef.current.has(current.id))}
+      {!calendarOpen && activeId && <Topbar status={saveStatus} hasDraft={Boolean(current && draftsRef.current.has(current.id))}
         onRetrySave={() => { if (current) void savePage(current.id); }} onDownload={exportCurrent}
         breadcrumbs={ancestors} currentTitle={title} updatedAt={current?.updatedAt ?? null}
         favorite={Boolean(activeId && favoriteSet.has(activeId))} onFavorite={() => { if (activeId) void toggleFavorite(activeId); }}
@@ -1092,9 +1123,12 @@ export function PersistentWorkspace() {
         onOpenBreadcrumb={id => { if (id) void openPage(id); else leaveCurrent(); }}
         readOnly={readOnly} onToggleReadOnly={() => setReadOnly(!readOnly)}
         onHistory={() => setDialog('history')} hideHistory={current?.kind === 'database'} disabled={currentLocked} pageMenuItems={pageMenuItems} />}
-      {!activeId && <header className="nb-topbar">
+      {!calendarOpen && !activeId && <header className="nb-topbar">
         <button className="icon-button nb-sidebar-toggle" aria-label="切换导航" onClick={toggleSidebar}><Icon name="sidebar" size={17} /></button>
         <nav className="nb-crumbs" aria-label="页面位置"><strong>工作台</strong></nav></header>}
+      {calendarOpen && <header className="nb-topbar">
+        <button className="icon-button nb-sidebar-toggle" aria-label="切换导航" onClick={toggleSidebar}><Icon name="sidebar" size={17} /></button>
+        <nav className="nb-crumbs" aria-label="页面位置"><strong>日历</strong></nav></header>}
       <WorkspaceNotices activeId={activeId} actionStorageError={actionStorageError} pendingActions={pendingActions} pageActionBusy={pageActionBusy}
         performPageAction={performPageAction} pendingCreates={pendingCreates} createBusy={createBusy} performCreate={performCreate}
         untrackPendingCreate={untrackPendingCreate} reloadWorkspaceTree={() => void reloadTree(session)} noteWrites={noteWrites} canWrite={canWrite}
@@ -1102,7 +1136,9 @@ export function PersistentWorkspace() {
         reauth={reauth} setShowReauthForm={setShowReauthForm} current={current} exportCurrent={exportCurrent} otherDraft={otherDraft}
         draftsRef={draftsRef} recoverOtherDraft={recoverOtherDraft} setNotice={setNotice} />
       <main className="nb-scroll">
-        {activeId ? loadingPage ? <div className="nb-home" role="status">正在读取页面…</div>
+        {calendarOpen && calendarSource ? <LazyWorkspaceCalendar source={calendarSource} timeZone={calendarTimeZone} weekStart={1}
+          parents={calendarParents} />
+          : activeId ? loadingPage ? <div className="nb-home" role="status">正在读取页面…</div>
           : conflict ? <ConflictCard conflict={conflict} conflictMarkdown={conflictMarkdown} createBusy={createBusy} onDownload={exportCurrent}
             onSaveCopy={() => void createPage(conflict.server.parentId, `${conflict.draft.title || '未命名页面'}（冲突副本）`, conflict.draft.content, conflict.draft)} />
           : current && current.kind === 'whiteboard' ? <div className="wb-host">
@@ -1234,8 +1270,8 @@ export function PersistentWorkspace() {
     {dialog === 'tags' && workspace && canWrite && <TagManagerDialog tags={tags} workspaceId={workspace.id} csrfToken={session.csrfToken}
       onChanged={async () => { await Promise.all([refreshTags(), reloadTree(session)]); }} onClose={() => setDialog(null)}
       onAuthError={() => { setDialog(null); setReauth(true); setShowReauthForm(true); }} />}
-    {dailyMode && workspace && <DailyNoteDialog workspaceId={workspace.id} mode={dailyMode} templates={templates} parents={pages}
-      readOnly={!canWrite || !noteWrites.ready} onClose={() => setDialog(null)}
+    {dailyMode && workspace && <DailyNoteDialog workspaceId={workspace.id} mode={dailyMode} initialDate={dailyNoteDate} templates={templates} parents={pages}
+      readOnly={!canWrite || !noteWrites.ready} onClose={() => { setDialog(null); setDailyNoteDate(undefined); }}
       onOpenPage={async id => { if (!await openPage(id)) throw new Error('页面暂时无法打开。'); }}
       onRestorePage={id => openTrash(id)} onCreate={openDailyNote} onCapture={quickCapture} onSaveSettings={saveDailySettings} />}
     {dialog === 'delete' && current && <TrashPageDialog title={title} childCount={subtreeIds(pages, current.id).length - 1} busy={pageActionBusy}

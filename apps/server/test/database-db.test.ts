@@ -104,9 +104,25 @@ test('databases keep schema, rows, history and trash consistent', {
     const conflict = await inject({ method: 'PATCH', url: `${base}/pages/${row.id}`, headers: write, payload: {
       clientMutationId: randomUUID(), expectedRevision: row.revision, properties: { [note.id]: null } } });
     assert.equal(conflict.statusCode, 409);
-    const moveOut = await inject({ method: 'PATCH', url: `${base}/pages/${row.id}`, headers: write, payload: {
-      clientMutationId: randomUUID(), expectedRevision: patched.json().revision, parentId: null } });
-    assert.equal(moveOut.statusCode, 422);
+    // Rows can move out and become plain pages; a page moved in starts with empty values.
+    const mover = await inject({ method: 'POST', url: `${base}/pages`, headers: write, payload: {
+      clientMutationId: randomUUID(), parentId: db.page.id, title: '搬家', content: content(''),
+      properties: { [status.id]: status.options![0]!.id } } });
+    assert.equal(mover.statusCode, 201, mover.body);
+    const moveOut = await inject({ method: 'PATCH', url: `${base}/pages/${mover.json().id}`, headers: write, payload: {
+      clientMutationId: randomUUID(), expectedRevision: mover.json().revision, parentId: null } });
+    assert.equal(moveOut.statusCode, 200, moveOut.body);
+    assert.equal(moveOut.json().kind, 'document');
+    assert.equal(moveOut.json().properties, undefined);
+    const moveBack = await inject({ method: 'PATCH', url: `${base}/pages/${mover.json().id}`, headers: write, payload: {
+      clientMutationId: randomUUID(), expectedRevision: moveOut.json().revision, parentId: db.page.id } });
+    assert.equal(moveBack.statusCode, 200, moveBack.body);
+    assert.equal(moveBack.json().kind, 'row');
+    assert.deepEqual(moveBack.json().properties, {});
+    const trashMover = await inject({ method: 'POST', url: `${base}/pages/${mover.json().id}/trash`, headers: write, payload: {
+      clientMutationId: randomUUID(), expectedRevision: moveBack.json().revision } });
+    assert.equal(trashMover.statusCode, 200, trashMover.body);
+    // A page cannot move into its own descendant's database.
     const moveIn = await inject({ method: 'PATCH', url: `${base}/pages/${parent.json().id}`, headers: write, payload: {
       clientMutationId: randomUUID(), expectedRevision: parent.json().revision, parentId: db.page.id } });
     assert.equal(moveIn.statusCode, 422);
@@ -166,7 +182,7 @@ test('databases keep schema, rows, history and trash consistent', {
     // Rows that leave with their database keep their revision, take no snapshot and stay out of the trash list.
     assert.equal(trashedRow.json().revision, restored.json().revision);
     const trashList = await inject({ method: 'GET', url: `${base}/trash`, headers: read });
-    assert.deepEqual(trashList.json().pages.map((p: { id: string }) => p.id), [db.page.id]);
+    assert.deepEqual(trashList.json().pages.map((p: { id: string }) => p.id).sort(), [db.page.id, mover.json().id].sort());
     const lonely = await inject({ method: 'POST', url: `${base}/pages/${row.id}/restore`, headers: write,
       payload: { clientMutationId: randomUUID(), expectedRevision: trashedRow.json().revision } });
     assert.equal(lonely.statusCode, 409);

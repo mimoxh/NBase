@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { cellValue, effectiveType, isComputedProperty, isUrlValue, type DatabaseRow, type PropertyDefinition, type PropertyValue,
   type SelectOption } from '@nbase/contracts';
+import { DateEditor } from '../calendar/DateEditor';
+import { DateText } from '../calendar/DateText';
 import { Popover } from '../components/Popover';
 import { formatNumber, formatTimestamp } from './labels';
 import { RelationEditor, type RelationHost } from './RelationEditor';
+import { syncedReadOnlyHint } from './sync';
 import { tagNames, useDatabaseTags } from './tags';
 
 export function OptionTag({ option }: { option: SelectOption }) {
@@ -36,6 +39,7 @@ export function CellValue({ row, def }: { row: DatabaseRow; def: PropertyDefinit
       .filter((option): option is SelectOption => Boolean(option)).map(option => <OptionTag key={option.id} option={option} />)}</span>;
     case 'url': return <a className="nb-db-link" href={String(value)} target="_blank" rel="noreferrer noopener"
       onClick={event => event.stopPropagation()}>{String(value).replace(/^https?:\/\//, '')}</a>;
+    case 'date': return <DateText value={String(value)} />;
     case 'created_time': case 'updated_time': return <span className="nb-db-muted">{formatTimestamp(String(value))}</span>;
     default: return <span className="nb-db-text">{String(value)}</span>;
   }
@@ -56,7 +60,7 @@ export function takeCellEditSeed(): string | null {
 }
 
 function TextInput({ initial, type = 'text', onCommit, onCancel, onNavigate, label }: {
-  initial: string; type?: 'text' | 'number' | 'url' | 'date'; label: string;
+  initial: string; type?: 'text' | 'number' | 'url'; label: string;
   onCommit: (value: string) => void; onCancel: () => void; onNavigate?: ((direction: CellNavigation) => void) | undefined;
 }) {
   const [value, setValue] = useState(() => takeCellEditSeed() ?? initial);
@@ -126,10 +130,11 @@ export function SelectEditor({ def, value, multiple, onChange, onCreateOption, o
 
 /**
  * Click-to-edit cell. Checkbox toggles at once; text-like types use an inline input; select
- * types open a picker. Values reach `onChange` already typed; null clears the cell.
+ * types open a picker; dates open the date editor. Values reach `onChange` already typed; null clears the cell.
+ * A `locked` cell is written by a calendar subscription and only shows its value.
  */
-export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOption, onNavigate, relationHost }: {
-  row: DatabaseRow; def: PropertyDefinition; editable: boolean;
+export function EditableCell({ row, def, editable, locked = false, onChange, onTitle, onCreateOption, onNavigate, relationHost }: {
+  row: DatabaseRow; def: PropertyDefinition; editable: boolean; locked?: boolean | undefined;
   relationHost?: RelationHost | undefined;
   onChange: (value: PropertyValue | null) => void;
   onTitle: (title: string) => void;
@@ -143,6 +148,7 @@ export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOp
   const readOnlyType = def.type === 'created_time' || def.type === 'updated_time' || isComputedProperty(def)
     || (def.type === 'tags' && !tagHost?.setRowTags);
   const value = cellValue(row, def);
+  if (editable && locked) return <span className="nb-db-locked" title={syncedReadOnlyHint} aria-label={`${def.name}，${syncedReadOnlyHint}`}><CellValue row={row} def={def} /></span>;
   if (!editable || readOnlyType || (def.type === 'relation' && !relationHost)) return <CellValue row={row} def={def} />;
   if (def.type === 'relation') {
     return <>
@@ -177,9 +183,20 @@ export function EditableCell({ row, def, editable, onChange, onTitle, onCreateOp
         onChange={next => onChange(def.type === 'select' ? next[0] ?? null : next.length ? next : null)} />}
     </>;
   }
+  if (def.type === 'date') {
+    return <>
+      <button className="nb-db-cell-button" aria-label={`编辑${def.name}`} onClick={() => setEditing(true)}>
+        <CellValue row={row} def={def} />
+        {invalid && <span className="nb-db-invalid" role="alert">{invalid}</span>}
+      </button>
+      {editing && <DateEditor value={value === undefined || value === null || value === '' ? null : String(value)} label={def.name}
+        className="nb-db-pop nb-cal-pop" seed={takeCellEditSeed} onCommit={onChange} onInvalid={setInvalid}
+        onClose={() => { setEditing(false); onNavigate?.('stay'); }} />}
+    </>;
+  }
   if (editing) {
     const initial = value === undefined ? '' : String(value);
-    const type = def.type === 'number' ? 'number' : def.type === 'date' ? 'date' : def.type === 'url' ? 'url' : 'text';
+    const type = def.type === 'number' ? 'number' : def.type === 'url' ? 'url' : 'text';
     return <TextInput initial={initial} type={type} label={def.name} onNavigate={onNavigate} onCancel={() => setEditing(false)} onCommit={text => {
       setEditing(false);
       const trimmed = def.type === 'title' ? text : text.trim();

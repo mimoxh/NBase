@@ -1,3 +1,4 @@
+import { parseDateCell, zonedDay } from './dateCells.js';
 import { activeProperties, cellText, cellValue, effectiveType, type DatabaseRow, type PropertyDefinition, type PropertyValue, type RollupFunction } from './databases.js';
 
 /**
@@ -109,7 +110,12 @@ function referenced(def: PropertyDefinition): { type: FormulaType; read: (row: D
   switch (def.type) {
     case 'number': return { type: 'number', read: row => { const value = cellValue(row, def); return typeof value === 'number' ? value : null; } };
     case 'checkbox': return { type: 'checkbox', read: row => cellValue(row, def) === true };
-    case 'date': return { type: 'date', read: row => { const value = cellValue(row, def); return typeof value === 'string' ? value : null; } };
+    // The start day of a date cell; a timed start counts in the zone it was written in, since the cache has no reader.
+    case 'date': return { type: 'date', read: row => {
+      const cell = parseDateCell(cellValue(row, def));
+      if (!cell) return null;
+      return cell.allDay ? cell.start : zonedDay(Date.parse(cell.start), cell.timeZone ?? 'UTC');
+    } };
     case 'created_time': case 'updated_time': return { type: 'date', read: row => {
       const value = cellValue(row, def);
       const time = typeof value === 'string' ? Date.parse(value) : Number.NaN;

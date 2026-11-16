@@ -5,6 +5,7 @@ import { Popover } from '../../components/Popover';
 import { EditableCell } from '../cells';
 import { HeaderMenu } from '../HeaderMenu';
 import { creatableTypes, typeGlyphs, typeLabels } from '../labels';
+import { lockedPropertyIds } from '../sync';
 import type { Panel } from '../panel';
 import type { RowStore } from '../rowStore';
 import type { DatabaseDataSource, DatabaseState } from '../source';
@@ -35,7 +36,8 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
   const { anchor, start, end } = useWindowedRows(rowCount, windowed);
   useEffect(() => { store.ensure(start, end); }, [store, start, end, store.order]);
   const rootRef = useRef<HTMLDivElement>(null);
-  const grid = useGrid({ store, columns, rowCount, canWrite, notice: source.notice, rootRef, bodyRef: anchor });
+  const locked = lockedPropertyIds(state.doc);
+  const grid = useGrid({ store, columns, rowCount, canWrite, locked, notice: source.notice, rootRef, bodyRef: anchor });
   const lastTicked = useRef<number | null>(null);
   const tick = (index: number, id: string, shift: boolean) => {
     const next = new Set(selected);
@@ -143,7 +145,7 @@ export function TableView({ source, state, store, view, columns, rowCount, windo
               onMouseDown={event => grid.cellMouseDown(event, point)} onMouseEnter={event => grid.cellMouseEnter(event, point)}
               className={`nb-db-cell nb-db-type-${def.type} ${frozenClass(col)} ${store.pending.has(pendingKey) ? 'pending' : ''} ${inRange(index, col) ? 'nb-db-in-range' : ''} ${cursor ? 'nb-db-cursor' : ''}`}>
               <span className="nb-db-anchor nb-db-cell-inner">
-                <EditableCell row={row} def={def} editable={canWrite} onNavigate={grid.navigate}
+                <EditableCell row={row} def={def} editable={canWrite} locked={locked.has(def.id)} onNavigate={grid.navigate}
                   relationHost={{ source, databaseId: store.databaseId, change: (add, remove) => store.changeRelation(row.id, def.id, add, remove) }}
                   onChange={value => onCell(row, def, value)}
                   onTitle={title => void store.updateRow(row.id, { title: title.slice(0, 255) })}

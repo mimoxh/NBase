@@ -116,7 +116,7 @@ export function createDemoSource(options: {
       const all = rowsOf(id);
       const view: DatabaseView = { id: 'query', name: 'query', type: 'table', filters: request.filters, sorts: request.sorts,
         hiddenPropertyIds: [], propertyOrder: [], widths: {} };
-      const matching = evaluateView(all, schema.properties, view, request.context ?? {}).rows;
+      const matching = evaluateView(all, schema.properties, view, request.context ?? {}, request.range).rows;
       const groupDef = schema.properties.find(p => p.id === request.groupBy && !p.deletedAt && isGroupableProperty(p));
       return structuredClone({ order: matching.map(row => row.id), total: matching.length, allRows: all.length,
         rows: matching.slice(0, databaseQueryWindow), schemaRevision: String(schema.revision), ...(groupDef ? { groups: groupRows(matching, groupDef) } : {}) });

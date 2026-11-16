@@ -17,6 +17,8 @@ type DailyMode = 'today' | 'quick-capture' | 'settings';
 interface Props {
   workspaceId: string;
   mode: DailyMode;
+  /** Preselected day for the 'today' mode, e.g. a day clicked on the calendar. */
+  initialDate?: string | undefined;
   templates: readonly Pick<NoteTemplate, 'id' | 'name'>[];
   parents: readonly Pick<PageSummary, 'id' | 'title'>[];
   readOnly?: boolean;
@@ -54,9 +56,9 @@ function dateInZone(timeZone: string): string {
 }
 
 export function DailyNoteDialog({
-  workspaceId, mode, templates, parents, readOnly, onClose, onOpenPage, onRestorePage, onCreate, onCapture, onSaveSettings,
+  workspaceId, mode, initialDate, templates, parents, readOnly, onClose, onOpenPage, onRestorePage, onCreate, onCapture, onSaveSettings,
 }: Props) {
-  const [date, setDate] = useState('');
+  const [date, setDate] = useState(initialDate ?? '');
   const [template, setTemplate] = useState('');
   const [status, setStatus] = useState<DailyNoteStatus | null>(null);
   const [settings, setSettings] = useState<DailyNoteSettings | null>(null);

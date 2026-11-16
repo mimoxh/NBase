@@ -9,6 +9,8 @@ import { LazyDatabaseView as DatabaseView, LazyRowPanel as RowPanel } from '../d
 import { createDemoSource } from '../database/demoSource';
 import { createDemoGraphSource } from '../graph/demoSource';
 import { LazyGraphDialog, useGraphShortcut } from '../graph/lazy';
+import { createDemoCalendarSource } from '../workspaceCalendar/demoSource';
+import { LazyWorkspaceCalendar } from '../workspaceCalendar/lazy';
 import { announceDatabaseChange, requestDatabaseExport } from '../database/source';
 import { DocumentEditor } from '../editor/DocumentEditor';
 import { SourceEditorDialog } from '../editor/SourceEditorDialog';
@@ -46,6 +48,7 @@ function download(name: string, text: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+const demoTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 const escapeRe = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function Mark({ text, query }: { text: string; query: string }) {
   if (!query) return <>{text}</>;
@@ -202,6 +205,8 @@ export function WorkspaceApp() {
   const openPage = useCallback((id: string) => { flush(); dispatch({ type: 'open', id }); setDialog(null); setMobileOpen(false); mainRef.current?.scrollTo({ top: 0 }); }, [flush]);
   const openPageRef = useRef(openPage);
   const graphSource = useMemo(() => createDemoGraphSource(() => stateRef.current.pages), []);
+  const calendarSource = useMemo(() => createDemoCalendarSource({ state: stateRef, dispatch,
+    openPage: id => openPageRef.current(id), notice }), [notice]);
   useGraphShortcut(() => { flush(); setDialog('graph'); }, dialog !== null);
   openPageRef.current = openPage;
   const newPage = (parentId: string | null = null) => {
@@ -414,7 +419,10 @@ export function WorkspaceApp() {
     <Sidebar workspaceName="演示空间" loginName="演示会话" accountLabel="演示模式 · 未登录" theme={theme} onTheme={setTheme}
       onLogout={() => notice('演示模式没有账号；刷新页面即可重置。')}
       onSearch={() => { flush(); setDialog('search'); }} onTrash={() => setDialog('trash')}
-      noteActions={<button className="nb-nav-row" onClick={() => { flush(); setDialog('graph'); }}><Icon name="link" size={15} /><span>关系图</span></button>}
+      noteActions={<>
+        <button className="nb-nav-row" onClick={() => { flush(); dispatch({ type: 'view', view: 'calendar' }); setMobileOpen(false); }}><Icon name="calendar" size={15} /><span>日历</span></button>
+        <button className="nb-nav-row" onClick={() => { flush(); setDialog('graph'); }}><Icon name="link" size={15} /><span>关系图</span></button>
+      </>}
       onNewPage={() => newPage()} onNewDatabase={() => newDatabase()} onNewWhiteboard={() => newWhiteboard()} onImport={() => fileRef.current?.click()}
       createBusy={false} pages={summaries} activeId={isDocument ? current.id : null}
       favorites={favoriteSet} favoritePages={favoritePages} recentPages={recentPages}
@@ -431,7 +439,7 @@ export function WorkspaceApp() {
         onHistory={() => undefined} hideHistory disabled={false} pageMenuItems={pageMenuItems} />}
       {!isDocument && <header className="nb-topbar">
         <button className="icon-button nb-sidebar-toggle" aria-label="切换导航" onClick={toggleSidebar}><Icon name="sidebar" size={17} /></button>
-        <nav className="nb-crumbs" aria-label="页面位置"><strong>工作台</strong></nav></header>}
+        <nav className="nb-crumbs" aria-label="页面位置"><strong>{state.view === 'calendar' ? '日历' : '工作台'}</strong></nav></header>}
       <NoticeBar tone="info">演示模式 · 内容仅保留在当前会话，刷新后重置
         <button onClick={isDocument ? exportCurrent : () => notice('打开需要保留的页面，再从页面菜单下载 Markdown。')}>{isDocument ? '下载此页' : '如何保留内容'}</button></NoticeBar>
       <main ref={mainRef} className="nb-scroll" tabIndex={-1}>
@@ -482,7 +490,8 @@ export function WorkspaceApp() {
               readOnly={readOnly} onChange={onChange} onReady={onReady} onNotice={notice} databases={databaseEmbedding} embeds={embeddedPages} />
           </div>
           <Toc outline={current.snapshot?.outline ?? []} onJump={id => editorRef.current?.jumpToHeading(id)} />
-        </> : <section className="nb-home">
+        </> : state.view === 'calendar' ? <LazyWorkspaceCalendar source={calendarSource} timeZone={demoTimeZone} weekStart={1} />
+        : <section className="nb-home">
           {summaries.length ? <>
             <div className="nb-home-eyebrow">演示空间</div><h1>最近编辑</h1>
             <div className="nb-home-list">{recentPages.map(page => <button key={page.id} className="nb-home-row" onClick={() => openPage(page.id)}>

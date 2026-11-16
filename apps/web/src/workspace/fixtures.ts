@@ -1,7 +1,23 @@
-import type { PageCoverId } from '@nbase/contracts';
+import { formatDateCell, formatRecurrenceRule, instantText, wallToInstant, type PageCoverId } from '@nbase/contracts';
 import type { Page, Workspace } from './model';
 const page = (id: string, title: string, markdown: string, parentId: string | null = null, starred = false,
   icon: string | null = null, cover: PageCoverId | null = null): Page => ({ id, title, markdown, parentId, starred, deleted: false, dirty: false, icon, cover });
+
+const pad2 = (n: number) => String(n).padStart(2, '0');
+/** A local calendar day relative to today, so the demo calendar always has events on screen. */
+function localDay(offset: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + offset);
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+function timed(day: string, from: [number, number], to: [number, number], options?: { reminders?: number[]; weekly?: boolean }): string {
+  const zone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const [y, m, d] = day.split('-').map(Number) as [number, number, number];
+  return formatDateCell({ start: instantText(wallToInstant(y, m, d, from[0], from[1], 0, zone)),
+    end: instantText(wallToInstant(y, m, d, to[0], to[1], 0, zone)), allDay: false, timeZone: zone,
+    ...(options?.reminders ? { reminders: options.reminders } : {}),
+    ...(options?.weekly ? { rrule: formatRecurrenceRule({ freq: 'WEEKLY', interval: 1, weekStart: 0 }) } : {}) })!;
+}
 export function initialWorkspace(): Workspace {
   return { currentId: 'welcome', view: 'document', recent: ['welcome', readingListId, 'weekly', 'writing'], pages: [
     page('welcome', '开始使用 NBase', '把零散的想法，慢慢写成自己的知识。这里是你的文档工作台。\n\n> 当前是演示模式。所有修改仅在本次会话内保留，刷新页面会重置；需要保留的内容请下载 Markdown。\n\n## 从一页开始\n\n写下一段文字，列一个清单，或整理最近的阅读笔记。无需一开始就安排好所有目录。\n\n- 在左侧新建页面，为想法找到一个位置\n- 用 **粗体**、标题和引用，让内容更容易阅读\n- 用搜索快速回到一段记忆\n\n## 让内容有条理\n\n页面可以包含子页面。把相关内容放在一起，重要的页面加入收藏。\n\n### 一个轻量的日常习惯\n\n- [x] 写下今天想到的一件事\n- [ ] 补充一段值得保留的材料\n- [ ] 回顾并整理你的笔记\n\n## 安静地阅读与写作\n\n切换到阅读模式，或者打开专注模式，让注意力回到内容本身。右侧目录可以帮助你在长文中定位。\n\n---\n\n从左侧的「写作与排版」开始，试试这张工作台。', null, true, '🌱', 'sage'),
@@ -13,6 +29,7 @@ export function initialWorkspace(): Workspace {
     page('work', '工作记录', '## 项目备忘\n\n把问题、决定和下一步写在一起。\n\n### 下一步\n\n- [ ] 列出需要验证的问题\n- [ ] 记录讨论的结论', null, false, '💼', 'slate'),
     { ...page('old', '一份旧的草稿', '## 未完成的想法\n\n这是一份回收站示例，可以恢复继续编辑。'), deleted: true, deletionRoot: 'old' },
     ...readingList(),
+    ...schedule(),
   ] };
 }
 
@@ -62,5 +79,39 @@ function readingList(): Page[] {
     row('book-3', '时间简史', '', { [ids.author]: '史蒂芬·霍金', [ids.status]: ids.want, [ids.tags]: [ids.science] }),
     row('book-4', '活着', '一本很薄、却很重的书。', { [ids.author]: '余华', [ids.status]: ids.done, [ids.rating]: 9,
       [ids.tags]: [ids.novel], [ids.finished]: '2026-09-03', [ids.recommend]: true }),
+  ];
+}
+
+/** Demo database with live dates: timed, all-day, multi-day and recurring rows near today. */
+const scheduleId = '2d8e4b3f-6c4a-5f8c-ab21-2d3e4f5a6b00';
+const scheduleIds = {
+  title: '2d8e4b3f-6c4a-5f8c-ab21-2d3e4f5a6a01', time: '2d8e4b3f-6c4a-5f8c-ab21-2d3e4f5a6a02',
+  kind: '2d8e4b3f-6c4a-5f8c-ab21-2d3e4f5a6a03', work: '2d8e4b3f-6c4a-5f8c-ab21-2d3e4f5a6b01',
+  personal: '2d8e4b3f-6c4a-5f8c-ab21-2d3e4f5a6b02', table: '2d8e4b3f-6c4a-5f8c-ab21-2d3e4f5a6a04',
+  calendar: '2d8e4b3f-6c4a-5f8c-ab21-2d3e4f5a6a05',
+};
+function schedule(): Page[] {
+  const database: Page = { ...page(scheduleId, '近期安排', '', 'work', false, '📅'), kind: 'database', database: { revision: 1,
+    properties: [
+      { id: scheduleIds.title, name: '名称', type: 'title' },
+      { id: scheduleIds.time, name: '时间', type: 'date' },
+      { id: scheduleIds.kind, name: '类别', type: 'select', options: [
+        { id: scheduleIds.work, name: '工作', color: 'blue' }, { id: scheduleIds.personal, name: '个人', color: 'green' }] },
+    ],
+    views: [
+      { id: scheduleIds.table, name: '表格', type: 'table', filters: [], sorts: [], hiddenPropertyIds: [], propertyOrder: [], widths: {} },
+      { id: scheduleIds.calendar, name: '日历', type: 'calendar', filters: [], sorts: [], hiddenPropertyIds: [],
+        propertyOrder: [], widths: {}, datePropertyId: scheduleIds.time },
+    ],
+  } };
+  const row = (id: string, title: string, value: string, kind: string): Page =>
+    ({ ...page(id, title, '', scheduleId), kind: 'row', properties: { [scheduleIds.time]: value, [scheduleIds.kind]: kind }, revision: 1 });
+  return [database,
+    row('plan-1', '团队周会', timed(localDay(0), [14, 0], [15, 0], { reminders: [15] }), scheduleIds.work),
+    row('plan-2', '进度站会', timed(localDay(-3), [10, 0], [10, 30], { weekly: true }), scheduleIds.work),
+    row('plan-3', '周末阅读', formatDateCell({ start: localDay(-7), allDay: true,
+      rrule: formatRecurrenceRule({ freq: 'WEEKLY', interval: 1, weekStart: 0 }) })!, scheduleIds.personal),
+    row('plan-4', '外出办公', formatDateCell({ start: localDay(1), end: localDay(2), allDay: true })!, scheduleIds.personal),
+    row('plan-5', '版本发布', formatDateCell({ start: localDay(10), allDay: true, reminders: [1440] })!, scheduleIds.work),
   ];
 }

@@ -1,5 +1,7 @@
 import { useEffect, useState, type RefObject } from 'react';
 import { aggregatesFor, effectiveType, type AggregateFunction, type AggregateItem, type DatabaseQueryRequest, type DatabaseView as View, type PropertyDefinition } from '@nbase/contracts';
+import { formatDatePoint } from '../../calendar/format';
+import { readerTimeZone, todayIn } from '../../calendar/model';
 import { Popover } from '../../components/Popover';
 import { aggregateLabels, formatNumber, formatTimestamp } from '../labels';
 import type { DatabaseDataSource } from '../source';
@@ -7,7 +9,9 @@ import type { DatabaseDataSource } from '../source';
 function display(def: PropertyDefinition, fn: AggregateFunction, value: number | string | null): string {
   if (value === null) return '—';
   if (typeof value === 'number') return formatNumber(fn === 'avg' ? Math.round(value * 100) / 100 : value);
-  return def.type === 'created_time' || def.type === 'updated_time' ? formatTimestamp(value) : value;
+  if (def.type === 'created_time' || def.type === 'updated_time') return formatTimestamp(value);
+  if (effectiveType(def) === 'date') { const zone = readerTimeZone(); return formatDatePoint(value, zone, todayIn(zone)); }
+  return value;
 }
 
 /** Statistics over every matching row. It sits outside the scrolling table so it stays on screen, and follows the table sideways. */

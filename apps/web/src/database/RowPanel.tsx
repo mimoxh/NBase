@@ -4,6 +4,7 @@ import { nextOptionColor } from './labels';
 import type { RelationHost } from './RelationEditor';
 import { RowProperties } from './RowProperties';
 import { announceDatabaseChange, useDatabase, type DatabaseDataSource } from './source';
+import { lockedPropertyIds } from './sync';
 import { DatabaseTagsContext } from './tags';
 
 /**
@@ -56,6 +57,6 @@ export function RowPanel({ source, databaseId, row, editable, pending, onChange 
   return <DatabaseTagsContext.Provider value={workspaceTags ? { tags: workspaceTags } : null}>
     <RowProperties row={{ ...row, ...(relations ? { relations } : {}), ...(computed ? { computed } : {}) }} properties={state.doc.properties} editable={editable && source.canWrite} pending={pending}
       onChange={onChange} onCreateOption={createOption} databaseTitle={state.doc.page.title} databaseIcon={state.doc.page.icon}
-      onOpenDatabase={() => source.openDatabase(databaseId)} relationHostFor={relationHost} />
+      onOpenDatabase={() => source.openDatabase(databaseId)} relationHostFor={relationHost} locked={lockedPropertyIds(state.doc)} />
   </DatabaseTagsContext.Provider>;
 }

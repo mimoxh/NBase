@@ -33,6 +33,15 @@ describe('csv', () => {
     expect(unguard("'普通")).toBe("'普通");
   });
 
+  it('exports the stored date value so it imports unchanged', async () => {
+    const date: PropertyDefinition = { id: ids[1]!, name: '日期', type: 'date' };
+    const value = '2026-11-16T01:00:00Z/2026-11-16T02:00:00Z|tz=Asia/Shanghai|rrule=FREQ=WEEKLY;BYDAY=MO|remind=10';
+    const parsed = await parseCsv(rowsToCsv([row('周会', { [date.id]: value }), row('一天', { [date.id]: '2026-11-20' })], [columns[0]!, date]));
+    expect(parsed[1]).toEqual(['周会', value]);
+    expect(parsed[2]).toEqual(['一天', '2026-11-20']);
+    expect(parseCellText(date, parsed[1]![1]!)).toEqual({ ok: true, value });
+  });
+
   it('reads tabs and semicolons, a missing final newline and blank lines', async () => {
     expect(await parseCsv('a\tb\n1\t2')).toEqual([['a', 'b'], ['1', '2']]);
     expect(await parseCsv('a;b\r\n1;2\r\n\r\n3;4\r\n')).toEqual([['a', 'b'], ['1', '2'], ['3', '4']]);

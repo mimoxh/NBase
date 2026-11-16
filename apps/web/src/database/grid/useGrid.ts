@@ -23,8 +23,10 @@ function acceptsValue(def: PropertyDefinition): boolean {
 }
 
 /** Spreadsheet-style cursor and range. Keys, IME text and clipboard all land in one hidden input that follows the cursor. */
-export function useGrid({ store, columns, rowCount, canWrite, notice, rootRef, bodyRef }: {
+export function useGrid({ store, columns, rowCount, canWrite, locked, notice, rootRef, bodyRef }: {
   store: RowStore; columns: PropertyDefinition[]; rowCount: number; canWrite: boolean; notice: (text: string) => void;
+  /** Properties a calendar subscription writes; paste and clear skip them. */
+  locked?: ReadonlySet<string> | undefined;
   rootRef: RefObject<HTMLDivElement | null>; bodyRef: RefObject<HTMLTableSectionElement | null>;
 }) {
   const [focus, setFocus] = useState<GridPoint | null>(null);
@@ -110,11 +112,11 @@ export function useGrid({ store, columns, rowCount, canWrite, notice, rootRef, b
     const cells: { row: number; col: number; value: null }[] = [];
     for (let row = range.top; row <= range.bottom; row += 1) {
       editableColumns(range.left, range.right).forEach((def, offset) => {
-        if (acceptsValue(def)) cells.push({ row, col: range.left + offset, value: null });
+        if (acceptsValue(def) && !locked?.has(def.id)) cells.push({ row, col: range.left + offset, value: null });
       });
     }
     writeCells(cells);
-  }, [canWrite, range, writeCells]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [canWrite, range, writeCells, locked]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const copyRange = useCallback((event: ClipboardEvent<HTMLInputElement>) => {
     if (!range) return false;
@@ -149,7 +151,7 @@ export function useGrid({ store, columns, rowCount, canWrite, notice, rootRef, b
         const col = range.left + x;
         const def = columns[col];
         if (row >= rowCount || !def) { clipped += 1; continue; }
-        if (!acceptsValue(def)) { invalid += 1; continue; }
+        if (!acceptsValue(def) || locked?.has(def.id)) { invalid += 1; continue; }
         if (def.type === 'title') { cells.push({ row, col, value: text }); continue; }
         const parsed = parseCellText(def, text);
         if (parsed.ok) cells.push({ row, col, value: parsed.value }); else invalid += 1;
@@ -159,7 +161,7 @@ export function useGrid({ store, columns, rowCount, canWrite, notice, rootRef, b
     if (invalid || clipped) {
       notice([invalid ? `${invalid} 个单元格不符合字段类型，已跳过。` : '', clipped ? `${clipped} 个单元格超出表格范围，已忽略。` : ''].join(''));
     }
-  }, [canWrite, columns, notice, range, rowCount, writeCells]);
+  }, [canWrite, columns, locked, notice, range, rowCount, writeCells]);
 
   const sinkKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (composing.current || event.nativeEvent.isComposing || event.keyCode === 229 || !focus) return;

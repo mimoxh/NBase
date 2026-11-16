@@ -1,87 +1,95 @@
 import { useEffect, useMemo, useState } from 'react';
-import { cellValue, localDay, type DatabaseRow, type PropertyDefinition } from '@nbase/contracts';
-import { Icon } from '../../components/Icon';
-import { Popover } from '../../components/Popover';
-import { monthBounds } from '../labels';
+import { activeProperties, cellValue, type DatabaseDocument, type DatabaseRow, type PropertyDefinition, type PropertyType, type RecurrenceEditScope,
+  type RowProperties } from '@nbase/contracts';
+import { Calendar } from '../../calendar/Calendar';
+import { applyEventChange, newEventValue, type EventSpan, type EventWrite } from '../../calendar/editing';
+import type { WeekStart } from '../../calendar/layout';
+import { buildEvents, type CalendarEvent, type CalendarEventInput } from '../../calendar/model';
+import { RecurrenceScopeDialog } from '../../calendar/RecurrenceScopeDialog';
 import type { RowStore } from '../rowStore';
 import type { DatabaseDataSource } from '../source';
+import { lockedPropertyIds, syncedReadOnlyHint } from '../sync';
+import type { CalendarNav } from './calendarNav';
 
-const calendarRowCap = 1000;
-const perDay = 3;
-const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
+export const calendarRowCap = 1000;
+const copiedTypes = new Set<PropertyType>(['text', 'number', 'select', 'multi_select', 'checkbox', 'date', 'url']);
 
-export function shiftMonth(month: string, by: number): string {
-  const [year, value] = month.split('-').map(Number) as [number, number];
-  return new Date(Date.UTC(year, value - 1 + by, 1)).toISOString().slice(0, 7);
-}
-
-/** The Monday-first grid of days covering a month. */
-export function monthGrid(month: string): string[] {
-  const { first, last } = monthBounds(month);
-  const start = new Date(`${first}T00:00:00Z`);
-  start.setUTCDate(start.getUTCDate() - ((start.getUTCDay() + 6) % 7));
-  const days: string[] = [];
-  for (const day = new Date(start); days.length % 7 !== 0 || day.toISOString().slice(0, 10) <= last; day.setUTCDate(day.getUTCDate() + 1)) {
-    days.push(day.toISOString().slice(0, 10));
+/** Stored values a detached occurrence takes from its series row, leaving out `skip`. */
+export function copiedProperties(row: DatabaseRow, properties: PropertyDefinition[], skip: ReadonlySet<string>): RowProperties {
+  const out: RowProperties = {};
+  for (const def of activeProperties(properties)) {
+    if (!copiedTypes.has(def.type) || skip.has(def.id)) continue;
+    const value = row.properties[def.id];
+    if (value !== undefined && value !== null) out[def.id] = value;
   }
-  return days;
+  return out;
 }
 
-/** A month of rows by one date field. Only date fields can be set by creating or dragging; times come from the page. */
-export default function CalendarView({ source, store, month, onMonth, dateField, canWrite }: {
-  source: DatabaseDataSource; store: RowStore; month: string; onMonth: (month: string) => void; dateField: PropertyDefinition; canWrite: boolean;
-}) {
-  const [dragging, setDragging] = useState<string | null>(null);
-  const [dropDay, setDropDay] = useState<string | null>(null);
-  const [more, setMore] = useState<string | null>(null);
-  const writable = canWrite && dateField.type === 'date';
-  const today = localDay(new Date());
-  const days = useMemo(() => monthGrid(month), [month]);
-  useEffect(() => { store.ensure(0, calendarRowCap); }, [store, store.order]);
-  const byDay = new Map<string, DatabaseRow[]>();
-  store.order.slice(0, calendarRowCap).forEach((_, index) => {
-    const row = store.rowAt(index);
-    const value = row && cellValue(row, dateField);
-    if (!row || value === undefined) return;
-    const day = dateField.type === 'date' ? String(value) : localDay(new Date(String(value)));
-    byDay.set(day, [...(byDay.get(day) ?? []), row]);
+/** One calendar input per row with a value in the date field. Page times are moments without length. */
+export function calendarInputs(rows: readonly DatabaseRow[], dateField: PropertyDefinition, readOnly: boolean): CalendarEventInput[] {
+  return rows.flatMap(row => {
+    const value = cellValue(row, dateField);
+    if (value === undefined || value === null || value === '') return [];
+    return [{ sourceId: dateField.id, rowId: row.id, title: row.title, icon: row.icon, value: String(value),
+      kind: dateField.type === 'date' ? 'date' as const : 'moment' as const, readOnly }];
   });
-  const chip = (row: DatabaseRow) => <button key={row.id} className="nb-db-event" draggable={writable} onClick={() => source.openRow(row.id)}
-    onDragStart={() => setDragging(row.id)} onDragEnd={() => { setDragging(null); setDropDay(null); }}>{row.title || '未命名'}</button>;
-  return <div className="nb-db-calendar">
-    <div className="nb-db-calendar-bar">
-      <button className="nb-db-tool" aria-label="上个月" onClick={() => onMonth(shiftMonth(month, -1))}>‹</button>
-      <strong>{month.replace('-', ' 年 ')} 月</strong>
-      <button className="nb-db-tool" aria-label="下个月" onClick={() => onMonth(shiftMonth(month, 1))}>›</button>
-      <button className="nb-btn nb-btn-quiet" onClick={() => onMonth(today.slice(0, 7))}>今天</button>
-      {store.total > calendarRowCap && <span className="nb-db-invalid-note" role="status">这个月有 {store.total} 行，只显示前 {calendarRowCap} 行。可以用筛选缩小范围。</span>}
-    </div>
-    <div className="nb-db-calendar-grid" role="grid" aria-label="日历">
-      {weekdays.map(day => <div key={day} className="nb-db-calendar-weekday" role="columnheader">{day}</div>)}
-      {days.map(day => {
-        const rows = byDay.get(day) ?? [];
-        const inMonth = day.startsWith(month);
-        return <div key={day} role="gridcell" aria-label={day} className={`nb-db-day ${inMonth ? '' : 'nb-db-day-out'} ${day === today ? 'nb-db-day-today' : ''} ${dropDay === day && dragging ? 'nb-db-board-drop' : ''}`}
-          onDragOver={event => { if (dragging && writable) { event.preventDefault(); setDropDay(day); } }}
-          onDrop={event => {
-            event.preventDefault();
-            const moving = dragging;
-            setDragging(null); setDropDay(null);
-            if (moving) void store.updateRow(moving, { properties: { [dateField.id]: day } });
-          }}>
-          <div className="nb-db-day-head">
-            <span className="nb-db-day-number">{Number(day.slice(8))}</span>
-            {writable && <button className="nb-db-tool nb-db-day-add" aria-label={`在 ${day} 新建`} onClick={() => void store.createRow('', { [dateField.id]: day })}><Icon name="plus" size={12} /></button>}
-          </div>
-          {rows.slice(0, perDay).map(chip)}
-          {rows.length > perDay && <span className="nb-db-anchor">
-            <button className="nb-db-more" onClick={() => setMore(day)}>还有 {rows.length - perDay} 项</button>
-            {more === day && <Popover label={`${day} 的全部项目`} className="nb-db-pop" portal width={220} onClose={() => setMore(null)}>
-              <div className="nb-db-day-list">{rows.map(chip)}</div>
-            </Popover>}
-          </span>}
-        </div>;
-      })}
-    </div>
-  </div>;
+}
+
+/**
+ * Rows of a database on a calendar by one date-like field. Only `date` fields are written: dragging moves or
+ * resizes, and the empty grid creates rows. Repeating events ask which occurrences a change applies to.
+ */
+export default function CalendarView({ source, store, doc, dateField, canWrite, nav, timeZone, weekStart, defaults }: {
+  source: DatabaseDataSource; store: RowStore; doc: DatabaseDocument; dateField: PropertyDefinition; canWrite: boolean;
+  nav: CalendarNav; timeZone: string; weekStart: WeekStart; defaults: RowProperties;
+}) {
+  const locked = lockedPropertyIds(doc);
+  const writable = canWrite && dateField.type === 'date' && !locked.has(dateField.id);
+  const [pending, setPending] = useState<{ event: CalendarEvent; next: EventSpan } | null>(null);
+  useEffect(() => { store.ensure(0, calendarRowCap); }, [store, store.order]);
+  const version = store.getVersion();
+  const events = useMemo(() => {
+    const rows: DatabaseRow[] = [];
+    const count = Math.min(store.order.length, calendarRowCap);
+    for (let index = 0; index < count; index += 1) { const row = store.rowAt(index); if (row) rows.push(row); }
+    return buildEvents(calendarInputs(rows, dateField, !writable), nav.range, timeZone);
+  }, [store, version, dateField, writable, nav.range.from, nav.range.to, timeZone]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const write = async (event: CalendarEvent, change: EventWrite | null) => {
+    if (!change) { source.notice('这个日期不能这样修改。'); return; }
+    const row = store.rowById(event.rowId);
+    if (change.series === null) await store.trashRow(event.rowId);
+    else await store.updateRow(event.rowId, { properties: { [dateField.id]: change.series } });
+    if (change.detached !== undefined && row) {
+      const skip = new Set([...locked, ...(doc.calendarSync ? [doc.calendarSync.fields.uidId] : [])]);
+      await store.createRow(row.title, { ...copiedProperties(row, doc.properties, skip), [dateField.id]: change.detached });
+    }
+  };
+  const change = (event: CalendarEvent, next: EventSpan) => {
+    if (event.recurring) setPending({ event, next });
+    else void write(event, applyEventChange(event, next, 'all', timeZone));
+  };
+  const choose = (scope: RecurrenceEditScope) => {
+    const chosen = pending;
+    setPending(null);
+    if (chosen) void write(chosen.event, applyEventChange(chosen.event, chosen.next, scope, timeZone));
+  };
+  const create = (span: EventSpan) => {
+    const value = newEventValue(span, timeZone);
+    // The new row opens right away so its title can be typed.
+    if (value) void store.createRow('', { ...defaults, [dateField.id]: value }).then(row => { if (row) source.openRow(row.id); });
+  };
+
+  const status = <>
+    {store.loading && <span role="status">正在读取…</span>}
+    {store.total > calendarRowCap && <span className="nb-db-invalid-note" role="status">这段时间有 {store.total} 行，只显示前 {calendarRowCap} 行。可以用筛选缩小范围。</span>}
+    {canWrite && !writable && <span>{locked.has(dateField.id) ? syncedReadOnlyHint : `${dateField.name}由系统记录，不能在日历上修改。`}</span>}
+  </>;
+  return <>
+    <Calendar mode={nav.mode} anchor={nav.anchor} weekStart={weekStart} timeZone={timeZone} today={nav.today} events={events}
+      agendaDays={nav.agendaDays} onMode={nav.setMode} onAnchor={nav.setAnchor} onAgendaMore={nav.loadMore} status={status}
+      label={`${dateField.name}日历`} onOpen={event => source.openRow(event.rowId)}
+      onCreate={writable ? create : undefined} onChange={writable ? change : undefined} />
+    {pending && <RecurrenceScopeDialog onChoose={choose} onClose={() => setPending(null)} />}
+  </>;
 }

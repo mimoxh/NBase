@@ -16,6 +16,7 @@ import { registerDatabaseRoutes } from './databases/routes.js';
 import { registerGraphRoutes } from './graph/routes.js';
 import { registerLinkPreviewRoutes } from './linkPreview/routes.js';
 import { registerPinyinIndexWorker } from './search/worker.js';
+import { registerCalendarRoutes, type CalendarOptions } from './calendar/routes.js';
 
 interface AuthOptions {
   repository: AuthRepository;
@@ -29,6 +30,8 @@ interface AppOptions {
   pages?: PgPageRepository;
   attachments?: PgAttachmentRepository;
   notesPool?: Pool;
+  /** Defaults to fetching subscriptions unless NBASE_CALENDAR_FETCH=off. */
+  calendar?: Partial<CalendarOptions>;
   readyCheck?: () => Promise<void>;
 }
 
@@ -66,6 +69,8 @@ export async function buildApp(options: AppOptions = {}) {
       registerDailyRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin, renderNoteTemplate);
       registerDatabaseRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
       registerGraphRoutes(app, options.notesPool, options.auth.repository, options.auth.publicOrigin);
+      registerCalendarRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin, {
+        fetchEnabled: process.env.NBASE_CALENDAR_FETCH !== 'off', ...options.calendar });
       registerPinyinIndexWorker(app, options.notesPool);
     }
     if (options.attachments) registerAttachmentRoutes(app, options.attachments,

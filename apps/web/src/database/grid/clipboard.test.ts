@@ -22,6 +22,10 @@ describe('grid clipboard', () => {
     expect(parseCellText(def('number'), 'abc')).toEqual({ ok: false });
     expect(parseCellText(def('date'), '2026/1/5')).toEqual({ ok: true, value: '2026-01-05' });
     expect(parseCellText(def('date'), '2026-02-31')).toEqual({ ok: false });
+    expect(parseCellText(def('date'), '2026-01-05 → 2026-01-07')).toEqual({ ok: true, value: '2026-01-05/2026-01-07' });
+    expect(parseCellText(def('date'), '2026-01-05T01:00:00Z/2026-01-05T02:00:00Z|tz=Asia/Shanghai|remind=10'))
+      .toEqual({ ok: true, value: '2026-01-05T01:00:00Z/2026-01-05T02:00:00Z|tz=Asia/Shanghai|remind=10' });
+    expect(parseCellText(def('date'), '下周一')).toEqual({ ok: false });
     expect(parseCellText(def('checkbox'), '✓')).toEqual({ ok: true, value: true });
     expect(parseCellText(def('checkbox'), '否')).toEqual({ ok: true, value: null });
     expect(parseCellText(def('checkbox'), '也许')).toEqual({ ok: false });
