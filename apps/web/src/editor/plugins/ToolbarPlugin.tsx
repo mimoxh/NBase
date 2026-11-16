@@ -13,7 +13,7 @@ import { mergeRegister } from '@lexical/utils';
 import { isSafeLinkUrl } from '../markdown';
 import { $applyBlockStyle } from '../blockStyles';
 import type { BlockStyle } from '../blockStyles';
-import { $changeIndent, $selectedIndentBlocks, $selectedListItems } from '../listIndent';
+import { $canIncreaseIndent, $changeIndent, $selectedIndentBlocks, $selectedListItems } from '../listIndent';
 import { OPEN_LINK_FORM_COMMAND } from './FloatingToolbarPlugin';
 import { $applyTextStyle, $selectionAlignment, $selectionTextStyle, $setAlignment } from '../textFormatting';
 import { TextColorMenu } from './TextColorMenu';
@@ -22,8 +22,8 @@ import { Popover } from '../../components/Popover';
 const alignmentLabels: Record<BlockAlignment, string> = { left: '左对齐', center: '居中', right: '右对齐', justify: '两端对齐' };
 
 type Props = { readOnly: boolean; onNotice?: ((message: string) => void) | undefined; findPanel?: ReactNode };
-type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; highlight: boolean; code: boolean; link: string; indentable: boolean; inCodeBlock: boolean; textStyle: TextStyle; align: BlockAlignment | null };
-const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, highlight: false, code: false, link: '', indentable: false, inCodeBlock: false, textStyle: {}, align: null };
+type ToolbarState = { block: string; bold: boolean; italic: boolean; strikethrough: boolean; highlight: boolean; code: boolean; link: string; indentable: boolean; canIndent: boolean; inCodeBlock: boolean; textStyle: TextStyle; align: BlockAlignment | null };
+const emptyState: ToolbarState = { block: 'paragraph', bold: false, italic: false, strikethrough: false, highlight: false, code: false, link: '', indentable: false, canIndent: false, inCodeBlock: false, textStyle: {}, align: null };
 
 function $enclosingCodeBlock(node: LexicalNode): LexicalNode | null {
   for (let current: LexicalNode | null = node; current; current = current.getParent()) {
@@ -67,10 +67,10 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
           parent = parent.getParent();
         }
         setState({ block, bold: selection.hasFormat('bold'), italic: selection.hasFormat('italic'), strikethrough: selection.hasFormat('strikethrough'), highlight: selection.hasFormat('highlight'), code: selection.hasFormat('code'), link,
-          indentable: $selectedListItems() !== null || $selectedIndentBlocks() !== null, inCodeBlock: $enclosingCodeBlock(node) !== null,
+          indentable: $selectedListItems() !== null || $selectedIndentBlocks() !== null, canIndent: $canIncreaseIndent(), inCodeBlock: $enclosingCodeBlock(node) !== null,
           textStyle: $selectionTextStyle(), align: $selectionAlignment() });
       } else if ($isTableSelection(selection)) {
-        setState((previous) => ({ ...previous, indentable: false, inCodeBlock: false, textStyle: {}, align: null }));
+        setState((previous) => ({ ...previous, indentable: false, canIndent: false, inCodeBlock: false, textStyle: {}, align: null }));
       }
     };
     editor.read('latest', update);
@@ -117,7 +117,7 @@ export function ToolbarPlugin({ readOnly, onNotice, findPanel }: Props) {
           <option value="paragraph">正文</option><option value="h1">标题 1</option><option value="h2">标题 2</option><option value="h3">标题 3</option><option value="bullet">项目列表</option><option value="number">编号列表</option><option value="check">待办列表</option><option value="quote">引用</option><option value="code">代码块</option>
         </select>
         {button('减少缩进 Shift+Tab', '⇤', () => edit(() => { $changeIndent(editor, -1); }), false, !state.indentable)}
-        {button('增加缩进 Tab', '⇥', () => edit(() => { $changeIndent(editor, 1); }), false, !state.indentable)}
+        {button('增加缩进 Tab', '⇥', () => edit(() => { $changeIndent(editor, 1); }), false, !state.canIndent)}
       </div>
       <div className="nbase-tool-group">
         {button('粗体 Ctrl+B', <b>B</b>, () => format('bold'), state.bold)}

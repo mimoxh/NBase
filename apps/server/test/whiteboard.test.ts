@@ -85,6 +85,37 @@ test('rejects dangling bindings, connector-to-connector bindings and mind-map cy
   rejects(withElements(shape(1, { mindParentId: id(1) })));
 });
 
+test('accepts nested groups, bold labels, folded and left-hand branches and a moved elbow segment', () => {
+  const nested = { groupId: id(50), groupParents: [id(51), id(52)] };
+  const content = withElements(
+    shape(1, { bold: true, mindParentId: null, mindCollapsed: true, ...nested }),
+    shape(2, { mindParentId: id(1), mindSide: 'left', mindCollapsed: false }),
+    { id: id(5), type: 'note', ...box, text: '便签', color: '#fff3b0', fontSize: 16, textAlign: 'left', bold: true, ...nested },
+    { ...connector(3, 1, 2), bend: -42.5, ...nested },
+  );
+  assert.equal(whiteboardContentProblem(content), null);
+  assert.equal(validateDocumentContent(content), content);
+  const deepest = Array.from({ length: whiteboardLimits.maxGroupDepth - 1 }, (_, n) => id(60 + n));
+  assert.equal(whiteboardContentProblem(withElements(shape(1, { groupId: id(50), groupParents: deepest }))), null);
+
+  rejects(withElements(shape(1, { groupParents: [id(51)] })));
+  rejects(withElements(shape(1, { groupId: id(50), groupParents: [] })));
+  rejects(withElements(shape(1, { groupId: id(50), groupParents: [...deepest, id(70)] })));
+  rejects(withElements(shape(1, { groupId: id(50), groupParents: [id(51), id(51)] })));
+  rejects(withElements(shape(1, { groupId: id(50), groupParents: [id(50)] })));
+  rejects(withElements(shape(1, { groupId: id(50), groupParents: ['outer'] })));
+  rejects(withElements(shape(1, { groupId: id(50), groupParents: id(51) })));
+  rejects(withElements(shape(1, { bold: 'yes' })));
+  rejects(withElements(shape(1, { mindCollapsed: true })));
+  rejects(withElements(shape(1, { mindParentId: null, mindCollapsed: 1 })));
+  rejects(withElements(shape(1, { mindParentId: null, mindSide: 'left' })));
+  rejects(withElements(shape(1, { mindParentId: null }), shape(2, { mindParentId: id(1), mindSide: 'right' })));
+  rejects(withElements(shape(1), shape(2), { ...connector(3, 1, 2), bend: Number.NaN }));
+  rejects(withElements(shape(1), shape(2), { ...connector(3, 1, 2), bend: '12' }));
+  rejects(withElements(shape(1), shape(2), { ...connector(3, 1, 2), bend: 1e9 }));
+  rejects(withElements({ id: id(7), type: 'pen', ...box, points: [0, 0, 5, 5], color: '#d1242f', strokeWidth: 3, bold: true }));
+});
+
 test('enforces element count and byte limits', () => {
   const many = Array.from({ length: whiteboardLimits.maxElements + 1 }, (_, n) => ({ id: id(n), type: 'frame', ...box, name: '' }));
   rejects(withElements(...many));

@@ -89,8 +89,8 @@ export function dashArray(style: 'solid' | 'dashed' | 'dotted', strokeWidth: num
   return [];
 }
 
-/** Bezier edge between two mind-map nodes, left-to-right. */
+/** Bezier edge between two mind-map nodes; it leaves the parent horizontally towards the child. */
 export function mindEdgePath(from: Point, to: Point): string {
-  const dx = Math.max(24, (to.x - from.x) / 2);
+  const dx = Math.max(24, Math.abs(to.x - from.x) / 2) * (to.x < from.x ? -1 : 1);
   return `M${n(from.x)} ${n(from.y)}C${n(from.x + dx)} ${n(from.y)} ${n(to.x - dx)} ${n(to.y)} ${n(to.x)} ${n(to.y)}`;
 }

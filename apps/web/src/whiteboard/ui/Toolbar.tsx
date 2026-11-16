@@ -55,6 +55,11 @@ function ToolStyleStrip({ store }: { store: BoardStore }) {
     </div>
     <Swatches label="填充" colors={fillColors.slice(0, 8)} value={style.fill} onPick={fill => store.setStyle({ fill })} />
   </div>;
+  if (tool === 'eraser') return <div className="wb-strip"><div className="wb-seg" role="radiogroup" aria-label="橡皮擦方式">
+    {([['element', '整个元素', '碰到的元素整个删除'], ['stroke', '局部笔迹', '只擦掉笔迹被碰到的部分，其他元素不受影响']] as const).map(([mode, label, hint]) =>
+      <button key={mode} type="button" role="radio" aria-checked={style.eraserMode === mode} className={style.eraserMode === mode ? 'on' : ''} title={hint}
+        onClick={() => store.setStyle({ eraserMode: mode })}>{label}</button>)}
+  </div></div>;
   if (tool === 'connector') return <div className="wb-strip"><div className="wb-seg" role="radiogroup" aria-label="连接线样式">
     {([['straight', '直线'], ['elbow', '折线'], ['curve', '曲线']] as const).map(([mode, label]) => <button key={mode} type="button" role="radio" aria-checked={style.connectorMode === mode}
       className={style.connectorMode === mode ? 'on' : ''} title={label} aria-label={label} onClick={() => store.setStyle({ connectorMode: mode })}><BoardIcon name={mode} size={16} /></button>)}

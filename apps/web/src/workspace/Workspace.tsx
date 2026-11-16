@@ -64,7 +64,7 @@ type PalItem =
   | { kind: 'command'; key: string; icon: string; label: string };
 
 function DemoSearch({ pages, recentIds, onOpen, onCommand, onClose }: {
-  pages: Page[]; recentIds: string[]; onOpen: (id: string) => void;
+  pages: Page[]; recentIds: string[]; onOpen: (id: string, phrase?: string) => void;
   onCommand: (key: string) => void; onClose: () => void;
 }) {
   const [query, setQuery] = useState(''); const [index, setIndex] = useState(0); const composing = useRef(false);
@@ -93,7 +93,7 @@ function DemoSearch({ pages, recentIds, onOpen, onCommand, onClose }: {
       <Icon name={item.icon as never} size={15} /><span className="nb-pal-main"><span className="nb-pal-title">{item.label}</span></span></button>;
     const page = item.page;
     return <button key={page.id} className={`nb-pal-item ${i === active ? 'sel' : ''}`}
-      onClick={() => onOpen(page.id)} onMouseEnter={() => setIndex(i)}>
+      onClick={() => onOpen(page.id, item.kind === 'body' ? q : undefined)} onMouseEnter={() => setIndex(i)}>
       <span className="nb-page-icon">{page.icon ?? '📄'}</span>
       <span className="nb-pal-main"><span className="nb-pal-title"><Mark text={page.title || '未命名页面'} query={q} /></span>
         <span className="nb-pal-path">{pathOf(page)}</span>
@@ -112,7 +112,7 @@ function DemoSearch({ pages, recentIds, onOpen, onCommand, onClose }: {
           if (event.key === 'Enter' && flat[active]) {
             event.preventDefault();
             const item = flat[active];
-            if (item.kind === 'command') onCommand(item.key); else onOpen(item.page.id);
+            if (item.kind === 'command') onCommand(item.key); else onOpen(item.page.id, item.kind === 'body' ? q : undefined);
           }
         }} /></div>
     <div className="nb-pal-list">
@@ -223,6 +223,18 @@ export function WorkspaceApp() {
     setDialog(null); setReadOnly(false); setMobileOpen(false); notice('已在当前会话中新建白板，刷新后会重置。');
   };
   const onBoardChange = useCallback((id: string, content: ReturnType<typeof whiteboardContent>) => dispatch({ type: 'board', id, content }), []);
+  const [boardLocate, setBoardLocate] = useState<{ pageId: string; key: number; text: string } | null>(null);
+  /** Opening a board from a search hit in its content also selects the element that matched. */
+  const openSearchHit = (id: string, phrase?: string) => {
+    const page = stateRef.current.pages.find(p => p.id === id);
+    setBoardLocate(previous => phrase && page?.kind === 'whiteboard' ? { pageId: id, key: (previous?.key ?? 0) + 1, text: phrase } : null);
+    openPage(id);
+  };
+  const duplicateBoard = () => {
+    if (current?.kind !== 'whiteboard' || !current.board) return;
+    dispatch({ type: 'create', page: { ...current, id: crypto.randomUUID(), title: `${current.title || '未命名白板'}（副本）`, starred: false, dirty: true } });
+    setReadOnly(false); notice('已在当前会话中创建白板副本，刷新后会重置。');
+  };
   const demoSource = useMemo(() => createDemoSource({ state: stateRef, dispatch,
     openPage: id => openPageRef.current(id), notice }), [notice]);
   const restorePage = (id: string) => {
@@ -369,6 +381,7 @@ export function WorkspaceApp() {
   ] : current?.kind === 'whiteboard' ? [
     { key: 'mode', label: readOnly ? '切换到编辑' : '切换到只读', icon: 'page', onSelect: () => setReadOnly(!readOnly) },
     { key: 'download', label: '下载白板数据 (JSON)', icon: 'download', onSelect: exportCurrent },
+    { key: 'copy', label: '创建白板副本', icon: 'copy', onSelect: duplicateBoard },
     { key: 'move', label: '移动到…', icon: 'folder', onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialogFor(current.id); setDialog('move'); } },
     'divider',
     { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, onSelect: () => { setDialogFor(current.id); setDialog('delete'); } },
@@ -431,7 +444,9 @@ export function WorkspaceApp() {
             <span className="wb-host-note">演示 · 刷新后重置</span></div>
           <EmbeddedPagesProvider value={embeddedPages}><EmbedPathProvider pageId={current.id}>
           <LazyWhiteboard key={current.id} boardId={current.id} content={current.board} readOnly={readOnly} title={current.title}
-            pages={summaries} onChange={onBoardChange} onOpenPage={openPage} imageUrl={demoImageUrl} onUploadImages={demoUploadImages} onNotice={notice} />
+            pages={summaries} onChange={onBoardChange} onOpenPage={openPage} imageUrl={demoImageUrl} onUploadImages={demoUploadImages} onNotice={notice}
+            locate={boardLocate?.pageId === current.id ? boardLocate : undefined}
+            onLocated={key => setBoardLocate(previous => previous?.key === key ? null : previous)} />
           </EmbedPathProvider></EmbeddedPagesProvider>
         </div> : isDocument && current.kind === 'database' ? <>
           <div className="nb-doc-wide-head">
@@ -488,7 +503,7 @@ export function WorkspaceApp() {
     </section>
     <input ref={fileRef} type="file" accept=".md,text/markdown" className="visually-hidden" aria-label="选择 Markdown 文件" onChange={event => { void importFile(event); }} />
     {toast && <Toast text={toast} onClose={() => setToast('')} />}
-    {dialog === 'search' && <DemoSearch pages={state.pages} recentIds={state.recent} onOpen={openPage} onCommand={onCommand} onClose={() => setDialog(null)} />}
+    {dialog === 'search' && <DemoSearch pages={state.pages} recentIds={state.recent} onOpen={openSearchHit} onCommand={onCommand} onClose={() => setDialog(null)} />}
     {dialog === 'graph' && <LazyGraphDialog source={graphSource} currentPageId={isDocument ? current.id : null} defaultTreeEdges
       onOpen={openPage} onClose={() => setDialog(null)} />}
     {dialog === 'trash' && <DemoTrash pages={state.pages} onRestore={restorePage} onClose={() => setDialog(null)} />}

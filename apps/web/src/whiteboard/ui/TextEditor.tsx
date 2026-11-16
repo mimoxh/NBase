@@ -15,8 +15,8 @@ function placement(el: El, store: BoardStore, measure: Measure): Placement | nul
   const dark = document.documentElement.dataset.theme === 'dark';
   switch (el.type) {
     case 'text': return { box: el, angle: el.angle, area: { x: 0, y: 0, w: el.w, h: el.h }, fontSize: el.fontSize, bold: Boolean(el.bold), align: el.textAlign, color: themed(el.color, dark), vertical: 'top', autoWidth: true };
-    case 'note': return { box: el, angle: el.angle, area: { x: notePadding, y: notePadding, w: el.w - notePadding * 2, h: el.h - notePadding * 2 }, fontSize: el.fontSize, bold: false, align: el.textAlign, color: noteInk(dark), vertical: 'top', autoWidth: false };
-    case 'shape': return { box: el, angle: el.angle, area: shapeTextBox(el), fontSize: el.fontSize, bold: false, align: el.textAlign, color: themed(el.textColor, dark), vertical: 'middle', autoWidth: false };
+    case 'note': return { box: el, angle: el.angle, area: { x: notePadding, y: notePadding, w: el.w - notePadding * 2, h: el.h - notePadding * 2 }, fontSize: el.fontSize, bold: Boolean(el.bold), align: el.textAlign, color: noteInk(dark), vertical: 'top', autoWidth: false };
+    case 'shape': return { box: el, angle: el.angle, area: shapeTextBox(el), fontSize: el.fontSize, bold: Boolean(el.bold), align: el.textAlign, color: themed(el.textColor, dark), vertical: 'middle', autoWidth: false };
     case 'frame': {
       // Frame titles are a constant screen size, so the editor is laid out in world units divided by zoom.
       const z = store.view.zoom;

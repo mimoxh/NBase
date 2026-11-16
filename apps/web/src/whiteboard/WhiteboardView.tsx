@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { whiteboardContent, whiteboardLimits, type WhiteboardContent } from '@nbase/contracts';
 import { downloadBlob } from '../persistence/fileDownload';
-import { clipboardMime, pageIdFromPastedText, parseElements, plainText, serializeElements } from './clipboard';
+import { clipboardImageSources, clipboardMime, pageIdFromPastedText, parseElements, plainText, serializeElements } from './clipboard';
 import { Controller, type PointerInput } from './controller';
+import type { Point } from './geometry';
 import { ImageCache } from './images';
 import { isMindNode } from './mind';
-import { type El } from './model';
+import { groupToEnter, locateElement, type BoardLocate, type El } from './model';
 import { createMeasure, drawOverlay, drawScene, toWorldPoint, type PageInfo } from './render/canvas';
 import { darkTheme, lightTheme } from './render/colors';
 import { boardToPng, boardToSvg, exportSet } from './render/export';
@@ -39,6 +40,10 @@ export interface WhiteboardViewProps {
   embedded?: boolean | undefined;
   /** Called once with the loaded content, before any change. */
   onReady?: ((boardId: string, content: WhiteboardContent) => void) | undefined;
+  /** Select one element and bring it into view, as when the board is opened from a search result or a backlink. */
+  locate?: (BoardLocate & { /** A new key repeats the request. */ key: number }) | undefined;
+  /** Called when a `locate` request has been handled, so the host can drop it. */
+  onLocated?: ((key: number) => void) | undefined;
 }
 
 const isTyping = (target: EventTarget | null) => target instanceof HTMLElement
@@ -141,6 +146,26 @@ export function WhiteboardView(props: WhiteboardViewProps) {
   };
   useEffect(() => store.subscribe(schedule), [store, schedule]);
   useEffect(() => { propsRef.current.onReady?.(propsRef.current.boardId, propsRef.current.content); }, []);
+
+  const locateKey = props.locate?.key;
+  useEffect(() => {
+    const request = propsRef.current.locate;
+    if (!request) return;
+    let frame = 0, tries = 0;
+    const run = () => {
+      // The first layout pass sizes the canvas and fits the whole board; locating comes after it.
+      if (store.size.width < 1 && tries < 120) { tries += 1; frame = requestAnimationFrame(run); return; }
+      const found = locateElement(store.elements, request);
+      if (found) { controller.locate(found.id); containerRef.current?.focus({ preventScroll: true }); }
+      if (request.reference) {
+        if (!found) propsRef.current.onNotice('来源白板已打开，引用可能已移除。');
+        else if (!found.exact) propsRef.current.onNotice('来源白板已更新，定位到当前的第一处引用。');
+      } else if (!found) propsRef.current.onNotice('白板已打开，但搜索词在当前内容中找不到。');
+      propsRef.current.onLocated?.(request.key);
+    };
+    frame = requestAnimationFrame(run);
+    return () => cancelAnimationFrame(frame);
+  }, [locateKey, store, controller]);
   useEffect(() => { schedule(); }, [dark, pageInfo, schedule]);
   useEffect(() => {
     const visible = () => { if (document.visibilityState === 'visible') schedule(); };
@@ -255,7 +280,7 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     const ids = controller.selectionWithDependents();
     if (!ids.size || !event.clipboardData) return;
     const elements = store.elements.filter(el => ids.has(el.id));
-    const payload = serializeElements(elements, () => crypto.randomUUID());
+    const payload = serializeElements(elements, () => crypto.randomUUID(), id => propsRef.current.imageUrl(id));
     const plain = plainText(elements) || '白板元素';
     event.clipboardData.setData(clipboardMime, payload);
     event.clipboardData.setData('text/plain', plain);
@@ -268,6 +293,40 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     const pointer = controller.pointer;
     return pointer && pointer.x >= 0 && pointer.y >= 0 && pointer.x <= store.size.width && pointer.y <= store.size.height
       ? toWorldPoint(pointer, store.view) : store.center();
+  };
+
+  /**
+   * Insert pasted elements. Images this workspace cannot read (copied in another workspace) are
+   * uploaded here from where they were copied; the ones that cannot be fetched are left out, since
+   * a board that points at a foreign attachment cannot be saved.
+   */
+  const pasteElements = async (elements: El[], sources: ReadonlyMap<string, string>, at: Point) => {
+    const imageIds = [...new Set(elements.flatMap(el => el.type === 'image' ? [el.attachmentId] : []))];
+    let kept = elements;
+    if (imageIds.length) {
+      await images.ready(imageIds);
+      const missing = new Set(imageIds.filter(id => images.get(id) === 'error'));
+      const upload = propsRef.current.onUploadImages;
+      const moved = new Map<string, UploadedImage>();
+      for (const id of upload ? missing : []) {
+        const url = sources.get(id), source = elements.find(el => el.type === 'image' && el.attachmentId === id);
+        if (!url || source?.type !== 'image') continue;
+        try {
+          const response = await fetch(url, { credentials: 'same-origin' });
+          const blob = response.ok ? await response.blob() : null;
+          if (!blob || !imageTypes.has(blob.type)) continue;
+          const [uploaded] = await upload!([new File([blob], source.fileName, { type: blob.type })]);
+          if (uploaded) moved.set(id, uploaded);
+        } catch { /* Left out below. */ }
+      }
+      kept = elements.flatMap(el => {
+        if (el.type !== 'image' || !missing.has(el.attachmentId)) return [el];
+        const uploaded = moved.get(el.attachmentId);
+        return uploaded ? [{ ...el, attachmentId: uploaded.id.toLowerCase(), fileName: uploaded.fileName.slice(0, 180), mediaType: uploaded.mediaType }] : [];
+      });
+      if (kept.length < elements.length) propsRef.current.onNotice('已跳过无法带到当前工作区的图片。');
+    }
+    if (!store.readOnly) controller.insert(controller.pasteClones(kept, { x: 0, y: 0 }), at);
   };
 
   const paste = useCallback((event: ClipboardEvent) => {
@@ -283,14 +342,14 @@ export function WhiteboardView(props: WhiteboardViewProps) {
       // Cards to pages this workspace does not have would make the save fail; drop them.
       const kept = parsed.filter(el => el.type === 'card' ? pageMap.has(el.pageId) : el.type !== 'database' || pageMap.has(el.databaseId));
       if (kept.length < parsed.length) propsRef.current.onNotice('已跳过指向本工作区以外页面的卡片。');
-      controller.insert(controller.pasteClones(kept, { x: 0, y: 0 }), pasteAt());
+      void pasteElements(kept, clipboardImageSources(payload, window.location.origin), pasteAt());
       return;
     }
     const pageId = pageIdFromPastedText(plain);
     const page = pageId ? pageMap.get(pageId) : undefined;
     if (page) { controller.insert([controller.cardElement(page)], pasteAt()); return; }
     if (plain.trim()) controller.insert([controller.textElement(plain.slice(0, whiteboardLimits.maxText))], pasteAt());
-    // `pasteAt` reads the live pointer, so it is intentionally not a dependency.
+    // `pasteAt` and `pasteElements` only read live refs and the stable store, so they are intentionally not dependencies.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [controller, insertImages, pageMap, store]);
 
@@ -315,7 +374,8 @@ export function WhiteboardView(props: WhiteboardViewProps) {
 
   // ── Export ──
 
-  const exportBoard = async (format: 'png' | 'svg', selectionOnly: boolean) => {
+  const exportBoard = async (format: 'png' | 'svg', selectionOnly: boolean, darkPaper = false) => {
+    const theme = darkPaper ? darkTheme : lightTheme;
     const ids = selectionOnly ? controller.selectionWithDependents() : null;
     const elements = exportSet(store.elements, ids);
     if (!elements.length) { props.onNotice('没有可导出的内容。'); return; }
@@ -324,10 +384,10 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     try {
       if (format === 'png') {
         await images.ready(imageIds);
-        const blob = await boardToPng(elements, images, { measure, pageInfo });
+        const blob = await boardToPng(elements, images, { measure, pageInfo, theme });
         if (blob) downloadBlob(name, blob, '.png'); else props.onNotice('导出 PNG 失败。');
       } else {
-        const svg = boardToSvg(elements, await images.dataUrls(imageIds), { measure, pageInfo });
+        const svg = boardToSvg(elements, await images.dataUrls(imageIds), { measure, pageInfo, theme });
         downloadBlob(name, new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }), '.svg');
       }
     } catch { props.onNotice(`导出 ${format.toUpperCase()} 失败。`); }
@@ -343,12 +403,15 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     const target = menu?.targetId ? store.index.get(menu.targetId) : undefined;
     const editable = !store.readOnly;
     const locked = hasSelection && [...store.selection].every(id => store.index.get(id)?.locked);
-    const exportItems: ContextItem[] = hasSelection
-      ? [{ key: 'png-sel', label: '导出所选为 PNG', onSelect: () => void exportBoard('png', true) }, { key: 'svg-sel', label: '导出所选为 SVG', onSelect: () => void exportBoard('svg', true) }]
-      : [{ key: 'png', label: '导出白板为 PNG', onSelect: () => void exportBoard('png', false) }, { key: 'svg', label: '导出白板为 SVG', onSelect: () => void exportBoard('svg', false) }];
+    const what = hasSelection ? '所选' : '白板';
+    const exportItems: ContextItem[] = (['png', 'svg'] as const).flatMap(format => [false, true].map(darkPaper => ({
+      key: `${format}${darkPaper ? '-dark' : ''}`, label: `导出${what}为 ${format.toUpperCase()}${darkPaper ? '（深色背景）' : ''}`,
+      onSelect: () => void exportBoard(format, hasSelection, darkPaper) })));
+    const mind = controller.mindInfo();
+    const enterable = target && editable ? groupToEnter(target, store.focusGroup) : null;
     if (!hasSelection) return [
       ...(editable ? [{ key: 'paste', label: '粘贴', shortcut: 'Ctrl+V', onSelect: () => props.onNotice('请使用 Ctrl+V 粘贴。') }, 'divider' as const] : []),
-      { key: 'all', label: '全选', shortcut: 'Ctrl+A', onSelect: () => { store.select(store.elements.map(el => el.id)); controller.refreshOverlay(); } },
+      { key: 'all', label: '全选', shortcut: 'Ctrl+A', onSelect: () => controller.selectAll() },
       { key: 'fit', label: '缩放至适合', shortcut: 'Shift+1', onSelect: () => store.zoomToFit() },
       { key: 'present', label: '放映框架', disabled: !frames.length, onSelect: () => presentFrom(null) },
       'divider', ...exportItems,
@@ -358,6 +421,8 @@ export function WhiteboardView(props: WhiteboardViewProps) {
       ...(target?.type === 'frame' && frames.length ? [{ key: 'present', label: '从此框架放映', onSelect: () => presentFrom(target.id) }] : []),
       ...(editable && target && controller.canEdit(target) ? [{ key: 'edit', label: '编辑文字', shortcut: 'Enter', onSelect: () => controller.startEditing(target.id) }] : []),
       ...(editable && isMindNode(target) ? [{ key: 'child', label: '添加子主题', shortcut: 'Tab', onSelect: () => controller.addMindNode('child') }] : []),
+      ...(mind?.hasChildren ? [{ key: 'fold', label: mind.collapsed ? '展开分支' : '收起分支', onSelect: () => controller.toggleCollapsed(mind.node.id) }] : []),
+      ...(enterable && target ? [{ key: 'enter', label: '进入编组', shortcut: '双击', onSelect: () => { controller.enterGroup(target.id); } }] : []),
       { key: 'copy', label: '复制', shortcut: 'Ctrl+C', onSelect: () => { document.execCommand('copy'); } },
       ...(editable ? [
         { key: 'cut', label: '剪切', shortcut: 'Ctrl+X', disabled: locked, onSelect: () => { document.execCommand('cut'); } },
@@ -368,8 +433,8 @@ export function WhiteboardView(props: WhiteboardViewProps) {
         { key: 'backward', label: '下移一层', shortcut: 'Ctrl+[', disabled: locked, onSelect: () => controller.order('backward') },
         { key: 'back', label: '置于底层', shortcut: 'Ctrl+Shift+[', disabled: locked, onSelect: () => controller.order('back') },
         'divider' as const,
-        ...(store.selection.size > 1 ? [{ key: 'group', label: '编组', shortcut: 'Ctrl+G', onSelect: () => controller.group() }] : []),
-        ...([...store.selection].some(id => store.index.get(id)?.groupId) ? [{ key: 'ungroup', label: '取消编组', shortcut: 'Ctrl+Shift+G', onSelect: () => controller.ungroup() }] : []),
+        ...(controller.groupState().canGroup ? [{ key: 'group', label: '编组', shortcut: 'Ctrl+G', onSelect: () => controller.group() }] : []),
+        ...(controller.groupState().canUngroup ? [{ key: 'ungroup', label: '取消编组', shortcut: 'Ctrl+Shift+G', onSelect: () => controller.ungroup() }] : []),
         { key: 'lock', label: locked ? '解锁' : '锁定', shortcut: 'Ctrl+Shift+L', onSelect: () => controller.toggleLock() },
         { key: 'zoom', label: '缩放至所选', shortcut: 'Shift+2', onSelect: () => store.zoomToSelection() },
         'divider' as const,

@@ -1,8 +1,8 @@
 import type { WhiteboardArrowhead, WhiteboardBoxElement, WhiteboardCard, WhiteboardConnector, WhiteboardDatabase, WhiteboardConnectorEnd, WhiteboardConnectorMode,
   WhiteboardElement, WhiteboardShape, WhiteboardShapeKind, WhiteboardStrokeStyle, WhiteboardTextAlign } from '@nbase/contracts';
 import { whiteboardLimits } from '@nbase/contracts';
-import { aabb, boundsOfPoints, centerOf, clamp, distance, distanceToPolyline, dominantSide, elbowRoute, exitPoint, expandRect, outlinePolygon,
-  pointInPolygon, pointInRect, rectsIntersect, rotatePoint, round, sampleCubic, sideVector, toLocal, toWorld, unionRects,
+import { aabb, boundsOfPoints, centerOf, clamp, distance, distanceToPolyline, dominantSide, elbowPath, exitPoint, expandRect, outlinePolygon,
+  pointInPolygon, pointInRect, rectsIntersect, rotatePoint, round, sampleCubic, sideVector, simplifyStroke, toLocal, toWorld, unionRects,
   type Box, type Point, type Rect, type Side } from './geometry';
 import { lineHeightOf, textBlockSize, type Measure } from './text';
 
@@ -57,6 +57,8 @@ export interface ConnectorPath {
   /** Unit vectors pointing out of the path at each end, for arrowheads. */
   startDirection: Point;
   endDirection: Point;
+  /** Elbow routes with a middle segment that can be dragged: where its handle sits, the axis it moves on and the shift in effect. */
+  bend?: { point: Point; axis: 'x' | 'y'; shift: number };
 }
 
 const isEdgeAnchor = (ax: number, ay: number) => ax === 0 || ax === 1 || ay === 0 || ay === 1;
@@ -123,8 +125,9 @@ export function connectorPath(connector: Connector, index: Index): ConnectorPath
   const start = resolveEnd(connector.source, rawTarget, connector.mode, index);
   const end = resolveEnd(connector.target, rawSource, connector.mode, index);
   if (connector.mode === 'elbow') {
-    const points = elbowRoute(start.point, start.side, end.point, end.side);
-    return { points, startDirection: unit(points[1] ?? end.point, points[0]!), endDirection: unit(points.at(-2) ?? start.point, points.at(-1)!) };
+    const { points, free } = elbowPath(start.point, start.side, end.point, end.side, connector.bend ?? 0);
+    return { points, startDirection: unit(points[1] ?? end.point, points[0]!), endDirection: unit(points.at(-2) ?? start.point, points.at(-1)!),
+      ...(free ? { bend: { point: { x: (free.from.x + free.to.x) / 2, y: (free.from.y + free.to.y) / 2 }, axis: free.axis, shift: free.shift } } : {}) };
   }
   if (connector.mode === 'curve') {
     const reach = clamp(distance(start.point, end.point) * 0.4, 20, 240);
@@ -194,13 +197,76 @@ export function elementsInRect(elements: Elements, rect: Rect, index: Index, mod
 
 // ── Selection helpers ───────────────────────────────────────────────────────
 
-/** Group mates always travel together. */
-export function withGroups(elements: Elements, ids: ReadonlySet<string>): Set<string> {
+/** The groups an element sits in, from the innermost to the outermost. */
+export const groupChain = (el: El): string[] => el.groupId ? [el.groupId, ...(el.groupParents ?? [])] : [];
+
+/**
+ * The group that stands for an element when it is picked: its outermost group, or, once a group
+ * has been entered (`focus`), the level right below that group. Null when the element stands alone.
+ */
+function unitGroup(el: El, focus: string | null): string | null {
+  if (!el.groupId) return null;
+  const chain = groupChain(el);
+  const at = focus ? chain.indexOf(focus) : -1;
+  if (at < 0) return chain.at(-1)!;
+  return at === 0 ? null : chain[at - 1]!;
+}
+
+/** Group mates always travel together; inside an entered group only the mates one level down do. */
+export function withGroups(elements: Elements, ids: ReadonlySet<string>, focus: string | null = null): Set<string> {
   const groups = new Set<string>();
-  for (const el of elements) if (ids.has(el.id) && el.groupId) groups.add(el.groupId);
+  for (const el of elements) {
+    if (!ids.has(el.id)) continue;
+    const group = unitGroup(el, focus);
+    if (group) groups.add(group);
+  }
   const result = new Set(ids);
-  if (groups.size) for (const el of elements) if (el.groupId && groups.has(el.groupId)) result.add(el.id);
+  if (groups.size) for (const el of elements) if (el.groupId && groupChain(el).some(group => groups.has(group))) result.add(el.id);
   return result;
+}
+
+/** The group to enter when an element is double-clicked: one level down from the current focus, or null at the innermost level. */
+export function groupToEnter(el: El, focus: string | null): string | null {
+  return unitGroup(el, focus);
+}
+
+export interface MindVisibility {
+  /** Descendants of collapsed mind nodes, and the connectors attached to them. */
+  hidden: ReadonlySet<string>;
+  /** How many nodes each collapsed node hides. */
+  counts: ReadonlyMap<string, number>;
+}
+const nothingHidden: MindVisibility = { hidden: new Set(), counts: new Map() };
+const visibilityCache = new WeakMap<Elements, MindVisibility>();
+
+/** What collapsed mind nodes hide. Element arrays are immutable, so the answer is remembered per array. */
+export function mindVisibility(elements: Elements): MindVisibility {
+  const known = visibilityCache.get(elements);
+  if (known) return known;
+  let result = nothingHidden;
+  const collapsed = elements.filter(el => el.type === 'shape' && el.mindCollapsed && el.mindParentId !== undefined);
+  if (collapsed.length) {
+    const hidden = new Set<string>(), counts = new Map<string, number>();
+    for (const node of collapsed) {
+      const below = mindDescendants(elements, [node.id]);
+      below.delete(node.id);
+      counts.set(node.id, below.size);
+      for (const id of below) hidden.add(id);
+    }
+    if (hidden.size) {
+      for (const el of elements) {
+        if (el.type === 'connector' && [el.source, el.target].some(end => end.bind && hidden.has(end.bind.elementId))) hidden.add(el.id);
+      }
+    }
+    result = { hidden, counts };
+  }
+  visibilityCache.set(elements, result);
+  return result;
+}
+
+export function visibleElements(elements: Elements): Elements {
+  const { hidden } = mindVisibility(elements);
+  return hidden.size ? elements.filter(el => !hidden.has(el.id)) : elements;
 }
 
 export function mindDescendants(elements: Elements, rootIds: Iterable<string>): Set<string> {
@@ -225,18 +291,30 @@ export function mindRootOf(el: El, index: Index): WhiteboardShape | null {
   return cursor;
 }
 
-/** What actually moves when the given selection is dragged: groups, whole mind maps and the contents of frames. */
-export function movingSet(elements: Elements, ids: ReadonlySet<string>, index: Index): Set<string> {
-  const result = withGroups(elements, ids);
-  const roots = new Set<string>();
-  for (const id of result) { const el = index.get(id); const root = el && mindRootOf(el, index); if (root) roots.add(root.id); }
-  for (const id of mindDescendants(elements, roots)) result.add(id);
+function withFrameContents(elements: Elements, result: Set<string>, index: Index): Set<string> {
   for (const id of [...result]) {
     const frame = index.get(id);
     if (frame?.type !== 'frame') continue;
     for (const child of frameChildren(elements, frame, index)) result.add(child);
   }
   return result;
+}
+
+/** What actually moves when the given selection is dragged: groups, whole mind maps and the contents of frames. */
+export function movingSet(elements: Elements, ids: ReadonlySet<string>, index: Index, focus: string | null = null): Set<string> {
+  const result = withGroups(elements, ids, focus);
+  const roots = new Set<string>();
+  for (const id of result) { const el = index.get(id); const root = el && mindRootOf(el, index); if (root) roots.add(root.id); }
+  for (const id of mindDescendants(elements, roots)) result.add(id);
+  return withFrameContents(elements, result, index);
+}
+
+/** What a copy, a duplicate or an export of the selection carries: group mates, the branches under selected mind nodes and frame contents. */
+export function dependentSet(elements: Elements, ids: ReadonlySet<string>, index: Index, focus: string | null = null): Set<string> {
+  const result = withGroups(elements, ids, focus);
+  const nodes = [...result].filter(id => { const el = index.get(id); return el?.type === 'shape' && el.mindParentId !== undefined; });
+  for (const id of mindDescendants(elements, nodes)) result.add(id);
+  return withFrameContents(elements, result, index);
 }
 
 export function frameChildren(elements: Elements, frame: Extract<El, { type: 'frame' }>, index: Index): string[] {
@@ -373,17 +451,19 @@ export function removeElements(elements: Elements, ids: ReadonlySet<string>, ind
  * Copy elements with fresh identities. References inside the copied set are remapped; references
  * that point outside it are dropped so a copy never silently depends on its original's neighbours.
  */
-export function cloneElements(source: Elements, index: Index, offset: Point, newId: () => string): El[] {
+export function cloneElements(source: Elements, index: Index, offset: Point, newId: () => string, keepGroups: ReadonlySet<string> = new Set()): El[] {
   const ids = new Map(source.map(el => [el.id, newId()]));
   const groups = new Map<string, string>();
-  const group = (value: string | undefined) => {
-    if (!value) return {};
+  const group = (value: string) => {
+    // Groups the copy is made inside of are kept, so the copy joins them.
+    if (keepGroups.has(value)) return value;
     if (!groups.has(value)) groups.set(value, newId());
-    return { groupId: groups.get(value)! };
+    return groups.get(value)!;
   };
   return source.map(el => {
-    const { groupId, ...rest } = el;
-    const base = { ...rest, id: ids.get(el.id)!, ...group(groupId) };
+    const { groupId, groupParents, ...rest } = el;
+    const base = { ...rest, id: ids.get(el.id)!, ...(groupId ? { groupId: group(groupId) } : {}),
+      ...(groupId && groupParents?.length ? { groupParents: groupParents.map(group) } : {}) };
     if (base.type === 'connector') {
       const original = el as Connector;
       const end = (value: WhiteboardConnectorEnd, which: 'source' | 'target'): WhiteboardConnectorEnd => {
@@ -395,7 +475,11 @@ export function cloneElements(source: Elements, index: Index, offset: Point, new
     }
     const moved = { ...base, x: base.x + offset.x, y: base.y + offset.y };
     if (moved.type === 'shape' && moved.mindParentId !== undefined) {
-      return { ...moved, mindParentId: moved.mindParentId && ids.has(moved.mindParentId) ? ids.get(moved.mindParentId)! : null };
+      if (moved.mindParentId && ids.has(moved.mindParentId)) return { ...moved, mindParentId: ids.get(moved.mindParentId)! };
+      // The copied top of a branch becomes a root, and a root has no side.
+      const { mindSide: _side, ...root } = moved;
+      void _side;
+      return { ...root, mindParentId: null };
     }
     return moved;
   });
@@ -415,12 +499,21 @@ export function reorder(elements: Elements, ids: ReadonlySet<string>, move: Orde
   return [...rest.slice(0, at), ...picked, ...rest.slice(at)];
 }
 
-export function setGroup(elements: Elements, ids: ReadonlySet<string>, groupId: string | null): El[] {
+/**
+ * Wrap the elements in a new group, or with null take one group level away. The level is the
+ * outermost one; inside an entered group (`focus`) it is the level right below that group.
+ */
+export function setGroup(elements: Elements, ids: ReadonlySet<string>, groupId: string | null, focus: string | null = null): El[] {
   return replace(elements, el => {
-    if (!ids.has(el.id) || (el.groupId ?? null) === groupId) return el;
-    const { groupId: _old, ...rest } = el;
-    void _old;
-    return (groupId ? { ...rest, groupId } : rest) as El;
+    if (!ids.has(el.id)) return el;
+    const chain = groupChain(el);
+    const at = focus ? chain.indexOf(focus) : -1;
+    const end = at < 0 ? chain.length : at;
+    if (groupId ? chain.includes(groupId) : !end) return el;
+    const next = groupId ? [...chain.slice(0, end), groupId, ...chain.slice(end)] : [...chain.slice(0, end - 1), ...chain.slice(end)];
+    const { groupId: _old, groupParents: _parents, ...rest } = el;
+    void _old; void _parents;
+    return { ...rest, ...(next.length ? { groupId: next[0]! } : {}), ...(next.length > 1 ? { groupParents: next.slice(1) } : {}) } as El;
   });
 }
 
@@ -435,13 +528,21 @@ export function setLocked(elements: Elements, ids: ReadonlySet<string>, locked: 
 
 export type Alignment = 'left' | 'hcenter' | 'right' | 'top' | 'vcenter' | 'bottom';
 
-/** Units that align as one: a group moves as a block, everything else on its own. */
+/** Units that align as one: a group that is selected as a whole moves as a block, everything else on its own. */
 function alignUnits(elements: Elements, ids: ReadonlySet<string>, index: Index): { ids: Set<string>; bounds: Rect }[] {
+  const groupMembers = new Map<string, string[]>();
+  for (const el of elements) {
+    for (const group of groupChain(el)) {
+      const list = groupMembers.get(group);
+      if (list) list.push(el.id); else groupMembers.set(group, [el.id]);
+    }
+  }
   const seen = new Set<string>();
   const units: { ids: Set<string>; bounds: Rect }[] = [];
   for (const el of elements) {
     if (!ids.has(el.id) || seen.has(el.id)) continue;
-    const members = el.groupId ? new Set(elements.filter(other => other.groupId === el.groupId && ids.has(other.id)).map(other => other.id)) : new Set([el.id]);
+    const whole = groupChain(el).reverse().find(group => groupMembers.get(group)!.every(id => ids.has(id)));
+    const members = new Set(whole ? groupMembers.get(whole)! : [el.id]);
     for (const id of members) seen.add(id);
     const bounds = boundsOfIds(members, index);
     if (bounds) units.push({ ids: members, bounds });
@@ -498,14 +599,18 @@ export function applyStyle(elements: Elements, ids: ReadonlySet<string>, patch: 
   return replace(elements, el => {
     if (!ids.has(el.id)) return el;
     let changes: object = {};
-    if (el.type === 'shape') changes = pick(patch, ['fill', 'stroke', 'strokeWidth', 'strokeStyle', 'textColor', 'fontSize', 'textAlign', 'shape']);
+    if (el.type === 'shape') changes = pick(patch, ['fill', 'stroke', 'strokeWidth', 'strokeStyle', 'textColor', 'fontSize', 'textAlign', 'bold', 'shape']);
     else if (el.type === 'text') changes = { ...pick(patch, ['fontSize', 'textAlign', 'bold']), ...(patch.textColor ? { color: patch.textColor } : {}) };
-    else if (el.type === 'note') changes = { ...pick(patch, ['fontSize', 'textAlign']), ...(patch.noteColor ? { color: patch.noteColor } : {}) };
+    else if (el.type === 'note') changes = { ...pick(patch, ['fontSize', 'textAlign', 'bold']), ...(patch.noteColor ? { color: patch.noteColor } : {}) };
     else if (el.type === 'pen') changes = { ...(patch.stroke && patch.stroke !== 'transparent' ? { color: patch.stroke } : {}), ...(patch.strokeWidth ? { strokeWidth: Math.max(0.5, patch.strokeWidth) } : {}) };
     else if (el.type === 'connector') changes = { ...pick(patch, ['strokeStyle', 'mode', 'startArrow', 'endArrow']),
       ...(patch.stroke && patch.stroke !== 'transparent' ? { stroke: patch.stroke } : {}), ...(patch.strokeWidth ? { strokeWidth: Math.max(0.5, patch.strokeWidth) } : {}) };
-    return Object.keys(changes).some(key => (el as unknown as Record<string, unknown>)[key] !== (changes as Record<string, unknown>)[key])
-      ? { ...el, ...changes } as El : el;
+    // An absent flag and `false` are the same style.
+    const same = (a: unknown, b: unknown) => a === b || (typeof b === 'boolean' && Boolean(a) === b);
+    if (!Object.keys(changes).some(key => !same((el as unknown as Record<string, unknown>)[key], (changes as Record<string, unknown>)[key]))) return el;
+    const next = { ...el, ...changes } as El & { bold?: boolean };
+    if (next.bold === false) delete next.bold;
+    return next;
   });
 }
 
@@ -522,10 +627,10 @@ export function shapeTextBox(el: WhiteboardShape): Rect {
 /** Height an element needs to show all of its text at its current width. */
 export function fittedHeight(el: BoxEl, measure: Measure): number {
   if (el.type === 'text') return Math.max(lineHeightOf(el.fontSize), textBlockSize(el.text, el.w, el.fontSize, Boolean(el.bold), measure).height);
-  if (el.type === 'note') return textBlockSize(el.text, el.w - notePadding * 2, el.fontSize, false, measure).height + notePadding * 2;
+  if (el.type === 'note') return textBlockSize(el.text, el.w - notePadding * 2, el.fontSize, Boolean(el.bold), measure).height + notePadding * 2;
   if (el.type === 'shape' && el.text) {
     const area = shapeTextBox(el);
-    const needed = textBlockSize(el.text, area.w, el.fontSize, false, measure).height + textPadding * 2;
+    const needed = textBlockSize(el.text, area.w, el.fontSize, Boolean(el.bold), measure).height + textPadding * 2;
     // Curved and pointed shapes need extra height so the label clears their slanted edges.
     const factor = el.shape === 'rect' || el.shape === 'roundRect' ? 1 : el.shape === 'triangle' ? 1 / 0.65 * 1.2 : 1.35;
     return needed * factor;
@@ -564,12 +669,88 @@ export function normalizeForSave(elements: Elements): El[] {
         return target ? { x: num(point.x), y: num(point.y), bind: { elementId: target.id, ax: round(clamp(value.bind!.ax, 0, 1), 4), ay: round(clamp(value.bind!.ay, 0, 1), 4) } }
           : { x: num(value.x), y: num(value.y) };
       };
-      return { ...el, source: end(el.source, path[0]!), target: end(el.target, path.at(-1)!) };
+      const { bend, ...rest } = el;
+      // A shift only means something on an elbow route; zero is the default and is not stored.
+      const shift = el.mode === 'elbow' && bend ? num(bend) : 0;
+      return { ...rest, source: end(el.source, path[0]!), target: end(el.target, path.at(-1)!), ...(shift ? { bend: shift } : {}) };
     }
     const box = { x: num(el.x), y: num(el.y), w: num(Math.max(0, el.w), whiteboardLimits.maxSize), h: num(Math.max(0, el.h), whiteboardLimits.maxSize), angle: round(normalizeAngle(el.angle), 5) };
-    if (el.type === 'shape' && el.mindParentId && index.get(el.mindParentId)?.type !== 'shape') return { ...el, ...box, mindParentId: null };
+    if (el.type === 'shape' && el.mindParentId && index.get(el.mindParentId)?.type !== 'shape') {
+      const { mindSide: _side, ...root } = el;
+      void _side;
+      return { ...root, ...box, mindParentId: null };
+    }
     return { ...el, ...box };
   });
+}
+
+// ── Erasing part of a stroke ─────────────────────────────────────────────────
+
+type Pen = Extract<El, { type: 'pen' }>;
+
+/**
+ * Remove the parts of a freehand stroke that lie within `radius` of the eraser's path. Returns
+ * null when the stroke is untouched, otherwise the pieces that remain (none when it is gone). The
+ * first piece keeps the stroke's id, so a connector bound to it stays bound.
+ */
+export function erasePen(el: Pen, eraser: readonly Point[], radius: number, newId: () => string): Pen[] | null {
+  const reach = radius + el.strokeWidth / 2;
+  const points = penPoints(el);
+  if (!points.length || !eraser.length) return null;
+  // Strokes are stored simplified, so a long straight run may be two points; sample it finely enough to lose its middle.
+  const step = Math.max(reach / 2, 0.5);
+  const dense: Point[] = [points[0]!];
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1]!, b = points[i]!;
+    const parts = Math.min(4000, Math.max(1, Math.ceil(distance(a, b) / step)));
+    for (let k = 1; k <= parts; k += 1) dense.push({ x: a.x + (b.x - a.x) * k / parts, y: a.y + (b.y - a.y) * k / parts });
+  }
+  const gone = dense.map(point => distanceToPolyline(point, eraser) <= reach);
+  if (!gone.includes(true)) return null;
+  const pieces: Pen[] = [];
+  let run: Point[] = [];
+  const flush = () => {
+    const kept = run;
+    run = [];
+    if (kept.length < 2) return;
+    let length = 0;
+    for (let i = 1; i < kept.length; i += 1) length += distance(kept[i - 1]!, kept[i]!);
+    // Crumbs shorter than the stroke is wide read as dirt, not as ink.
+    if (length < Math.max(1, el.strokeWidth / 2)) return;
+    const flat = simplifyStroke(kept.flatMap(p => [p.x, p.y]), 0.2);
+    const bounds = boundsOfPoints(kept);
+    pieces.push({ ...el, id: pieces.length ? newId() : el.id, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, angle: 0,
+      points: flat.map((value, i) => round(value - (i % 2 ? bounds.y : bounds.x))) });
+  };
+  dense.forEach((point, i) => { if (gone[i]) flush(); else run.push(point); });
+  flush();
+  return pieces;
+}
+
+export interface BoardLocate {
+  /** Text to look for in an element, as typed into search. */
+  text?: string;
+  /** A page card or database view, counted among them in z-order like the server's reference index. */
+  reference?: { pageId: string; occurrence?: number };
+}
+
+/** The element a search hit or a backlink points at. `exact` is false when a reference had to fall back to the first card for the page. */
+export function locateElement(elements: Elements, request: BoardLocate): { id: string; exact: boolean } | null {
+  if (request.reference) {
+    const target = request.reference.pageId.toLowerCase();
+    const points = (el: El) => (el.type === 'card' ? el.pageId : el.type === 'database' ? el.databaseId : '').toLowerCase() === target;
+    const references = elements.filter(el => el.type === 'card' || el.type === 'database');
+    const nth = request.reference.occurrence === undefined ? undefined : references[request.reference.occurrence];
+    if (nth && points(nth)) return { id: nth.id, exact: true };
+    const first = references.find(points);
+    return first ? { id: first.id, exact: request.reference.occurrence === undefined } : null;
+  }
+  const squash = (value: string) => value.replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
+  const needle = squash(request.text ?? '');
+  if (!needle) return null;
+  // The same text the search index holds for each element.
+  const found = elements.find(el => squash(el.type === 'image' ? el.fileName : elementText(el)).includes(needle));
+  return found ? { id: found.id, exact: true } : null;
 }
 
 export const elementText = (el: El): string => el.type === 'frame' ? el.name : el.type === 'card' ? el.label

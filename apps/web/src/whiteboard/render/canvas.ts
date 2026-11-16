@@ -1,8 +1,8 @@
 import type { WhiteboardCard, WhiteboardTextAlign } from '@nbase/contracts';
 import { aabb, centerOf, expandRect, rectsIntersect, type Box, type Point, type Rect, type SnapGuide } from '../geometry';
-import { connectorPath, elementBounds, handlePoint, handles, isBox, notePadding, penPoints, shapeTextBox, type BoxEl, type Connector,
+import { connectorPath, elementBounds, handlePoint, handles, isBox, mindVisibility, notePadding, penPoints, shapeTextBox, type BoxEl, type Connector,
   type ConnectorPath, type El, type Elements, type Index } from '../model';
-import { isMindNode } from '../mind';
+import { isMindNode, mindChildSide, mindEdgeEnds, mindTogglePoint, mindToggleRadius } from '../mind';
 import { fontOf, lineHeightOf, wrapText, type Measure } from '../text';
 import { noteInk, themed, type Theme } from './colors';
 import { arrowheadPath, connectorLinePath, dashArray, mindEdgePath, roundedRectPath, shapePath, strokePath } from './paths';
@@ -159,7 +159,7 @@ function drawBox(ctx: CanvasRenderingContext2D, el: BoxEl, options: SceneOptions
         if (el.strokeWidth > 0) { stroke(ctx, themed(el.stroke, dark), el.strokeWidth, el.strokeStyle); ctx.stroke(outline); }
         if (el.text && !textHidden && el.fontSize * zoom >= 3) {
           const area = shapeTextBox(el);
-          drawLines(ctx, wrapped(el.text, area.w, el.fontSize, false, measure), area, el.fontSize, false, el.textAlign, themed(el.textColor, dark), 'middle');
+          drawLines(ctx, wrapped(el.text, area.w, el.fontSize, Boolean(el.bold), measure), area, el.fontSize, Boolean(el.bold), el.textAlign, themed(el.textColor, dark), 'middle');
         }
         break;
       }
@@ -170,7 +170,7 @@ function drawBox(ctx: CanvasRenderingContext2D, el: BoxEl, options: SceneOptions
         ctx.shadowColor = 'transparent';
         if (el.text && !textHidden && el.fontSize * zoom >= 3) {
           const area = { x: notePadding, y: notePadding, w: el.w - notePadding * 2, h: el.h - notePadding * 2 };
-          drawLines(ctx, wrapped(el.text, area.w, el.fontSize, false, measure), area, el.fontSize, false, el.textAlign, noteInk(dark), 'top');
+          drawLines(ctx, wrapped(el.text, area.w, el.fontSize, Boolean(el.bold), measure), area, el.fontSize, Boolean(el.bold), el.textAlign, noteInk(dark), 'top');
         }
         break;
       }
@@ -289,13 +289,15 @@ export function drawScene(ctx: CanvasRenderingContext2D, elements: Elements, ind
     }
     return rectsIntersect(visible, expandRect(aabb(el), el.type === 'pen' ? el.strokeWidth : 12));
   };
+  // Whatever a collapsed mind node hides is not drawn at all.
+  const { hidden, counts } = mindVisibility(elements);
   // Mind-map edges are derived from the tree and sit underneath every node.
   ctx.lineCap = 'round';
   for (const el of elements) {
-    if (!isMindNode(el) || !el.mindParentId) continue;
+    if (!isMindNode(el) || !el.mindParentId || hidden.has(el.id)) continue;
     const parent = index.get(el.mindParentId);
     if (!parent || !isBox(parent)) continue;
-    const from = { x: parent.x + parent.w, y: parent.y + parent.h / 2 }, to = { x: el.x, y: el.y + el.h / 2 };
+    const { from, to } = mindEdgeEnds(parent, el);
     if (!options.exporting && !rectsIntersect(visible, { x: Math.min(from.x, to.x), y: Math.min(from.y, to.y), w: Math.abs(to.x - from.x), h: Math.abs(to.y - from.y) })) continue;
     stroke(ctx, themed(el.stroke, options.theme.dark), 2, 'solid');
     ctx.stroke(new Path2D(mindEdgePath(from, to)));
@@ -303,6 +305,7 @@ export function drawScene(ctx: CanvasRenderingContext2D, elements: Elements, ind
   let drawn = 0;
   const frames: Extract<El, { type: 'frame' }>[] = [];
   for (const el of elements) {
+    if (hidden.has(el.id)) continue;
     if (el.type === 'frame') frames.push(el);
     if (!inView(el)) continue;
     drawn += 1;
@@ -311,6 +314,20 @@ export function drawScene(ctx: CanvasRenderingContext2D, elements: Elements, ind
     if (el.type === 'connector') drawConnector(ctx, el, paths.get(el.id) ?? connectorPath(el, index), options, view.zoom);
     else drawBox(ctx, el, options, view.zoom);
     if (faded) ctx.restore();
+  }
+  // A collapsed node shows how many nodes it hides, where its children would start.
+  for (const [id, count] of counts) {
+    const node = index.get(id);
+    if (!isMindNode(node) || hidden.has(id) || !count) continue;
+    const at = mindTogglePoint(node, mindChildSide(node, elements, index));
+    if (!options.exporting && !rectsIntersect(visible, expandRect({ x: at.x, y: at.y, w: 0, h: 0 }, mindToggleRadius))) continue;
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.arc(at.x, at.y, mindToggleRadius, 0, Math.PI * 2);
+    ctx.fillStyle = themed(node.stroke, options.theme.dark); ctx.fill();
+    if (10 * view.zoom < 3) continue;
+    const label = count > 99 ? '99+' : String(count);
+    ctx.font = fontOf(label.length > 2 ? 8 : 10, true); ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, at.x, at.y + 0.5);
   }
   // Frame titles stay a constant screen size and are drawn last so content never hides them.
   for (const frame of frames) {
@@ -336,9 +353,18 @@ export interface Overlay {
   guides: SnapGuide[];
   draft: { points: Point[]; color: string; width: number; highlighter: boolean } | null;
   eraser: Point[] | null;
+  /** Handle on the middle segment of the selected elbow connector. */
+  bend: Point | null;
+  /** Collapse button of the hovered or selected mind node, in world coordinates. */
+  mindToggle: Point | null;
+  /** Where a dragged mind node would land: the node that becomes its parent, or its place among siblings. */
+  drop: { box: Box | null; line: { from: Point; to: Point } | null } | null;
+  /** Bounds of the group that has been entered. */
+  focus: Rect | null;
 }
 
-export const emptyOverlay: Overlay = { outlines: [], transform: null, connectorEnds: [], hover: null, anchors: null, marquee: null, guides: [], draft: null, eraser: null };
+export const emptyOverlay: Overlay = { outlines: [], transform: null, connectorEnds: [], hover: null, anchors: null, marquee: null, guides: [], draft: null, eraser: null,
+  bend: null, mindToggle: null, drop: null, focus: null };
 export const rotateHandleOffset = 26;
 export const handleSize = 9;
 
@@ -370,6 +396,12 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, overlay: Overlay, vie
     ctx.strokeStyle = theme.dark ? 'rgba(255,255,255,.25)' : 'rgba(0,0,0,.18)'; ctx.lineWidth = 8; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     ctx.beginPath(); overlay.eraser.map(p => toScreen(p, view)).forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke();
   }
+  if (overlay.focus) {
+    const a = toScreen(overlay.focus, view);
+    ctx.strokeStyle = theme.accent; ctx.globalAlpha = 0.55; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);
+    ctx.strokeRect(Math.round(a.x) - 7.5, Math.round(a.y) - 7.5, overlay.focus.w * view.zoom + 16, overlay.focus.h * view.zoom + 16);
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+  }
   if (overlay.hover) { ctx.strokeStyle = theme.accent; ctx.globalAlpha = 0.5; ctx.lineWidth = 1.5; boxPath(ctx, overlay.hover, view); ctx.stroke(); ctx.globalAlpha = 1; }
   ctx.strokeStyle = theme.accent; ctx.lineWidth = 1;
   for (const box of overlay.outlines) { boxPath(ctx, box, view); ctx.stroke(); }
@@ -394,6 +426,25 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, overlay: Overlay, vie
   for (const end of overlay.connectorEnds) {
     const p = toScreen(end, view);
     ctx.beginPath(); ctx.arc(p.x, p.y, 6, 0, Math.PI * 2); ctx.fillStyle = theme.handleFill; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = theme.accent; ctx.stroke();
+  }
+  if (overlay.bend) {
+    const p = toScreen(overlay.bend, view);
+    ctx.beginPath(); ctx.moveTo(p.x, p.y - 6); ctx.lineTo(p.x + 6, p.y); ctx.lineTo(p.x, p.y + 6); ctx.lineTo(p.x - 6, p.y); ctx.closePath();
+    ctx.fillStyle = theme.handleFill; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = theme.accent; ctx.stroke();
+  }
+  if (overlay.mindToggle) {
+    const p = toScreen(overlay.mindToggle, view), r = Math.max(5, mindToggleRadius * view.zoom);
+    ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = theme.handleFill; ctx.fill(); ctx.lineWidth = 1.5; ctx.strokeStyle = theme.accent; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p.x - r * 0.45, p.y); ctx.lineTo(p.x + r * 0.45, p.y); ctx.stroke();
+  }
+  if (overlay.drop) {
+    ctx.strokeStyle = theme.accent; ctx.lineCap = 'round';
+    if (overlay.drop.box) { ctx.lineWidth = 2.5; boxPath(ctx, overlay.drop.box, view); ctx.stroke(); }
+    if (overlay.drop.line) {
+      const a = toScreen(overlay.drop.line.from, view), b = toScreen(overlay.drop.line.to, view);
+      ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
   }
   if (overlay.anchors) {
     ctx.strokeStyle = theme.accent; ctx.lineWidth = 1.5; boxPath(ctx, overlay.anchors.box, view); ctx.stroke();

@@ -135,6 +135,7 @@ export function PersistentWorkspace() {
   const openSequence = useRef(0);
   const pendingSearchRef = useRef<{ pageId: string; phrase: string; field: SearchResult['matchField'] } | null>(null);
   const pendingBacklinkRef = useRef<{ link: PageBacklink; targetPageId: string } | null>(null);
+  const [boardLocate, setBoardLocate] = useState<{ pageId: string; key: number; text?: string; reference?: { pageId: string; occurrence: number } } | null>(null);
   const initialPageReference = useRef(pageIdFromReferenceUrl(location.pathname + location.search));
   const pendingCreatesRef = useRef(new Map<string, LocalPendingCreate>());
   const createBusyRef = useRef(false);
@@ -361,14 +362,29 @@ export function PersistentWorkspace() {
     });
   };
 
+  /** A whiteboard has no document editor to search in; the board itself finds the element once it is on screen. */
+  const locateOnBoard = (pageId: string) => {
+    if (activeIdRef.current !== pageId) return;
+    const search = pendingSearchRef.current, backlink = pendingBacklinkRef.current;
+    if (search?.pageId === pageId) {
+      if (search.field === 'title') { locatePendingSearch(pageId); return; }
+      pendingSearchRef.current = null;
+      setBoardLocate(previous => ({ pageId, key: (previous?.key ?? 0) + 1, text: search.phrase }));
+    } else if (backlink?.link.sourcePageId === pageId) {
+      pendingBacklinkRef.current = null;
+      setBoardLocate(previous => ({ pageId, key: (previous?.key ?? 0) + 1,
+        reference: { pageId: backlink.targetPageId, occurrence: backlink.link.occurrence } }));
+    }
+  };
+
   const locatePendingSearch = (pageId: string) => {
     const pending = pendingSearchRef.current;
     if (!pending || pending.pageId !== pageId || activeIdRef.current !== pageId) return;
     pendingSearchRef.current = null;
     let found = false;
     if (pending.field === 'title') {
-      const input = document.querySelector<HTMLInputElement>('.persistent-workspace .document-heading .page-title');
-      const heading = document.querySelector<HTMLElement>('.persistent-workspace .document-heading h1');
+      const input = document.querySelector<HTMLInputElement>('.persistent-workspace .document-heading .page-title, .persistent-workspace .wb-host-head input.page-title');
+      const heading = document.querySelector<HTMLElement>('.persistent-workspace .document-heading h1, .persistent-workspace .wb-host-head h1');
       const position = input?.value.toLocaleLowerCase().indexOf(pending.phrase.toLocaleLowerCase()) ?? -1;
       if (input && position >= 0) {
         input.focus({ preventScroll: true });
@@ -989,6 +1005,14 @@ export function PersistentWorkspace() {
     onTrash: (id: string) => { void openPage(id).then(opened => { if (opened) setDialog('delete'); }); },
     ...(canWrite ? { onPlace: (id: string, placement: PagePlacement) => { void placePageInTree(id, placement); } } : {}),
   };
+  // The server-side page copy only handles documents; a board is copied by creating a new board from what is on screen.
+  const duplicateBoard = () => {
+    if (!current || current.kind !== 'whiteboard' || !canWrite) return;
+    const content = draftsRef.current.get(current.id)?.content ?? docsRef.current.get(current.id)?.content;
+    if (!content || !isWhiteboardContent(content)) { setNotice('白板内容还未读取完成，请稍后再试。'); return; }
+    const copyTitle = (titleRef.current.trim() || '未命名白板').slice(0, 251).replace(/[\ud800-\udbff]$/u, '') + '（副本）';
+    void createPage(current.parentId, copyTitle, content);
+  };
   const formatExportItems: MenuItem[] = [
     { key: 'download-html', label: '下载为 HTML', icon: 'download', onSelect: () => void exportCurrentAs('html') },
     { key: 'download-docx', label: '下载为 Word', icon: 'download', onSelect: () => void exportCurrentAs('docx') },
@@ -1001,6 +1025,7 @@ export function PersistentWorkspace() {
   ] : current?.kind === 'whiteboard' ? [
     { key: 'mode', label: readOnly ? '切换为编辑' : '切换为只读', icon: 'focus', disabled: !canWrite, onSelect: () => setReadOnly(!readOnly) },
     { key: 'download', label: '下载白板数据 (JSON)', icon: 'download', onSelect: exportCurrent },
+    { key: 'copy', label: '创建白板副本', icon: 'copy', disabled: createBusy || !canWrite, onSelect: duplicateBoard },
     { key: 'move', label: '移动到…', icon: 'folder', disabled: currentLocked || !canWrite, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialog('move'); } },
     'divider',
     { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, disabled: currentLocked || !canWrite, onSelect: () => setDialog('delete') },
@@ -1091,7 +1116,13 @@ export function PersistentWorkspace() {
               readOnly={editorReadOnly} title={title} pages={pages} onNotice={setNotice} onOpenPage={id => void openPage(id)}
               imageUrl={id => workspace ? attachmentContentUrl(workspace.id, id) : null}
               onUploadImages={editorReadOnly ? undefined : files => uploadFiles(files)}
-              onReady={(id, content) => { if (id === activeIdRef.current) setEditorSnapshot(boardSnapshot(content)); }}
+              locate={boardLocate?.pageId === current.id ? boardLocate : undefined}
+              onLocated={key => setBoardLocate(previous => previous?.key === key ? null : previous)}
+              onReady={(id, content) => {
+                if (id !== activeIdRef.current) return;
+                setEditorSnapshot(boardSnapshot(content));
+                requestAnimationFrame(() => locateOnBoard(id));
+              }}
               onChange={(id, content) => { if (id === activeIdRef.current) markDraft(id, titleRef.current, boardSnapshot(content)); }} />
               </EmbedPathProvider></EmbeddedPagesProvider>
               : <div role="alert" className="nbase-unsupported"><h2>暂不能打开此白板</h2><button className="nb-btn" onClick={exportCurrent}>下载原始 JSON</button></div>}

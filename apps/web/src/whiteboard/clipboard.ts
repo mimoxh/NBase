@@ -5,9 +5,37 @@ import { cloneElements, elementText, indexElements, normalizeForSave, type El, t
 export const clipboardMime = 'application/x-nbase-whiteboard';
 const marker = 'nbaseWhiteboard';
 
-export function serializeElements(elements: Elements, newId: () => string): string {
+/** `imageUrl` says where each copied image can be read, so a paste into another workspace can bring the image along. */
+export function serializeElements(elements: Elements, newId: () => string, imageUrl?: (attachmentId: string) => string | null): string {
   const copies = normalizeForSave(cloneElements(elements, indexElements(elements), { x: 0, y: 0 }, newId));
-  return JSON.stringify({ [marker]: 1, elements: copies });
+  const images: Record<string, string> = {};
+  for (const el of copies) {
+    const url = el.type === 'image' ? imageUrl?.(el.attachmentId) : null;
+    if (el.type === 'image' && url) images[el.attachmentId] = url;
+  }
+  return JSON.stringify({ [marker]: 1, elements: copies, ...(Object.keys(images).length ? { images } : {}) });
+}
+
+const attachmentPath = /^\/api\/workspaces\/[0-9a-f-]{36}\/attachments\/[0-9a-f-]{36}\/content$/i;
+
+/**
+ * Where the images of a clipboard payload were copied from. Clipboard text can come from anywhere,
+ * so only this site's own attachment addresses (and its in-memory images) are accepted.
+ */
+export function clipboardImageSources(text: string, origin: string): Map<string, string> {
+  const result = new Map<string, string>();
+  if (!text.startsWith('{') || !text.includes(marker)) return result;
+  try {
+    const images = (JSON.parse(text) as { images?: unknown }).images;
+    if (typeof images !== 'object' || images === null) return result;
+    for (const [id, value] of Object.entries(images)) {
+      if (typeof value !== 'string' || !/^[0-9a-f-]{36}$/i.test(id)) continue;
+      if (value.startsWith(`blob:${origin}/`)) { result.set(id, value); continue; }
+      const url = new URL(value, origin);
+      if (url.origin === origin && attachmentPath.test(url.pathname) && !url.search && !url.hash) result.set(id, url.pathname);
+    }
+  } catch { /* Not a payload this site wrote. */ }
+  return result;
 }
 
 /** Elements from a clipboard payload, or null when it is not a valid whiteboard payload. */

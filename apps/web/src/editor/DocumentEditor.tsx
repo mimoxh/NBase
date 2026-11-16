@@ -236,7 +236,7 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <CodeHighlightPlugin /><CodeCopyPlugin onNotice={props.onNotice} /><BlockContextMenuPlugin onNotice={props.onNotice} />
       <EquationPlugin /><SlashCommandPlugin onPickAttachment={props.onPickAttachment} /><CalloutPlugin /><PageReferencePlugin historyState={history} />
       <MermaidPlugin historyState={history} /><DatabaseViewPlugin /><WhiteboardViewPlugin documentId={props.documentId} />
-      <ListIndentPlugin /><LinkInteractionPlugin onNotice={props.onNotice} />
+      <ListIndentPlugin onNotice={props.onNotice} /><LinkInteractionPlugin onNotice={props.onNotice} />
       <FloatingToolbarPlugin /><BlockHandlePlugin onBeforeMove={element => folding.current?.expand(element)} documentId={props.documentId} onNotice={props.onNotice} />
       <ShortcutsPlugin /><WordCountPlugin /><TogglePlugin documentId={props.documentId} /><TableColumnResizePlugin /><BookmarkPlugin onLinkPreview={props.onLinkPreview} onNotice={props.onNotice} />
       <FootnoteNavigationPlugin reveal={element => folding.current?.reveal(element)} />

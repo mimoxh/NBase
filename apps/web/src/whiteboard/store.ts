@@ -1,7 +1,7 @@
 import type { WhiteboardArrowhead, WhiteboardConnectorMode, WhiteboardShapeKind, WhiteboardStrokeStyle } from '@nbase/contracts';
 import { clamp, expandRect, type Point, type Rect } from './geometry';
 import { History } from './history';
-import { boundsOfIds, indexElements, noteColors, normalizeForSave, palette, type El } from './model';
+import { boundsOfIds, indexElements, noteColors, normalizeForSave, palette, visibleElements, type El } from './model';
 import { emptyOverlay, type Background, type Overlay, type View } from './render/canvas';
 
 export type Tool = 'select' | 'hand' | 'shape' | 'text' | 'note' | 'connector' | 'pen' | 'highlighter' | 'eraser' | 'frame' | 'mind';
@@ -10,11 +10,14 @@ export interface ToolStyle {
   shape: WhiteboardShapeKind; fill: string; stroke: string; strokeWidth: number; strokeStyle: WhiteboardStrokeStyle;
   noteColor: string; penColor: string; penWidth: number; highlighterColor: string; highlighterWidth: number;
   connectorMode: WhiteboardConnectorMode; endArrow: WhiteboardArrowhead;
+  /** `element` removes whatever the eraser touches; `stroke` rubs out only the touched part of freehand strokes. */
+  eraserMode: 'element' | 'stroke';
 }
 
 export const defaultToolStyle: ToolStyle = {
   shape: 'rect', fill: '#ffffff', stroke: palette.ink, strokeWidth: 2, strokeStyle: 'solid', noteColor: noteColors[0]!,
   penColor: palette.ink, penWidth: 3, highlighterColor: '#ffe066', highlighterWidth: 18, connectorMode: 'elbow', endArrow: 'arrow',
+  eraserMode: 'element',
 };
 
 export const minZoom = 0.05;
@@ -47,6 +50,8 @@ export class BoardStore {
   editingId: string | null = null;
   /** The live page or database on the board that currently takes pointer and keyboard input. */
   activeEmbedId: string | null = null;
+  /** The group that has been entered: picking inside it selects its members instead of the whole group. */
+  focusGroup: string | null = null;
   background: Background = 'dots';
   minimap = false;
   overlay: Overlay = emptyOverlay;
@@ -150,7 +155,7 @@ export class BoardStore {
   setTool(tool: Tool) {
     if (this.readOnly && tool !== 'select' && tool !== 'hand') return;
     this.tool = tool;
-    if (tool !== 'select') this.selection = emptySelection;
+    if (tool !== 'select') { this.selection = emptySelection; this.focusGroup = null; }
     this.overlay = emptyOverlay;
     this.emit();
   }
@@ -186,7 +191,7 @@ export class BoardStore {
   fitTo(rect: Rect | null, padding = 48, max = 2) { if (rect) this.setView(this.viewFor(rect, padding, max)); }
 
   zoomToFit() {
-    const bounds = boundsOfIds(this.elements.map(el => el.id), this.index);
+    const bounds = boundsOfIds(visibleElements(this.elements).map(el => el.id), this.index);
     if (bounds) this.fitTo(expandRect(bounds, 0), 64, 1);
     else this.setView({ x: -this.size.width / 2, y: -this.size.height / 2, zoom: 1 });
   }

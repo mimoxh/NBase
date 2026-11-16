@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { WhiteboardFrame } from '@nbase/contracts';
 import { expandRect, unionRects } from '../geometry';
-import { boardBounds, type El } from '../model';
+import { boardBounds, visibleElements, type El } from '../model';
 import { drawScene, type ImageSource, type PageInfo } from '../render/canvas';
 import { darkTheme, lightTheme } from '../render/colors';
 import { maxZoom, type BoardStore } from '../store';
@@ -101,7 +101,7 @@ export function Minimap({ store, dark }: { store: BoardStore; dark: boolean }) {
   useBoard(store);
   const ref = useRef<HTMLCanvasElement>(null);
   const width = 200, height = 132;
-  const world = store.minimap ? unionRects([boardBounds(store.elements, store.index) ?? { x: 0, y: 0, w: 1, h: 1 },
+  const world = store.minimap ? unionRects([boardBounds(visibleElements(store.elements), store.index) ?? { x: 0, y: 0, w: 1, h: 1 },
     { x: store.view.x, y: store.view.y, w: store.size.width / store.view.zoom, h: store.size.height / store.view.zoom }]) : null;
   const area = world ? expandRect(world, Math.max(world.w, world.h) * 0.05) : null;
   const scale = area ? Math.min(width / area.w, height / area.h) : 1;
@@ -114,7 +114,7 @@ export function Minimap({ store, dark }: { store: BoardStore; dark: boolean }) {
     const theme = dark ? darkTheme : lightTheme;
     ctx.fillStyle = theme.canvas; ctx.fillRect(0, 0, width, height);
     ctx.fillStyle = dark ? '#3a3e45' : '#c9ced6';
-    for (const el of store.elements) {
+    for (const el of visibleElements(store.elements)) {
       const b = el.type === 'connector' ? null : { x: el.x, y: el.y, w: el.w, h: el.h };
       if (!b) continue;
       ctx.fillRect((b.x - area.x) * scale, (b.y - area.y) * scale, Math.max(1, b.w * scale), Math.max(1, b.h * scale));

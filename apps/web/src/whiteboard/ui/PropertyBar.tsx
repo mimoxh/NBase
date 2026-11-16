@@ -7,7 +7,7 @@ import type { BoardStore } from '../store';
 import { BoardIcon, type BoardIconName } from './icons';
 import { shapeLabels, Swatches, useBoard, Widths } from './Toolbar';
 
-type Panel = 'fill' | 'stroke' | 'text' | 'note' | 'shape' | 'arrows' | 'align' | 'font' | null;
+type Panel = 'fill' | 'stroke' | 'text' | 'note' | 'shape' | 'arrows' | 'align' | 'font' | 'mind' | null;
 
 function Btn({ icon, label, onClick, on = false, disabled = false, children }: { icon?: BoardIconName; label: string; onClick: () => void; on?: boolean; disabled?: boolean; children?: ReactNode }) {
   return <button type="button" className={`wb-pbtn ${on ? 'on' : ''}`} title={label} aria-label={label} aria-pressed={on} disabled={disabled} onClick={onClick}>
@@ -48,8 +48,10 @@ export function PropertyBar({ store, controller, onMore, onPresentFrame, onFitCa
   const textual = [...shapes, ...notes, ...texts];
   const fontSize = textual[0]?.fontSize ?? 16;
   const textAlign: WhiteboardTextAlign = textual[0]?.textAlign ?? 'left';
-  const grouped = selected.some(el => el.groupId);
+  const { canGroup, canUngroup } = controller.groupState();
   const multi = selected.length > 1;
+  const mind = controller.mindInfo();
+  const bent = connectors.some(el => el.mode === 'elbow' && el.bend !== undefined);
 
   const items: ReactNode[] = [];
   if (locked) items.push(<Btn key="unlock" icon="unlock" label="解锁 (Ctrl+Shift+L)" onClick={() => controller.toggleLock()} />);
@@ -64,6 +66,12 @@ export function PropertyBar({ store, controller, onMore, onPresentFrame, onFitCa
         onClick={() => controller.style({ mode: c.mode === 'straight' ? 'elbow' : c.mode === 'elbow' ? 'curve' : 'straight' })} />);
       items.push(<Btn key="arrows" icon={c.startArrow !== 'none' && c.endArrow !== 'none' ? 'arrowBoth' : c.endArrow !== 'none' ? 'arrowEnd' : c.startArrow !== 'none' ? 'arrowStart' : 'arrowNone'}
         label="箭头" on={panel === 'arrows'} onClick={() => toggle('arrows')} />);
+      if (bent) items.push(<Btn key="bend" label="折线中段恢复默认位置" onClick={() => controller.resetBend()}><span className="wb-fs">复位</span></Btn>);
+    }
+    if (mind) {
+      if (mind.hasChildren) items.push(<Btn key="fold" label={mind.collapsed ? '展开分支' : '收起分支'} on={mind.collapsed}
+        onClick={() => controller.toggleCollapsed(mind.node.id)}><span className="wb-fs">{mind.collapsed ? '展开' : '收起'}</span></Btn>);
+      items.push(<Btn key="mind" label="分支方向" on={panel === 'mind'} onClick={() => toggle('mind')}><span className="wb-fs">方向</span></Btn>);
     }
     if (textual.length) {
       items.push(<Btn key="font" label="字号" on={panel === 'font'} onClick={() => toggle('font')}><span className="wb-fs">{fontSize}</span></Btn>);
@@ -71,7 +79,7 @@ export function PropertyBar({ store, controller, onMore, onPresentFrame, onFitCa
         onClick={() => controller.style({ textAlign: textAlign === 'left' ? 'center' : textAlign === 'center' ? 'right' : 'left' })} />);
     }
     if (shapes.length || texts.length) items.push(<Btn key="color" label="文字颜色" on={panel === 'text'} onClick={() => toggle('text')}><span className="wb-tc" style={{ '--wb-swatch': shapes[0]?.textColor ?? texts[0]?.color ?? '#1f2328' } as React.CSSProperties}>A</span></Btn>);
-    if (texts.length) items.push(<Btn key="bold" icon="bold" label="加粗" on={texts.every(el => el.bold)} onClick={() => controller.style({ bold: !texts.every(el => el.bold) })} />);
+    if (textual.length) items.push(<Btn key="bold" icon="bold" label="加粗" on={textual.every(el => el.bold)} onClick={() => controller.style({ bold: !textual.every(el => el.bold) })} />);
     if (cards.length === 1 && !multi) items.push(<Btn key="open" icon="open" label="打开页面" onClick={() => controller.openCard(cards[0]!.id)} />);
     if (cards.length === 1 && !multi && onFitCard) {
       const preview = cards[0]!.view === 'preview';
@@ -83,9 +91,9 @@ export function PropertyBar({ store, controller, onMore, onPresentFrame, onFitCa
     if (frames.length === 1 && !multi) items.push(<Btn key="present" icon="play" label="从此框架开始放映" onClick={() => onPresentFrame(frames[0]!.id)} />);
     if (multi) {
       items.push(<Btn key="alignment" icon="alignLeft" label="对齐与分布" on={panel === 'align'} onClick={() => toggle('align')} />);
-      items.push(grouped ? <Btn key="ungroup" icon="ungroup" label="取消编组 (Ctrl+Shift+G)" onClick={() => controller.ungroup()} />
-        : <Btn key="group" icon="group" label="编组 (Ctrl+G)" onClick={() => controller.group()} />);
-    } else if (grouped) items.push(<Btn key="ungroup" icon="ungroup" label="取消编组 (Ctrl+Shift+G)" onClick={() => controller.ungroup()} />);
+      if (canGroup) items.push(<Btn key="group" icon="group" label="编组 (Ctrl+G)" onClick={() => controller.group()} />);
+    }
+    if (canUngroup) items.push(<Btn key="ungroup" icon="ungroup" label="取消编组 (Ctrl+Shift+G)" onClick={() => controller.ungroup()} />);
     items.push(<Btn key="lock" icon="lock" label="锁定 (Ctrl+Shift+L)" onClick={() => controller.toggleLock()} />);
   }
   items.push(<Btn key="more" icon="more" label="更多操作" onClick={() => onMore(style.left, style.top + 40)} />);
@@ -111,6 +119,10 @@ export function PropertyBar({ store, controller, onMore, onPresentFrame, onFitCa
         {(['startArrow', 'endArrow'] as const).map(which => <div key={which} className="wb-pop-row"><span className="wb-pop-label">{which === 'startArrow' ? '起点' : '终点'}</span>
           <div className="wb-seg">{arrowheads.map(([value, label]) => <button key={value} type="button" className={connectors[0]![which] === value ? 'on' : ''}
             onClick={() => controller.style({ [which]: value })}>{label}</button>)}</div></div>)}
+      </div>}
+      {panel === 'mind' && mind && <div className="wb-seg" role="radiogroup" aria-label="分支方向">
+        {([['right', '向右'], ['left', '向左'], ['both', '两侧']] as const).map(([layout, label]) => <button key={layout} type="button" role="radio"
+          aria-checked={mind.layout === layout} className={mind.layout === layout ? 'on' : ''} onClick={() => controller.setMindLayout(layout)}>{label}</button>)}
       </div>}
       {panel === 'font' && <div className="wb-seg">{fontSizes.map(size => <button key={size} type="button" className={fontSize === size ? 'on' : ''} onClick={() => controller.style({ fontSize: size })}>{size}</button>)}</div>}
       {panel === 'align' && <div className="wb-seg">

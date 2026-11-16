@@ -1,7 +1,7 @@
 import type { WhiteboardTextAlign } from '@nbase/contracts';
 import { centerOf, expandRect, type Box, type Rect } from '../geometry';
-import { boundsOfIds, connectorPath, indexElements, isBox, notePadding, penPoints, shapeTextBox, type El, type Elements } from '../model';
-import { isMindNode } from '../mind';
+import { boundsOfIds, connectorPath, indexElements, isBox, mindVisibility, notePadding, penPoints, shapeTextBox, visibleElements, type El, type Elements } from '../model';
+import { isMindNode, mindChildSide, mindEdgeEnds, mindTogglePoint, mindToggleRadius } from '../mind';
 import { fontFamily, lineHeightOf, type Measure } from '../text';
 import { cardTitle, connectorLabelPoint, drawScene, wrapped, type ImageSource, type PageInfo } from './canvas';
 import { lightTheme, noteInk, themed, type Theme } from './colors';
@@ -25,11 +25,13 @@ export function exportSet(elements: Elements, ids: ReadonlySet<string> | null): 
 
 export function exportBounds(elements: Elements, padding: number): Rect | null {
   const index = indexElements(elements);
-  const bounds = boundsOfIds(elements.map(el => el.id), index);
+  const shown = visibleElements(elements);
+  const bounds = boundsOfIds(shown.map(el => el.id), index);
   if (!bounds) return null;
-  // Frame titles sit above the frame.
-  const titled = elements.some(el => el.type === 'frame') ? { ...bounds, y: bounds.y - 20, h: bounds.h + 20 } : bounds;
-  return expandRect(titled, padding);
+  // Frame titles sit above the frame; the chip of a collapsed mind node sits beside it.
+  const titled = shown.some(el => el.type === 'frame') ? { ...bounds, y: bounds.y - 20, h: bounds.h + 20 } : bounds;
+  const chips = mindVisibility(elements).counts.size ? mindToggleRadius * 2 + 4 : 0;
+  return expandRect({ x: titled.x - chips, y: titled.y, w: titled.w + chips * 2, h: titled.h }, padding);
 }
 
 function transform(box: Box): string {
@@ -62,14 +64,17 @@ export function boardToSvg(elements: Elements, images: ReadonlyMap<string, strin
   const bounds = exportBounds(elements, options.padding ?? 32) ?? { x: 0, y: 0, w: 100, h: 100 };
   const index = indexElements(elements);
   const parts: string[] = [];
+  const { hidden, counts } = mindVisibility(elements);
   for (const el of elements) {
-    if (!isMindNode(el) || !el.mindParentId) continue;
+    if (!isMindNode(el) || !el.mindParentId || hidden.has(el.id)) continue;
     const parent = index.get(el.mindParentId);
     if (!parent || !isBox(parent)) continue;
-    parts.push(`<path d="${mindEdgePath({ x: parent.x + parent.w, y: parent.y + parent.h / 2 }, { x: el.x, y: el.y + el.h / 2 })}" fill="none" ${strokeAttrs(themed(el.stroke, dark), 2, 'solid')}/>`);
+    const { from, to } = mindEdgeEnds(parent, el);
+    parts.push(`<path d="${mindEdgePath(from, to)}" fill="none" ${strokeAttrs(themed(el.stroke, dark), 2, 'solid')}/>`);
   }
   const titles: string[] = [];
   for (const el of elements) {
+    if (hidden.has(el.id)) continue;
     if (el.type === 'connector') {
       const path = connectorPath(el, index);
       const color = themed(el.stroke, dark);
@@ -98,14 +103,14 @@ export function boardToSvg(elements: Elements, images: ReadonlyMap<string, strin
         body.push(`<path d="${shapePath(el.shape, el.w, el.h)}" fill="${el.fill === 'transparent' ? 'none' : themed(el.fill, dark)}" ${el.strokeWidth > 0 ? strokeAttrs(themed(el.stroke, dark), el.strokeWidth, el.strokeStyle) : 'stroke="none"'}/>`);
         if (el.text) {
           const area = shapeTextBox(el);
-          body.push(textLines(wrapped(el.text, area.w, el.fontSize, false, options.measure), area, el.fontSize, false, el.textAlign, themed(el.textColor, dark), 'middle'));
+          body.push(textLines(wrapped(el.text, area.w, el.fontSize, Boolean(el.bold), options.measure), area, el.fontSize, Boolean(el.bold), el.textAlign, themed(el.textColor, dark), 'middle'));
         }
         break;
       }
       case 'note': {
         body.push(`<path d="${roundedRectPath(0, 0, el.w, el.h, 6)}" fill="${themed(el.color, dark)}"/>`);
         const area = { x: notePadding, y: notePadding, w: el.w - notePadding * 2, h: el.h - notePadding * 2 };
-        if (el.text) body.push(textLines(wrapped(el.text, area.w, el.fontSize, false, options.measure), area, el.fontSize, false, el.textAlign, noteInk(dark), 'top'));
+        if (el.text) body.push(textLines(wrapped(el.text, area.w, el.fontSize, Boolean(el.bold), options.measure), area, el.fontSize, Boolean(el.bold), el.textAlign, noteInk(dark), 'top'));
         break;
       }
       case 'text':
@@ -118,7 +123,7 @@ export function boardToSvg(elements: Elements, images: ReadonlyMap<string, strin
       case 'image': {
         const url = images.get(el.attachmentId);
         body.push(url ? `<image href="${escape(url)}" width="${num(el.w)}" height="${num(el.h)}" preserveAspectRatio="none"/>`
-          : `<rect width="${num(el.w)}" height="${num(el.h)}" fill="#f1f3f5" stroke="#dfe3e8"/>`);
+          : `<rect width="${num(el.w)}" height="${num(el.h)}" fill="${dark ? '#26292d' : '#f1f3f5'}" stroke="${theme.cardLine}"/>`);
         break;
       }
       case 'database': {
@@ -146,6 +151,14 @@ export function boardToSvg(elements: Elements, images: ReadonlyMap<string, strin
       }
     }
     parts.push(`<g transform="${transform(el)}">${body.join('')}</g>`);
+  }
+  for (const [id, count] of counts) {
+    const node = index.get(id);
+    if (!isMindNode(node) || hidden.has(id) || !count) continue;
+    const at = mindTogglePoint(node, mindChildSide(node, elements, index));
+    const label = count > 99 ? '99+' : String(count);
+    parts.push(`<circle cx="${num(at.x)}" cy="${num(at.y)}" r="${mindToggleRadius}" fill="${themed(node.stroke, dark)}"/>`,
+      `<text x="${num(at.x)}" y="${num(at.y + 0.5)}" font-size="${label.length > 2 ? 8 : 10}" font-weight="600" fill="#ffffff" text-anchor="middle" dominant-baseline="central">${label}</text>`);
   }
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${num(bounds.x)} ${num(bounds.y)} ${num(bounds.w)} ${num(bounds.h)}" width="${num(bounds.w)}" height="${num(bounds.h)}" font-family="${escape(fontFamily)}">`
     + `<rect x="${num(bounds.x)}" y="${num(bounds.y)}" width="${num(bounds.w)}" height="${num(bounds.h)}" fill="${theme.canvas}"/>${parts.join('')}${titles.join('')}</svg>`;

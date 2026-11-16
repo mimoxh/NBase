@@ -166,26 +166,48 @@ function dedupe(points: Point[]): Point[] {
   return result;
 }
 
+export interface ElbowPath {
+  points: Point[];
+  /**
+   * The middle segment that can be slid sideways, when the route has one: `axis` is the direction
+   * it moves in and `shift` is how much of the requested shift was applied.
+   */
+  free: { from: Point; to: Point; axis: 'x' | 'y'; shift: number } | null;
+}
+
 /**
  * Orthogonal route that leaves `from` along `fromSide` and arrives at `to` against `toSide`.
  * It is a fixed-shape heuristic (no obstacle avoidance), which keeps it stable while elements move.
+ * `shift` slides the middle segment from its default place, as far as the route's shape allows.
  */
-export function elbowRoute(from: Point, fromSide: Side, to: Point, toSide: Side, margin = 20): Point[] {
+export function elbowPath(from: Point, fromSide: Side, to: Point, toSide: Side, shift = 0, margin = 20): ElbowPath {
   const d0 = sideVector[fromSide], d1 = sideVector[toSide];
   const a = { x: from.x + d0.x * margin, y: from.y + d0.y * margin };
   const b = { x: to.x + d1.x * margin, y: to.y + d1.y * margin };
   const horizontal0 = d0.x !== 0, horizontal1 = d1.x !== 0;
+  let free = null as ElbowPath['free'];
+  const vertical = (x: number, min = -Infinity, max = Infinity): Point[] => {
+    const at = clamp(x + shift, min, max);
+    free = { from: { x: at, y: a.y }, to: { x: at, y: b.y }, axis: 'x', shift: at - x };
+    return [free.from, free.to];
+  };
+  const horizontal = (y: number, min = -Infinity, max = Infinity): Point[] => {
+    const at = clamp(y + shift, min, max);
+    free = { from: { x: a.x, y: at }, to: { x: b.x, y: at }, axis: 'y', shift: at - y };
+    return [free.from, free.to];
+  };
   let middle: Point[];
   if (horizontal0 && horizontal1) {
     const facing = d0.x === -d1.x && (b.x - a.x) * d0.x >= 0;
-    middle = facing ? [{ x: (a.x + b.x) / 2, y: a.y }, { x: (a.x + b.x) / 2, y: b.y }]
-      : d0.x === d1.x ? [{ x: d0.x > 0 ? Math.max(a.x, b.x) : Math.min(a.x, b.x), y: a.y }, { x: d0.x > 0 ? Math.max(a.x, b.x) : Math.min(a.x, b.x), y: b.y }]
-        : [{ x: a.x, y: (a.y + b.y) / 2 }, { x: b.x, y: (a.y + b.y) / 2 }];
+    // Between facing ends the segment stays between them; beside same-facing ends it stays beyond both.
+    middle = facing ? vertical((a.x + b.x) / 2, Math.min(a.x, b.x), Math.max(a.x, b.x))
+      : d0.x === d1.x ? (d0.x > 0 ? vertical(Math.max(a.x, b.x), Math.max(a.x, b.x)) : vertical(Math.min(a.x, b.x), -Infinity, Math.min(a.x, b.x)))
+        : horizontal((a.y + b.y) / 2);
   } else if (!horizontal0 && !horizontal1) {
     const facing = d0.y === -d1.y && (b.y - a.y) * d0.y >= 0;
-    middle = facing ? [{ x: a.x, y: (a.y + b.y) / 2 }, { x: b.x, y: (a.y + b.y) / 2 }]
-      : d0.y === d1.y ? [{ x: a.x, y: d0.y > 0 ? Math.max(a.y, b.y) : Math.min(a.y, b.y) }, { x: b.x, y: d0.y > 0 ? Math.max(a.y, b.y) : Math.min(a.y, b.y) }]
-        : [{ x: (a.x + b.x) / 2, y: a.y }, { x: (a.x + b.x) / 2, y: b.y }];
+    middle = facing ? horizontal((a.y + b.y) / 2, Math.min(a.y, b.y), Math.max(a.y, b.y))
+      : d0.y === d1.y ? (d0.y > 0 ? horizontal(Math.max(a.y, b.y), Math.max(a.y, b.y)) : horizontal(Math.min(a.y, b.y), -Infinity, Math.min(a.y, b.y)))
+        : vertical((a.x + b.x) / 2);
   } else if (horizontal0) {
     const direct = (b.x - a.x) * d0.x >= 0 && (a.y - b.y) * d1.y >= 0;
     middle = direct ? [{ x: b.x, y: a.y }] : [{ x: a.x, y: b.y }];
@@ -193,7 +215,13 @@ export function elbowRoute(from: Point, fromSide: Side, to: Point, toSide: Side,
     const direct = (b.y - a.y) * d0.y >= 0 && (a.x - b.x) * d1.x >= 0;
     middle = direct ? [{ x: a.x, y: b.y }] : [{ x: b.x, y: a.y }];
   }
-  return dedupe([from, a, ...middle, b, to]);
+  // A segment without length has nothing to grab.
+  if (free && distance(free.from, free.to) < 1) free = null;
+  return { points: dedupe([from, a, ...middle, b, to]), free };
+}
+
+export function elbowRoute(from: Point, fromSide: Side, to: Point, toSide: Side, margin = 20): Point[] {
+  return elbowPath(from, fromSide, to, toSide, 0, margin).points;
 }
 
 export function cubicPoint(p0: Point, c0: Point, c1: Point, p1: Point, t: number): Point {

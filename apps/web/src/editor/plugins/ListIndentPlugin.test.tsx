@@ -16,11 +16,13 @@ import { EDITOR_NODES } from '../nodes';
 import { prepareSourceEdit } from '../sourceEditing';
 import { $applyBlockStyle } from '../blockStyles';
 import { listTheme } from '../listTheme';
-import { ListIndentPlugin } from './ListIndentPlugin';
+import { $canIncreaseIndent } from '../listIndent';
+import { firstItemNotice, ListIndentPlugin } from './ListIndentPlugin';
 
 let host: HTMLDivElement;
 let root: Root;
 let editor!: LexicalEditor;
+let notice: ReturnType<typeof vi.fn<(message: string) => void>>;
 
 function Capture() {
   [editor] = useLexicalComposerContext();
@@ -34,7 +36,7 @@ async function mount(markdown: string) {
     onError: error => { throw error; },
   }}>
     <RichTextPlugin contentEditable={<ContentEditable />} ErrorBoundary={LexicalErrorBoundary} />
-    <HistoryPlugin /><ListPlugin /><ListIndentPlugin /><Capture />
+    <HistoryPlugin /><ListPlugin /><ListIndentPlugin onNotice={notice} /><Capture />
   </LexicalComposer>));
 }
 
@@ -62,6 +64,7 @@ const depths = () => editor.read('latest', () => Object.fromEntries($items().map
 const markdown = () => readEditorSnapshot(editor.getEditorState()).markdown;
 
 beforeEach(() => {
+  notice = vi.fn<(message: string) => void>();
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   Object.defineProperty(Range.prototype, 'getBoundingClientRect', { configurable: true, value: () => new DOMRect() });
   Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] });
@@ -104,8 +107,10 @@ it('keeps mixed ordered, bullet and task nesting through Markdown and source edi
 it('refuses to nest the first item of a level or past the depth limit, without losing keyboard handling', async () => {
   await mount('- 一\n- 二\n- 三\n- 四\n- 五\n- 六\n- 七\n- 八');
   await caretIn('一');
+  expect(editor.read('latest', $canIncreaseIndent)).toBe(false);
   expect((await press()).defaultPrevented).toBe(true);
   expect(depths()['一']).toBe(0);
+  expect(notice).toHaveBeenCalledExactlyOnceWith(firstItemNotice);
   await press(true);
   expect(depths()['一']).toBe(0);
   expect(markdown()).toContain('- 一');
@@ -128,6 +133,39 @@ it('indents every item in a multi-item selection', async () => {
   }, { discrete: true }));
   await press();
   expect(depths()).toEqual({ 一: 0, 二: 1, 三: 1 });
+});
+
+it('nests the rest of a selection that starts at the first item, keeping one sublist', async () => {
+  await mount('- 一\n- 二\n- 三\n\n1. 甲\n2. 乙');
+  const selectAll = () => act(() => editor.update(() => {
+    const items = $items().filter(item => '一二三'.includes(item.getTextContent()));
+    const selection = items[0]!.select(0, 0);
+    selection.focus.set(items.at(-1)!.getFirstDescendant()!.getKey(), 1, 'text');
+  }, { discrete: true }));
+  await selectAll();
+  expect(editor.read('latest', $canIncreaseIndent)).toBe(true);
+  expect((await press()).defaultPrevented).toBe(true);
+  expect(depths()).toEqual({ 一: 0, 二: 1, 三: 1, 甲: 0, 乙: 0 });
+  expect(markdown()).toMatch(/^- 一\n\s+- 二\n\s+- 三\n/);
+  expect(notice).not.toHaveBeenCalled();
+  // 二 now opens its own sublist, so only 三 can nest under it.
+  await selectAll();
+  await press();
+  expect(depths()).toEqual({ 一: 0, 二: 1, 三: 2, 甲: 0, 乙: 0 });
+  await act(() => { editor.dispatchCommand(UNDO_COMMAND, undefined); });
+  expect(depths()).toEqual({ 一: 0, 二: 1, 三: 1, 甲: 0, 乙: 0 });
+  expect(prepareSourceEdit(readEditorSnapshot(editor.getEditorState()).content).canApply).toBe(true);
+});
+
+it('carries an item’s own sublist along when both are selected', async () => {
+  await mount('- 一\n- 二\n  - 甲\n  - 乙');
+  await act(() => editor.update(() => {
+    const items = $items();
+    const selection = items.find(item => item.getTextContent() === '二')!.select(0, 0);
+    selection.focus.set(items.at(-1)!.getFirstDescendant()!.getKey(), 1, 'text');
+  }, { discrete: true }));
+  await press();
+  expect(depths()).toEqual({ 一: 0, 二: 1, 甲: 2, 乙: 2 });
 });
 
 it('cycles bullet and number markers by nesting depth as items are indented and outdented', async () => {

@@ -2,11 +2,13 @@ import { whiteboardLimits, type WhiteboardCard, type WhiteboardConnectorEnd, typ
   type WhiteboardText } from '@nbase/contracts';
 import { aabb, boundsOfPoints, centerOf, distance, expandRect, normalizeRect, pointInRect, rectsIntersect, round, simplifyStroke, snapRect,
   toLocal, unionRects, type Box, type Point, type Rect, type SnapGuide } from './geometry';
-import { addMindChild, createMindRoot, fitMindNode, isMindNode, layoutMindsOf } from './mind';
-import { align, anchorPoint, applyStyle, boundsOfIds, cloneElements, connectorPath, createConnector, createShape, distribute, elementAt,
-  elementBounds, elementText, embedDefaultSize, isEmbedElement, fitText, handlePoint, handles, hitTest, isBox, mindRootOf, movingSet, reorder, removeElements, resizeBox, rotateElements,
-  scaleElements, setGroup, setLocked, translate, withBox, withGroups, type Alignment, type BoxEl, type Connector, type El, type Handle,
-  type OrderMove, type StylePatch } from './model';
+import { addMindChild, createMindRoot, fitMindNode, isMindNode, layoutMindsOf, mindChildSide, mindDropTarget, mindLayoutOf, mindTogglePoint, mindToggleRadius,
+  moveMindNode, setMindCollapsed, setMindLayout, type MindDropHint, type MindLayout } from './mind';
+import { align, anchorPoint, applyStyle, boundsOfIds, cloneElements, connectorPath, createConnector, createShape, dependentSet, distribute, elementAt,
+  elementBounds, elementText, embedDefaultSize, erasePen, groupChain, groupToEnter, indexElements, isEmbedElement, fitText, handlePoint, handles, hitTest, isBox,
+  mindDescendants, mindRootOf, mindVisibility, movingSet, reorder, removeElements, resizeBox, rotateElements,
+  scaleElements, setGroup, setLocked, translate, visibleElements, withBox, withGroups, type Alignment, type BoxEl, type Connector, type El, type Handle,
+  type Index, type OrderMove, type StylePatch } from './model';
 import { emptyOverlay, handleSize, rotateHandlePoint, toScreen, toWorldPoint, type Overlay } from './render/canvas';
 import { BoardStore, type Tool } from './store';
 import { textBlockSize, type Measure } from './text';
@@ -35,7 +37,10 @@ type Gesture =
   | { kind: 'connector'; id: string; origin: Point; sourceId: string | null }
   | { kind: 'endpoint'; id: string; which: 'source' | 'target' }
   | { kind: 'pen'; points: Point[] }
-  | { kind: 'eraser'; points: Point[]; hits: Set<string> };
+  | { kind: 'eraser'; points: Point[]; hits: Set<string>; partial: boolean; changed: boolean }
+  /** One mind node dragged with its branch, to be dropped on a new parent or a new place among its siblings. */
+  | { kind: 'branch'; origin: Point; id: string; ids: Set<string>; index: Index; moved: boolean; delta: Point; drop: MindDropHint | null }
+  | { kind: 'bend'; id: string; axis: 'x' | 'y'; origin: Point; start: number };
 
 export type EditFinish = 'none' | 'sibling' | 'child';
 
@@ -55,6 +60,8 @@ export class Controller {
   private hoverId: string | null = null;
   /** Text elements whose width the user set; the others hug their longest line. */
   private fixedWidth = new Set<string>();
+  /** The open mind node whose collapse button is showing. */
+  private toggleId: string | null = null;
 
   constructor(readonly store: BoardStore, private readonly host: ControllerHost) {}
 
@@ -65,6 +72,9 @@ export class Controller {
   private tolerance(pixels = 5) { return pixels / this.store.view.zoom; }
   private get elements() { return this.store.elements; }
   private get index() { return this.store.index; }
+  /** What can be seen and picked: everything except the branches under collapsed mind nodes. */
+  private get shown() { return visibleElements(this.elements); }
+  private get focus() { return this.store.focusGroup; }
 
   // ── Overlay ──
 
@@ -85,26 +95,74 @@ export class Controller {
   }
 
   refreshOverlay(extra: Partial<Overlay> = {}) {
+    const focusIds = this.focusMembers();
+    if (this.focus && !focusIds.length) this.store.focusGroup = null;
     const transform = this.store.editingId ? null : this.transformBox();
     const outlines: Box[] = [];
     const connectorEnds: Point[] = [];
+    let bend: Point | null = null;
     if (this.store.selection.size > 1 || transform === null) {
       for (const id of this.store.selection) {
         const el = this.index.get(id);
         if (el && isBox(el)) outlines.push(el);
       }
     }
-    if (this.store.selection.size === 1 && !this.store.editingId) {
-      const el = this.index.get([...this.store.selection][0]!);
-      if (el?.type === 'connector') {
-        const path = connectorPath(el, this.index).points;
-        if (!el.locked && !this.store.readOnly) connectorEnds.push(path[0]!, path.at(-1)!);
-      }
+    const single = this.store.selection.size === 1 && !this.store.editingId ? this.index.get([...this.store.selection][0]!) : undefined;
+    if (single?.type === 'connector' && !single.locked && !this.store.readOnly) {
+      const path = connectorPath(single, this.index);
+      connectorEnds.push(path.points[0]!, path.points.at(-1)!);
+      bend = path.bend?.point ?? null;
     }
-    const hover = this.hoverId && !this.store.selection.has(this.hoverId) ? this.index.get(this.hoverId) : undefined;
-    this.store.setOverlay({ ...emptyOverlay, outlines, connectorEnds,
+    const hovered = this.hoverId ? this.index.get(this.hoverId) : undefined;
+    const hover = hovered && !this.store.selection.has(hovered.id) ? hovered : undefined;
+    // The collapse button belongs to the node under the pointer, or else to the selected one.
+    const open = [hovered, single].find((el): el is WhiteboardShape => isMindNode(el) && !el.mindCollapsed && this.hasMindChildren(el.id));
+    this.toggleId = open && !this.store.editingId ? open.id : null;
+    this.store.setOverlay({ ...emptyOverlay, outlines, connectorEnds, bend,
       transform: transform && { box: transform.box, handles: transform.handles && !this.store.readOnly, rotate: transform.rotate && !this.store.readOnly, locked: transform.locked },
-      hover: hover && isBox(hover) ? hover : null, ...extra });
+      hover: hover && isBox(hover) ? hover : null,
+      mindToggle: open && this.toggleId ? mindTogglePoint(open, mindChildSide(open, this.elements, this.index)) : null,
+      focus: focusIds.length ? boundsOfIds(focusIds, this.index) : null, ...extra });
+  }
+
+  private hasMindChildren(id: string) { return this.elements.some(el => el.type === 'shape' && el.mindParentId === id); }
+
+  // ── Entered groups ──
+
+  private focusMembers(): string[] {
+    const focus = this.focus;
+    return focus ? this.elements.filter(el => groupChain(el).includes(focus)).map(el => el.id) : [];
+  }
+
+  /** The entered group and the groups around it, innermost first. */
+  private focusChain(): string[] {
+    const focus = this.focus;
+    const member = focus ? this.elements.find(el => groupChain(el).includes(focus)) : undefined;
+    if (!member || !focus) return [];
+    const chain = groupChain(member);
+    return chain.slice(chain.indexOf(focus));
+  }
+
+  /** Step into the group an element belongs to, so its members can be picked one by one. */
+  enterGroup(id: string): boolean {
+    const el = this.index.get(id);
+    const group = el ? groupToEnter(el, this.focus) : null;
+    if (!el || !group) return false;
+    this.store.focusGroup = group;
+    this.store.select(withGroups(this.elements, new Set([id]), group));
+    this.refreshOverlay();
+    return true;
+  }
+
+  /** Step out one level; the group that was entered becomes the selection. */
+  exitGroup(): boolean {
+    const chain = this.focusChain();
+    if (!this.focus) return false;
+    const members = this.focusMembers();
+    this.store.focusGroup = chain[1] ?? null;
+    this.store.select(members);
+    this.refreshOverlay();
+    return true;
   }
 
   // ── Hit testing on chrome ──
@@ -141,13 +199,53 @@ export class Controller {
       return cursors[Math.round((((base % 180) + 180) % 180) / 45) % 4]!;
     }
     if (this.endpointAt(screen)) return 'move';
+    const bend = this.bendAt(screen);
+    if (bend) return bend.axis === 'x' ? 'ew-resize' : 'ns-resize';
+    if (this.toggleAt(this.world(screen))) return 'pointer';
     const hit = this.hit(this.world(screen));
     if (hit?.type === 'card') return 'pointer';
     return hit && !hit.locked && !this.store.readOnly ? 'move' : 'default';
   }
 
   private hit(world: Point): El | null {
-    return elementAt(this.elements, world, this.tolerance(), this.index);
+    return elementAt(this.shown, world, this.tolerance(), this.index);
+  }
+
+  /** The handle on the middle segment of the selected elbow connector. */
+  private bendAt(screen: Point): { id: string; axis: 'x' | 'y'; shift: number } | null {
+    if (this.store.selection.size !== 1 || this.store.readOnly) return null;
+    const el = this.index.get([...this.store.selection][0]!);
+    if (el?.type !== 'connector' || el.locked) return null;
+    const bend = connectorPath(el, this.index).bend;
+    return bend && distance(toScreen(bend.point, this.store.view), screen) <= 9 ? { id: el.id, axis: bend.axis, shift: bend.shift } : null;
+  }
+
+  /** The mind node whose collapse button or hidden-count chip is under the point. */
+  private toggleAt(world: Point): WhiteboardShape | null {
+    if (this.store.tool !== 'select') return null;
+    const reach = mindToggleRadius + this.tolerance(2);
+    const at = (node: WhiteboardShape) => distance(world, mindTogglePoint(node, mindChildSide(node, this.elements, this.index))) <= reach;
+    const open = this.toggleId ? this.index.get(this.toggleId) : undefined;
+    if (isMindNode(open) && at(open)) return open;
+    const { counts, hidden } = mindVisibility(this.elements);
+    for (const [id, count] of counts) {
+      const node = this.index.get(id);
+      if (count && isMindNode(node) && !hidden.has(id) && at(node)) return node;
+    }
+    return null;
+  }
+
+  /** Fold or unfold the branch under a mind node. Readers may do it for themselves; nothing is saved for them. */
+  toggleCollapsed(id: string) {
+    const node = this.index.get(id);
+    if (!isMindNode(node)) return;
+    const next = setMindCollapsed(this.elements, id, !node.mindCollapsed);
+    if (next === this.elements) return;
+    if (this.store.readOnly) this.store.preview(next); else this.store.commit(next);
+    this.hoverId = id;
+    const { hidden } = mindVisibility(this.elements);
+    if ([...this.store.selection].some(selected => hidden.has(selected))) this.store.select([...this.store.selection].filter(selected => !hidden.has(selected)));
+    this.refreshOverlay();
   }
 
   private endpointAt(screen: Point): 'source' | 'target' | null {
@@ -164,7 +262,7 @@ export class Controller {
 
   /** Element and anchor a connector end would bind to at this world point. */
   private bindingAt(world: Point, exclude: ReadonlySet<string>): { end: WhiteboardConnectorEnd; box: BoxEl | null; anchor: Point | null } {
-    const target = elementAt(this.elements, world, this.tolerance(8), this.index, el => isBox(el) && !exclude.has(el.id));
+    const target = elementAt(this.shown, world, this.tolerance(8), this.index, el => isBox(el) && !exclude.has(el.id));
     const free = { end: { x: round(world.x), y: round(world.y) }, box: null, anchor: null };
     if (!target || !isBox(target)) return free;
     for (const [ax, ay] of anchorSlots) {
@@ -219,7 +317,7 @@ export class Controller {
         return;
       case 'eraser':
         this.store.begin();
-        this.gesture = { kind: 'eraser', points: [world], hits: new Set() };
+        this.gesture = { kind: 'eraser', points: [world], hits: new Set(), partial: this.store.style.eraserMode === 'stroke', changed: false };
         this.erase(world, world);
         return;
     }
@@ -238,9 +336,9 @@ export class Controller {
       this.store.begin();
       if (handle === 'rotate') {
         const center = centerOf(transform.box);
-        this.gesture = { kind: 'rotate', center, start: Math.atan2(world.y - center.y, world.x - center.x), box: transform.box, ids: movingSet(this.elements, transform.ids, this.index) };
+        this.gesture = { kind: 'rotate', center, start: Math.atan2(world.y - center.y, world.x - center.x), box: transform.box, ids: movingSet(this.elements, transform.ids, this.index, this.focus) };
       } else {
-        this.gesture = { kind: 'resize', handle, box: transform.box, ids: transform.single ? new Set([transform.single.id]) : movingSet(this.elements, transform.ids, this.index), single: transform.single };
+        this.gesture = { kind: 'resize', handle, box: transform.box, ids: transform.single ? new Set([transform.single.id]) : movingSet(this.elements, transform.ids, this.index, this.focus), single: transform.single };
       }
       return;
     }
@@ -250,16 +348,26 @@ export class Controller {
       this.gesture = { kind: 'endpoint', id: [...this.store.selection][0]!, which: endpoint };
       return;
     }
+    const bend = this.bendAt(screen);
+    if (bend) {
+      this.store.begin();
+      this.gesture = { kind: 'bend', id: bend.id, axis: bend.axis, origin: world, start: bend.shift };
+      return;
+    }
+    const toggle = this.toggleAt(world);
+    if (toggle) { this.toggleCollapsed(toggle.id); return; }
     // Inside the current multi-selection box, a drag moves the selection even between elements.
     let hit = this.hit(world);
     if (!hit && transform && this.store.selection.size > 1 && pointInRect(world, transform.box)) hit = this.index.get([...this.store.selection][0]!) ?? null;
+    // Picking anything outside the entered group leaves it.
+    if (this.focus && (!hit || !groupChain(hit).includes(this.focus))) this.store.focusGroup = null;
     if (!hit) {
       this.gesture = { kind: 'marquee', origin: world, additive: input.shiftKey ? this.store.selection : null };
       if (!input.shiftKey) this.store.select([]);
       this.refreshOverlay();
       return;
     }
-    const unit = withGroups(this.elements, new Set([hit.id]));
+    const unit = withGroups(this.elements, new Set([hit.id]), this.focus);
     if (input.shiftKey) {
       const next = new Set(this.store.selection);
       const remove = [...unit].every(id => next.has(id));
@@ -268,7 +376,14 @@ export class Controller {
     } else if (!this.store.selection.has(hit.id)) this.store.select(unit);
     this.refreshOverlay();
     if (this.store.readOnly) return;
-    let ids = movingSet(this.elements, new Set([...this.store.selection].filter(id => !this.index.get(id)?.locked)), this.index);
+    // A single node below the root is dragged as a branch and re-attached where it is dropped.
+    if (!input.altKey && !input.shiftKey && this.store.selection.size === 1 && this.store.selection.has(hit.id) && isMindNode(hit) && hit.mindParentId && !hit.locked) {
+      this.store.begin();
+      this.gesture = { kind: 'branch', origin: world, id: hit.id, ids: mindDescendants(this.elements, [hit.id]), index: this.index, moved: false, delta: { x: 0, y: 0 }, drop: null };
+      return;
+    }
+    const picked = new Set([...this.store.selection].filter(id => !this.index.get(id)?.locked));
+    let ids = input.altKey ? dependentSet(this.elements, picked, this.index, this.focus) : movingSet(this.elements, picked, this.index, this.focus);
     if (!ids.size) return;
     this.store.begin();
     if (input.altKey) ids = this.duplicateForDrag(ids);
@@ -279,7 +394,7 @@ export class Controller {
   /** Alt-drag: leave the originals in place and drag fresh copies. */
   private duplicateForDrag(ids: Set<string>): Set<string> {
     const source = this.elements.filter(el => ids.has(el.id));
-    const copies = cloneElements(source, this.index, { x: 0, y: 0 }, this.host.newId);
+    const copies = this.pasteClones(source, { x: 0, y: 0 });
     this.store.preview([...this.elements, ...copies]);
     const next = new Set(copies.map(el => el.id));
     this.store.select(next);
@@ -290,7 +405,7 @@ export class Controller {
     const view = this.store.view;
     const visible = expandRect({ x: view.x, y: view.y, w: this.store.size.width / view.zoom, h: this.store.size.height / view.zoom }, 200 / view.zoom);
     const rects: Rect[] = [];
-    for (const el of this.elements) {
+    for (const el of this.shown) {
       if (moving.has(el.id) || el.type === 'connector' || el.type === 'pen') continue;
       const rect = aabb(el);
       if (rectsIntersect(visible, rect)) rects.push(rect);
@@ -323,16 +438,18 @@ export class Controller {
       }
       case 'marquee': {
         const rect = normalizeRect(gesture.origin, world);
-        const touched = this.elements.filter(el => {
+        const touched = this.shown.filter(el => {
           const b = elementBounds(el, this.index);
           // Frames are selected only when fully enclosed, everything else when touched.
           return el.type === 'frame' ? b.x >= rect.x && b.y >= rect.y && b.x + b.w <= rect.x + rect.w && b.y + b.h <= rect.y + rect.h : rectsIntersect(rect, b);
         }).map(el => el.id);
-        this.store.select(withGroups(this.elements, new Set([...(gesture.additive ?? []), ...touched])));
+        this.store.select(withGroups(this.elements, new Set([...(gesture.additive ?? []), ...touched]), this.focus));
         this.refreshOverlay({ marquee: rect });
         return;
       }
       case 'move': return this.moveSelection(gesture, world, input);
+      case 'branch': return this.dragBranch(gesture, world);
+      case 'bend': return this.dragBend(gesture, world);
       case 'resize': return this.resize(gesture, world, input);
       case 'rotate': {
         let delta = Math.atan2(world.y - gesture.center.y, world.x - gesture.center.x) - gesture.start;
@@ -394,7 +511,8 @@ export class Controller {
       return;
     }
     if (tool !== 'select') { if (this.store.overlay !== emptyOverlay && !this.store.selection.size) this.store.setOverlay(emptyOverlay); return; }
-    const hit = this.hit(world);
+    // The collapse button sits just outside its node; over it the node stays hovered so the button does not vanish.
+    const hit = this.toggleAt(world) ?? this.hit(world);
     const id = hit?.id ?? null;
     if (id !== this.hoverId) { this.hoverId = id; this.refreshOverlay(); }
   }
@@ -412,6 +530,31 @@ export class Controller {
     }
     this.store.preview(translate(this.baseElements(), gesture.ids, dx, dy));
     this.refreshOverlay({ guides });
+  }
+
+  private dragBranch(gesture: Extract<Gesture, { kind: 'branch' }>, world: Point) {
+    const dx = world.x - gesture.origin.x, dy = world.y - gesture.origin.y;
+    if (!gesture.moved && Math.hypot(dx, dy) * this.store.view.zoom < 3) return;
+    gesture.moved = true;
+    gesture.delta = { x: dx, y: dy };
+    const base = this.baseElements();
+    gesture.drop = mindDropTarget(base, gesture.index, gesture.id, world, this.tolerance());
+    this.store.preview(translate(base, gesture.ids, dx, dy));
+    this.refreshOverlay({ drop: gesture.drop && (gesture.drop.box || gesture.drop.line) ? { box: gesture.drop.box, line: gesture.drop.line } : null });
+  }
+
+  /** Slide the middle segment of an elbow connector; near its default place it snaps back. */
+  private dragBend(gesture: Extract<Gesture, { kind: 'bend' }>, world: Point) {
+    const base = this.store.base;
+    const connector = base.find(el => el.id === gesture.id);
+    if (connector?.type !== 'connector') return;
+    const wanted = gesture.start + (gesture.axis === 'x' ? world.x - gesture.origin.x : world.y - gesture.origin.y);
+    const applied = connectorPath({ ...connector, bend: wanted }, this.index).bend?.shift ?? 0;
+    const bend = Math.abs(applied) * this.store.view.zoom < 4 ? 0 : round(applied);
+    // Back at its starting place the connector is the same object again, so nothing is saved.
+    const next = bend === (connector.bend ?? 0) ? connector : { ...connector, bend };
+    this.store.preview(base.map(el => el === connector ? next : el));
+    this.refreshOverlay();
   }
 
   private resize(gesture: Extract<Gesture, { kind: 'resize' }>, world: Point, input: PointerInput) {
@@ -467,15 +610,38 @@ export class Controller {
   private erase(from: Point, to: Point) {
     const gesture = this.gesture;
     if (gesture?.kind !== 'eraser') return;
+    if (gesture.partial) return this.eraseStrokes(gesture, from, to);
     const steps = Math.max(1, Math.ceil(distance(from, to) / this.tolerance(4)));
     for (let i = 0; i <= steps; i += 1) {
       const p = { x: from.x + (to.x - from.x) * i / steps, y: from.y + (to.y - from.y) * i / steps };
-      for (const el of this.elements) {
+      for (const el of this.shown) {
         if (gesture.hits.has(el.id) || el.locked) continue;
         if (hitTest(el, p, this.tolerance(6), this.index)) gesture.hits.add(el.id);
       }
     }
     this.store.faded = new Set(gesture.hits);
+    this.refreshOverlay({ eraser: gesture.points });
+  }
+
+  /** Rub out the parts of freehand strokes the eraser passed over; other elements are left alone. */
+  private eraseStrokes(gesture: Extract<Gesture, { kind: 'eraser' }>, from: Point, to: Point) {
+    const radius = this.tolerance(6);
+    const swept = normalizeRect(from, to);
+    const next: El[] = [];
+    const gone = new Set<string>();
+    let changed = false;
+    for (const el of this.elements) {
+      const pieces = el.type === 'pen' && !el.locked && rectsIntersect(expandRect(aabb(el), radius + el.strokeWidth), swept)
+        ? erasePen(el, [from, to], radius, this.host.newId) : null;
+      if (!pieces) { next.push(el); continue; }
+      changed = true;
+      if (pieces.length) next.push(...pieces); else { next.push(el); gone.add(el.id); }
+    }
+    if (changed && next.length - gone.size <= whiteboardLimits.maxElements) {
+      // A stroke that is rubbed out completely goes the way of any deleted element, so connectors let go of it.
+      this.store.preview(gone.size ? removeElements(next, gone, indexElements(next)) : next);
+      gesture.changed = true;
+    }
     this.refreshOverlay({ eraser: gesture.points });
   }
 
@@ -493,12 +659,22 @@ export class Controller {
         if (!gesture.moved && !input.shiftKey && !input.altKey) {
           // A click without a drag narrows a multi-selection to the clicked unit.
           const hit = this.hit(world);
-          if (hit && this.store.selection.size > 1) this.store.select(withGroups(this.elements, new Set([hit.id])));
+          if (hit && this.store.selection.size > 1) this.store.select(withGroups(this.elements, new Set([hit.id]), this.focus));
         }
         this.store.commit();
         this.refreshOverlay();
         return;
-      case 'resize': case 'rotate': case 'endpoint':
+      case 'branch': {
+        const base = this.baseElements();
+        const drop = gesture.moved ? gesture.drop : null;
+        // A detached branch stays where it was dropped; any other drop is placed by the layout.
+        const next = !drop ? base : drop.parentId === null
+          ? moveMindNode(translate(base, gesture.ids, gesture.delta.x, gesture.delta.y), gesture.id, drop) : moveMindNode(base, gesture.id, drop);
+        this.store.commit(next);
+        this.refreshOverlay();
+        return;
+      }
+      case 'resize': case 'rotate': case 'endpoint': case 'bend':
         this.store.commit();
         this.refreshOverlay();
         return;
@@ -528,7 +704,8 @@ export class Controller {
       case 'eraser': {
         const hits = gesture.hits;
         this.store.faded = new Set();
-        if (hits.size) this.store.commit(removeElements(this.baseElements(), hits, this.index)); else this.store.cancel();
+        if (gesture.partial) { if (gesture.changed) this.store.commit(); else this.store.cancel(); }
+        else if (hits.size) this.store.commit(removeElements(this.baseElements(), hits, this.index)); else this.store.cancel();
         this.refreshOverlay();
         return;
       }
@@ -720,7 +897,11 @@ export class Controller {
 
   doubleClick(screen: Point) {
     const world = this.world(screen);
+    // Two quick clicks on a collapse button fold and unfold; they are not a double-click on the canvas.
+    if (this.toggleAt(world)) return;
     const hit = this.hit(world) ?? this.frameTitleAt(screen);
+    // The first double-click on a grouped element steps into its group; the next one acts on the element.
+    if (hit && !this.store.readOnly && this.enterGroup(hit.id)) return;
     if (hit && isEmbedElement(hit)) { this.activateEmbed(hit.id); return; }
     if (hit?.type === 'card') { this.host.openPage(hit.pageId); return; }
     if (this.store.readOnly) return;
@@ -741,7 +922,8 @@ export class Controller {
 
   contextMenu(screen: Point) {
     const hit = this.hit(this.world(screen)) ?? this.frameTitleAt(screen);
-    if (hit && !this.store.selection.has(hit.id)) this.store.select(withGroups(this.elements, new Set([hit.id])));
+    if (this.focus && (!hit || !groupChain(hit).includes(this.focus))) this.store.focusGroup = null;
+    if (hit && !this.store.selection.has(hit.id)) this.store.select(withGroups(this.elements, new Set([hit.id]), this.focus));
     if (!hit) this.store.select([]);
     this.refreshOverlay();
     this.host.contextMenu(screen, hit?.id ?? null);
@@ -768,14 +950,14 @@ export class Controller {
     if (key === 'Escape') {
       if (this.gesture) { this.store.cancel(); this.gesture = null; }
       else if (store.tool !== 'select') store.setTool('select');
-      else store.select([]);
+      else if (!this.exitGroup()) store.select([]);
       this.refreshOverlay();
       return true;
     }
     if (mod) {
       if (key === 'z') { if (event.shiftKey) store.redo(); else store.undo(); this.refreshOverlay(); return true; }
       if (key === 'y') { store.redo(); this.refreshOverlay(); return true; }
-      if (key === 'a') { store.select(this.elements.map(el => el.id)); this.refreshOverlay(); return true; }
+      if (key === 'a') { this.selectAll(); return true; }
       if (key === 'd') { this.duplicate(); return true; }
       if (key === 'g') { if (event.shiftKey) this.ungroup(); else this.group(); return true; }
       if (key === 'l' && event.shiftKey) { this.toggleLock(); return true; }
@@ -831,9 +1013,15 @@ export class Controller {
     this.apply(next);
   }
 
+  selectAll() {
+    this.store.focusGroup = null;
+    this.store.select(this.shown.map(el => el.id));
+    this.refreshOverlay();
+  }
+
   duplicate() {
     if (this.store.readOnly) return;
-    const ids = movingSet(this.elements, this.store.selection, this.index);
+    const ids = dependentSet(this.elements, this.store.selection, this.index, this.focus);
     const source = this.elements.filter(el => ids.has(el.id));
     if (!source.length) return;
     const copies = this.pasteClones(source, { x: 24, y: 24 });
@@ -842,19 +1030,96 @@ export class Controller {
     this.refreshOverlay();
   }
 
-  /** Fresh copies of elements; copied mind subtrees become their own maps rooted at the topmost copied node. */
+  /**
+   * Fresh copies of elements; copied mind subtrees become their own maps rooted at the topmost copied node.
+   * Copies made inside an entered group stay members of it.
+   */
   pasteClones(source: El[], offset: Point): El[] {
     const index = new Map(source.map(el => [el.id, el]));
-    return cloneElements(source, index.size ? new Map([...this.index, ...index]) : this.index, offset, this.host.newId);
+    return cloneElements(source, index.size ? new Map([...this.index, ...index]) : this.index, offset, this.host.newId, new Set(this.focusChain()));
+  }
+
+  /** Whether the selection can become a group, and whether it has a group level to take away. */
+  groupState(): { canGroup: boolean; canUngroup: boolean } {
+    const units = new Set<string>();
+    let grouped = false;
+    for (const id of this.editable()) {
+      const group = groupToEnter(this.index.get(id)!, this.focus);
+      if (group) grouped = true;
+      units.add(group ?? id);
+    }
+    return { canGroup: units.size > 1, canUngroup: grouped };
   }
 
   group() {
     const ids = this.editable();
-    if (ids.size < 2) return;
-    this.apply(setGroup(this.elements, ids, this.host.newId()));
+    if (!this.groupState().canGroup) return;
+    if ([...ids].some(id => groupChain(this.index.get(id)!).length >= whiteboardLimits.maxGroupDepth)) {
+      this.host.notice(`编组最多嵌套 ${whiteboardLimits.maxGroupDepth} 层。`);
+      return;
+    }
+    this.apply(setGroup(this.elements, ids, this.host.newId(), this.focus));
   }
 
-  ungroup() { this.apply(setGroup(this.elements, this.editable(), null)); }
+  ungroup() { this.apply(setGroup(this.elements, this.editable(), null, this.focus)); }
+
+  // ── Mind maps and connector bends ──
+
+  /** The mind node the selection stands for, with what the property bar needs to know about it. */
+  mindInfo(): { node: WhiteboardShape; rootId: string; layout: MindLayout; hasChildren: boolean; collapsed: boolean } | null {
+    if (this.store.selection.size !== 1) return null;
+    const node = this.index.get([...this.store.selection][0]!);
+    const root = isMindNode(node) ? mindRootOf(node, this.index) : null;
+    if (!isMindNode(node) || !root) return null;
+    return { node, rootId: root.id, layout: mindLayoutOf(this.elements, root.id), hasChildren: this.hasMindChildren(node.id), collapsed: Boolean(node.mindCollapsed) };
+  }
+
+  /** Send the branches of the selected node's map to the right, to the left or to both sides. */
+  setMindLayout(layout: MindLayout) {
+    const info = this.mindInfo();
+    if (info) this.apply(setMindLayout(this.elements, info.rootId, layout));
+  }
+
+  /** Put the middle segment of the selected elbow connectors back where the route places it. */
+  resetBend() {
+    const ids = this.editable();
+    this.apply(this.elements.map(el => {
+      if (el.type !== 'connector' || !ids.has(el.id) || el.bend === undefined) return el;
+      const { bend: _bend, ...rest } = el;
+      void _bend;
+      return rest;
+    }));
+  }
+
+  /**
+   * Select an element and bring it into view, unfolding the mind branches that hide it. The
+   * unfolding is not saved by itself, so following a search result never writes to the board.
+   */
+  locate(id: string): boolean {
+    const el = this.index.get(id);
+    if (!el) return false;
+    if (this.store.editingId) this.finishEditing();
+    if (mindVisibility(this.elements).hidden.has(id)) {
+      const targets = el.type === 'connector' ? [el.source, el.target].flatMap(end => end.bind ? [end.bind.elementId] : []) : [id];
+      let next = this.elements;
+      for (const target of targets) {
+        let cursor = this.index.get(target);
+        for (let steps = 0; cursor?.type === 'shape' && cursor.mindParentId && steps < 10_000; steps += 1) {
+          const parent = this.index.get(cursor.mindParentId);
+          if (isMindNode(parent) && parent.mindCollapsed) next = setMindCollapsed(next, parent.id, false);
+          cursor = parent;
+        }
+      }
+      this.store.preview(next);
+    }
+    if (this.store.tool !== 'select') this.store.setTool('select');
+    this.store.focusGroup = null;
+    this.store.select([id]);
+    const bounds = boundsOfIds([id], this.index);
+    if (bounds) this.store.fitTo(expandRect(bounds, 120), 48, 1);
+    this.refreshOverlay();
+    return true;
+  }
 
   toggleLock() {
     const ids = new Set(this.store.selection);
@@ -879,7 +1144,7 @@ export class Controller {
   }
 
   nudge(dx: number, dy: number) {
-    const ids = movingSet(this.elements, this.editable(), this.index);
+    const ids = movingSet(this.elements, this.editable(), this.index, this.focus);
     if (!ids.size) return;
     this.apply(translate(this.elements, ids, dx, dy));
   }
@@ -917,7 +1182,7 @@ export class Controller {
   }
 
   /** Selected element ids plus the ids that travel with them, for copy and export. */
-  selectionWithDependents(): Set<string> { return movingSet(this.elements, this.store.selection, this.index); }
+  selectionWithDependents(): Set<string> { return dependentSet(this.elements, this.store.selection, this.index, this.focus); }
 
   selectionBounds(): Rect | null { return boundsOfIds(this.store.selection, this.index); }
 }

@@ -19,6 +19,8 @@ export const whiteboardLimits = {
   maxStrokeWidth: 64,
   minFontSize: 4,
   maxFontSize: 400,
+  /** Levels of groups an element can sit in: `groupId` plus `groupParents`. */
+  maxGroupDepth: 8,
 } as const;
 
 export const whiteboardShapeKinds = ['rect', 'roundRect', 'ellipse', 'diamond', 'triangle'] as const;
@@ -42,7 +44,10 @@ interface BoxElement {
   /** Radians, clockwise, around the box centre. */
   angle: number;
   locked?: boolean;
+  /** The innermost group the element belongs to. */
   groupId?: string;
+  /** Groups that enclose `groupId`, from the inside out; present only for nested groups. */
+  groupParents?: string[];
 }
 
 export interface WhiteboardShape extends BoxElement {
@@ -57,8 +62,13 @@ export interface WhiteboardShape extends BoxElement {
   textColor: string;
   fontSize: number;
   textAlign: WhiteboardTextAlign;
+  bold?: boolean;
   /** Present on mind-map nodes: the parent node id, or null on the root. */
   mindParentId?: string | null;
+  /** Mind-map nodes only: the node's descendants are hidden until it is expanded again. */
+  mindCollapsed?: boolean;
+  /** Children of a mind-map root only: the branch grows to the left of the root instead of the right. */
+  mindSide?: 'left';
 }
 
 export interface WhiteboardText extends BoxElement {
@@ -77,6 +87,7 @@ export interface WhiteboardNote extends BoxElement {
   color: string;
   fontSize: number;
   textAlign: WhiteboardTextAlign;
+  bold?: boolean;
 }
 
 export interface WhiteboardFrame extends BoxElement {
@@ -137,8 +148,11 @@ export interface WhiteboardConnector {
   startArrow: WhiteboardArrowhead;
   endArrow: WhiteboardArrowhead;
   text: string;
+  /** Elbow mode only: how far the user moved the free middle segment from where the router puts it. */
+  bend?: number;
   locked?: boolean;
   groupId?: string;
+  groupParents?: string[];
 }
 
 export type WhiteboardBoxElement = WhiteboardShape | WhiteboardText | WhiteboardNote | WhiteboardFrame
@@ -162,17 +176,19 @@ const forbiddenKeys = new Set(['__proto__', 'constructor', 'prototype']);
 const controlChars = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const lineBreaks = new RegExp(`[\\n\\r${String.fromCharCode(0x2028, 0x2029)}]`);
 
-const boxKeys = ['id', 'type', 'x', 'y', 'w', 'h', 'angle', 'locked', 'groupId'];
+const boxKeys = ['id', 'type', 'x', 'y', 'w', 'h', 'angle', 'locked', 'groupId', 'groupParents'];
 const allowedKeys: Record<WhiteboardElementType, ReadonlySet<string>> = {
-  shape: new Set([...boxKeys, 'shape', 'fill', 'stroke', 'strokeWidth', 'strokeStyle', 'text', 'textColor', 'fontSize', 'textAlign', 'mindParentId']),
+  shape: new Set([...boxKeys, 'shape', 'fill', 'stroke', 'strokeWidth', 'strokeStyle', 'text', 'textColor', 'fontSize', 'textAlign', 'bold',
+    'mindParentId', 'mindCollapsed', 'mindSide']),
   text: new Set([...boxKeys, 'text', 'color', 'fontSize', 'textAlign', 'bold']),
-  note: new Set([...boxKeys, 'text', 'color', 'fontSize', 'textAlign']),
+  note: new Set([...boxKeys, 'text', 'color', 'fontSize', 'textAlign', 'bold']),
   frame: new Set([...boxKeys, 'name']),
   image: new Set([...boxKeys, 'attachmentId', 'fileName', 'mediaType']),
   card: new Set([...boxKeys, 'pageId', 'label', 'view']),
   database: new Set([...boxKeys, 'databaseId', 'viewId']),
   pen: new Set([...boxKeys, 'points', 'color', 'strokeWidth', 'highlighter']),
-  connector: new Set(['id', 'type', 'mode', 'source', 'target', 'stroke', 'strokeWidth', 'strokeStyle', 'startArrow', 'endArrow', 'text', 'locked', 'groupId']),
+  connector: new Set(['id', 'type', 'mode', 'source', 'target', 'stroke', 'strokeWidth', 'strokeStyle', 'startArrow', 'endArrow', 'text', 'bend',
+    'locked', 'groupId', 'groupParents']),
 };
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -200,6 +216,20 @@ function endProblem(end: unknown): string | null {
   return null;
 }
 
+/** Nested groups name each enclosing group once, and only on elements that are grouped at all. */
+function groupsProblem(el: Record<string, unknown>): boolean {
+  if (el.groupId !== undefined && !uuid(el.groupId)) return true;
+  const parents = el.groupParents;
+  if (parents === undefined) return false;
+  if (el.groupId === undefined || !Array.isArray(parents) || parents.length < 1 || parents.length >= whiteboardLimits.maxGroupDepth) return true;
+  const seen = new Set<unknown>([el.groupId]);
+  for (const parent of parents) {
+    if (!uuid(parent) || seen.has(parent)) return true;
+    seen.add(parent);
+  }
+  return false;
+}
+
 function elementProblem(el: unknown): string | null {
   if (!record(el)) return 'element';
   const type = el.type;
@@ -207,11 +237,12 @@ function elementProblem(el: unknown): string | null {
   const allowed = allowedKeys[type as WhiteboardElementType];
   for (const key of Object.keys(el)) if (forbiddenKeys.has(key) || !allowed.has(key)) return `${type} key`;
   if (!uuid(el.id)) return 'element id';
-  if (!optionalFlag(el.locked) || (el.groupId !== undefined && !uuid(el.groupId))) return `${type} flags`;
+  if (!optionalFlag(el.locked) || groupsProblem(el)) return `${type} flags`;
   if (type === 'connector') {
     if (!oneOf(whiteboardConnectorModes, el.mode) || !color(el.stroke) || !finite(el.strokeWidth, 0.5, whiteboardLimits.maxStrokeWidth)
       || !oneOf(whiteboardStrokeStyles, el.strokeStyle) || !oneOf(whiteboardArrowheads, el.startArrow)
-      || !oneOf(whiteboardArrowheads, el.endArrow) || !text(el.text, whiteboardLimits.maxLabel)) return 'connector';
+      || !oneOf(whiteboardArrowheads, el.endArrow) || !text(el.text, whiteboardLimits.maxLabel)
+      || (el.bend !== undefined && !coordinate(el.bend))) return 'connector';
     return endProblem(el.source) ?? endProblem(el.target);
   }
   if (!coordinate(el.x) || !coordinate(el.y) || !finite(el.w, 0, whiteboardLimits.maxSize)
@@ -222,9 +253,13 @@ function elementProblem(el: unknown): string | null {
     case 'shape':
       return oneOf(whiteboardShapeKinds, el.shape) && color(el.fill) && color(el.stroke) && color(el.textColor)
         && finite(el.strokeWidth, 0, whiteboardLimits.maxStrokeWidth) && oneOf(whiteboardStrokeStyles, el.strokeStyle) && fontOk()
-        && (el.mindParentId === undefined || el.mindParentId === null || uuid(el.mindParentId)) ? null : 'shape';
+        && optionalFlag(el.bold)
+        && (el.mindParentId === undefined || el.mindParentId === null || uuid(el.mindParentId))
+        // Collapsing and sides only mean something inside a mind map; a side needs a parent to be beside.
+        && optionalFlag(el.mindCollapsed) && (el.mindCollapsed === undefined || el.mindParentId !== undefined)
+        && (el.mindSide === undefined || (el.mindSide === 'left' && typeof el.mindParentId === 'string')) ? null : 'shape';
     case 'text': return color(el.color) && fontOk() && optionalFlag(el.bold) ? null : 'text';
-    case 'note': return color(el.color) && fontOk() ? null : 'note';
+    case 'note': return color(el.color) && fontOk() && optionalFlag(el.bold) ? null : 'note';
     case 'frame': return text(el.name, whiteboardLimits.maxName) ? null : 'frame';
     case 'image':
       return uuid(el.attachmentId) && typeof el.fileName === 'string' && el.fileName.length >= 1 && el.fileName.length <= 180
