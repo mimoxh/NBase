@@ -101,10 +101,16 @@ export class Controller {
     const outlines: Box[] = [];
     const connectorEnds: Point[] = [];
     let bend: Point | null = null;
-    if (this.store.selection.size > 1 || transform === null) {
+    const nodes: WhiteboardShape[] = [];
+    // A mind node cannot be resized or rotated, so a box around it would only square off its rounded outline.
+    const framed = (el: El | null | undefined): el is BoxEl => Boolean(el) && isBox(el!) && !isMindNode(el!);
+    // Nothing is drawn around an element while its text is edited: the caret already marks it.
+    if (!this.store.editingId) {
+      const each = this.store.selection.size > 1 || transform === null;
       for (const id of this.store.selection) {
         const el = this.index.get(id);
-        if (el && isBox(el)) outlines.push(el);
+        if (isMindNode(el)) nodes.push(el);
+        else if (each && framed(el)) outlines.push(el);
       }
     }
     const single = this.store.selection.size === 1 && !this.store.editingId ? this.index.get([...this.store.selection][0]!) : undefined;
@@ -118,9 +124,10 @@ export class Controller {
     // The collapse button belongs to the node under the pointer, or else to the selected one.
     const open = [hovered, single].find((el): el is WhiteboardShape => isMindNode(el) && !el.mindCollapsed && this.hasMindChildren(el.id));
     this.toggleId = open && !this.store.editingId ? open.id : null;
-    this.store.setOverlay({ ...emptyOverlay, outlines, connectorEnds, bend,
-      transform: transform && { box: transform.box, handles: transform.handles && !this.store.readOnly, rotate: transform.rotate && !this.store.readOnly, locked: transform.locked },
-      hover: hover && isBox(hover) ? hover : null,
+    this.store.setOverlay({ ...emptyOverlay, outlines, nodes, connectorEnds, bend,
+      transform: transform && (!transform.single || framed(transform.single))
+        ? { box: transform.box, handles: transform.handles && !this.store.readOnly, rotate: transform.rotate && !this.store.readOnly, locked: transform.locked } : null,
+      hover: framed(hover) ? hover : null,
       mindToggle: open && this.toggleId ? mindTogglePoint(open, mindChildSide(open, this.elements, this.index)) : null,
       focus: focusIds.length ? boundsOfIds(focusIds, this.index) : null, ...extra });
   }

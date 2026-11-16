@@ -536,6 +536,48 @@ describe('controller', () => {
     expect(store.elements.some(el => el.id === shape.id)).toBe(false);
   });
 
+  it('marks a selected mind node along its own outline instead of with a box, and nothing while text is edited', () => {
+    const { elements, ids } = mindMap();
+    const plain = rect(900, 600);
+    const { store, controller, click } = setup([...elements, plain]);
+    const one = byId(store.elements, ids.one);
+    click(...centre(one));
+    expect([...store.selection]).toEqual([ids.one]);
+    expect(store.overlay.transform).toBeNull();
+    expect(store.overlay.outlines).toEqual([]);
+    expect(store.overlay.nodes.map(node => node.id)).toEqual([ids.one]);
+    expect(store.overlay.mindToggle).not.toBeNull();
+    // Hovering draws no box on a node either; other elements keep theirs.
+    const hover = (el: El) => { const [x, y] = centre(el as WhiteboardShape);
+      controller.pointerMove({ x, y, button: 0, pointerId: 1, pointerType: 'mouse', shiftKey: false, altKey: false, ctrlKey: false, metaKey: false }); };
+    hover(byId(store.elements, ids.two));
+    expect(store.overlay.hover).toBeNull();
+    hover(plain);
+    expect(store.overlay.hover).toBe(store.index.get(plain.id));
+    // Several selected elements still get the box around all of them; inside it nodes and plain shapes keep their own marks.
+    store.select([ids.one, ids.two, plain.id]);
+    controller.refreshOverlay();
+    expect(store.overlay.transform).not.toBeNull();
+    expect(store.overlay.outlines.map(box => (box as El).id)).toEqual([plain.id]);
+    expect(store.overlay.nodes.map(node => node.id).sort()).toEqual([ids.one, ids.two].sort());
+    // While a node's text is edited nothing at all is drawn around it, however it grows.
+    controller.startEditing(ids.one);
+    expect([store.overlay.transform, store.overlay.outlines, store.overlay.nodes]).toEqual([null, [], []]);
+    controller.editText('一个比原来长得多的主题');
+    expect([store.overlay.transform, store.overlay.outlines, store.overlay.nodes]).toEqual([null, [], []]);
+    controller.finishEditing();
+    expect(store.overlay.nodes).toEqual([store.index.get(ids.one)]);
+    // Other elements keep their handles until their text is edited.
+    store.select([plain.id]);
+    controller.refreshOverlay();
+    expect(store.overlay.transform).toMatchObject({ handles: true, rotate: true });
+    expect(store.overlay.nodes).toEqual([]);
+    controller.startEditing(plain.id);
+    expect([store.overlay.transform, store.overlay.outlines]).toEqual([null, []]);
+    controller.finishEditing();
+    expect(store.overlay.transform).not.toBeNull();
+  });
+
   it('brings a located element into view, unfolding what hides it, without saving', () => {
     const { elements, ids } = mindMap();
     const { store, controller, saves } = setup(setMindCollapsed(elements, ids.one, true));

@@ -237,7 +237,7 @@ export function moveMindNode(elements: Elements, id: string, drop: MindDrop): El
 
 export interface MindDropHint extends MindDrop {
   /** The node that would become the parent, to highlight it. */
-  box: Box | null;
+  box: WhiteboardShape | null;
   /** Where the node would land among its siblings. */
   line: { from: Point; to: Point } | null;
 }

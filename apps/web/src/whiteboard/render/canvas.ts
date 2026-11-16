@@ -1,4 +1,4 @@
-import type { WhiteboardCard, WhiteboardTextAlign } from '@nbase/contracts';
+import type { WhiteboardCard, WhiteboardShape, WhiteboardTextAlign } from '@nbase/contracts';
 import { aabb, centerOf, expandRect, rectsIntersect, type Box, type Point, type Rect, type SnapGuide } from '../geometry';
 import { connectorPath, elementBounds, handlePoint, handles, isBox, mindVisibility, notePadding, penPoints, shapeTextBox, type BoxEl, type Connector,
   type ConnectorPath, type El, type Elements, type Index } from '../model';
@@ -344,6 +344,8 @@ export function drawScene(ctx: CanvasRenderingContext2D, elements: Elements, ind
 export interface Overlay {
   /** Outline every selected element individually. */
   outlines: Box[];
+  /** Selected mind nodes: they cannot be resized, so they are marked along their own outline instead of with a box. */
+  nodes: WhiteboardShape[];
   /** The transform box with handles; absent when nothing is selected or the selection cannot transform. */
   transform: { box: Box; handles: boolean; rotate: boolean; locked: boolean } | null;
   connectorEnds: Point[];
@@ -358,12 +360,12 @@ export interface Overlay {
   /** Collapse button of the hovered or selected mind node, in world coordinates. */
   mindToggle: Point | null;
   /** Where a dragged mind node would land: the node that becomes its parent, or its place among siblings. */
-  drop: { box: Box | null; line: { from: Point; to: Point } | null } | null;
+  drop: { box: WhiteboardShape | null; line: { from: Point; to: Point } | null } | null;
   /** Bounds of the group that has been entered. */
   focus: Rect | null;
 }
 
-export const emptyOverlay: Overlay = { outlines: [], transform: null, connectorEnds: [], hover: null, anchors: null, marquee: null, guides: [], draft: null, eraser: null,
+export const emptyOverlay: Overlay = { outlines: [], nodes: [], transform: null, connectorEnds: [], hover: null, anchors: null, marquee: null, guides: [], draft: null, eraser: null,
   bend: null, mindToggle: null, drop: null, focus: null };
 export const rotateHandleOffset = 26;
 export const handleSize = 9;
@@ -371,6 +373,19 @@ export const handleSize = 9;
 function boxPath(ctx: CanvasRenderingContext2D, box: Box, view: View) {
   const points = [handlePoint(box, 'nw'), handlePoint(box, 'ne'), handlePoint(box, 'se'), handlePoint(box, 'sw')].map(p => toScreen(p, view));
   ctx.beginPath(); points.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.closePath();
+}
+
+/** Stroke along a shape's own outline, `gap` screen pixels outside it, so a rounded node is never boxed in. */
+function strokeShapeOutline(ctx: CanvasRenderingContext2D, el: WhiteboardShape, view: View, gap: number, width: number) {
+  const grow = gap / view.zoom, c = toScreen(centerOf(el), view);
+  ctx.save();
+  ctx.translate(c.x, c.y);
+  if (el.angle) ctx.rotate(el.angle);
+  ctx.scale(view.zoom, view.zoom);
+  ctx.translate(-el.w / 2 - grow, -el.h / 2 - grow);
+  ctx.lineWidth = width / view.zoom;
+  ctx.stroke(new Path2D(shapePath(el.shape, el.w + grow * 2, el.h + grow * 2)));
+  ctx.restore();
 }
 
 export function rotateHandlePoint(box: Box, view: View): Point {
@@ -405,6 +420,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, overlay: Overlay, vie
   if (overlay.hover) { ctx.strokeStyle = theme.accent; ctx.globalAlpha = 0.5; ctx.lineWidth = 1.5; boxPath(ctx, overlay.hover, view); ctx.stroke(); ctx.globalAlpha = 1; }
   ctx.strokeStyle = theme.accent; ctx.lineWidth = 1;
   for (const box of overlay.outlines) { boxPath(ctx, box, view); ctx.stroke(); }
+  for (const node of overlay.nodes) strokeShapeOutline(ctx, node, view, 3, 2);
   const t = overlay.transform;
   if (t) {
     ctx.lineWidth = 1.5; ctx.strokeStyle = t.locked ? theme.muted : theme.accent;
@@ -440,7 +456,7 @@ export function drawOverlay(ctx: CanvasRenderingContext2D, overlay: Overlay, vie
   }
   if (overlay.drop) {
     ctx.strokeStyle = theme.accent; ctx.lineCap = 'round';
-    if (overlay.drop.box) { ctx.lineWidth = 2.5; boxPath(ctx, overlay.drop.box, view); ctx.stroke(); }
+    if (overlay.drop.box) strokeShapeOutline(ctx, overlay.drop.box, view, 0, 2.5);
     if (overlay.drop.line) {
       const a = toScreen(overlay.drop.line.from, view), b = toScreen(overlay.drop.line.to, view);
       ctx.lineWidth = 3; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
