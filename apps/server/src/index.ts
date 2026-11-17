@@ -31,6 +31,7 @@ try {
       await prepareAttachmentDirectory(attachmentRoot, staticRoot);
     } } : {}),
   });
+  if (pool && !credentialKey) app.log.warn('CalDAV is off: no credential key is configured (NBASE_CREDENTIAL_KEY_FILE)');
   if (pool) app.addHook('onClose', async () => { await pool!.end(); });
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {

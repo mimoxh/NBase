@@ -19,7 +19,7 @@ docker compose --env-file .env.docker up -d --wait nbase
 
 其他端口/隔离实例：`node -- scripts/setup-docker.mjs --project nbase-trial --port 4325 --env-file .env.trial`，后续所有 Compose 命令均使用 `--env-file .env.trial`。`node --` 明确结束 Node 自身的命令行选项。
 
-**日历二期之前建立的配置：** Compose 现在要求 `NBASE_CREDENTIAL_KEY_SOURCE`，缺少时 `config` 和 `up` 直接报错。执行 `node -- scripts/setup-docker.mjs --add-credential-key`（其他项目加同样的 `--project` / `--env-file`），它只新建密钥文件并在 env 文件末尾加这一行，其余配置不动；已配置时不做任何修改。
+**日历二期之前建立的配置：** 不改配置也能照常启动。没有 `NBASE_CREDENTIAL_KEY_SOURCE` 时，Compose 挂载仓库里的空文件 `deploy/no-credential-key`，应用把空密钥文件当作未配置：CalDAV 不可用（界面说明原因，启动日志有一条警告），其他功能不受影响。要用 CalDAV 时执行 `node -- scripts/setup-docker.mjs --add-credential-key`（其他项目加同样的 `--project` / `--env-file`），它只新建密钥文件并在 env 文件末尾加这一行，其余配置不动，已配置时不做任何修改；然后重新执行 `docker compose --env-file .env.docker up -d --wait nbase`，让应用容器挂载新密钥。
 
 `admin` 是 maintenance profile 的一次性服务，默认只执行初始化 CLI，不监听网络。已初始化实例再次执行会失败，不能接管原账号。常驻应用不挂载 owner 密码文件。生成密码后应保存到个人密码管理器；秘密文件不会自动删除或轮换。
 
@@ -34,7 +34,7 @@ docker compose --env-file .env.docker up -d --wait nbase
 | `NBASE_OWNER_PASSWORD_SOURCE` | 初始化/重置时读取的 owner 密码文件；修改此文件本身不会修改数据库密码或 owner 密码 |
 | `NBASE_OWNER_LOGIN` | 初始化账号名，也用于维护时核对现有 instance owner；不用于创建任意新账号 |
 | `NBASE_LINK_PREVIEW` | 设为 `off` 时关闭网页书签的服务端抓取，书签只显示网址。默认开启：只抓取 http/https 默认端口的公网地址，解析后拒绝回环、私有、链路本地等地址并固定连接到已检查的地址，每次重定向重新检查，6 秒超时、最多读 512 KB、只解析标题/简介/站点名，不下载图片；每个账号每分钟 30 次 |
-| `NBASE_CREDENTIAL_KEY_SOURCE` | 宿主凭据密钥文件（一行 base64，解码后 32 字节），以 secret `credential_key` 挂载，应用经 `NBASE_CREDENTIAL_KEY_FILE` 读取，用 AES-256-GCM 加密保存的 CalDAV 账号密码。读不到或格式不对时启动失败。密钥不在备份里，须另行保管；丢失后只能逐个重新输入 CalDAV 密码 |
+| `NBASE_CREDENTIAL_KEY_SOURCE` | 宿主凭据密钥文件（一行 base64，解码后 32 字节），以 secret `credential_key` 挂载，应用经 `NBASE_CREDENTIAL_KEY_FILE` 读取，用 AES-256-GCM 加密保存的 CalDAV 账号密码。可选：不设时挂载空占位文件，CalDAV 关闭。文件为空视为未配置；读不到或内容格式不对时启动失败。密钥不在备份里，须另行保管；丢失后只能逐个重新输入 CalDAV 密码 |
 | `NBASE_CALDAV_PRIVATE` | 默认 `deny`：CalDAV 只连公网地址和默认端口。设为 `allow` 时 CalDAV（只有 CalDAV）可以连本机、内网地址和任意端口，并允许对这些地址用 http，用于 NAS 上的 Nextcloud、Radicale 等。其他值启动失败 |
 | `NBASE_CALENDAR_FETCH` | 设为 `off` 时关闭日历订阅抓取和 CalDAV 同步 |
 | `<project>_postgres_data` | PostgreSQL 18 的命名卷，挂到 `/var/lib/postgresql`；容器内 PGDATA 为版本目录 |

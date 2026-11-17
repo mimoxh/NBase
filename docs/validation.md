@@ -806,4 +806,18 @@ P3-06 本机出口通过（桌面范围）：核心任务冒烟、性能基线�
 
 - 钉钉、企业微信、iCloud 的 CalDAV。
 - 真实可写服务器上的 412 与 403 处理、只读日历的写入拒绝（只在模拟服务器测试中覆盖）。
-- Docker 部署下的凭据密钥挂载与 `--add-credential-key` 升级（脚本和 Compose 配置已改，未在 Docker 中实际运行）。
+- Docker 部署下的凭据密钥挂载与 `--add-credential-key` 升级（脚本和 Compose 配置已改，未在 Docker 中实际运行）。补充见下一节。
+
+### 补充：凭据密钥改为可选
+
+二期合并后，二期之前生成的 `.env.docker` 没有 `NBASE_CREDENTIAL_KEY_SOURCE`，Compose 的 `:?` 必填写法会让 `config` 和 `up` 直接失败。改为没配置时挂载空占位文件 `deploy/no-credential-key`，应用把 0 字节密钥文件当作未配置。
+
+| 项目 | 结果 |
+| --- | --- |
+| 修改前 | 用缺少该变量的老配置执行 `docker compose config`：报错 `required variable NBASE_CREDENTIAL_KEY_SOURCE is missing a value` |
+| 修改后 | 同一老配置 `config` 通过，`credential_key` 指向 `deploy/no-credential-key`；带该变量的配置仍指向自己的密钥文件 |
+| 应用启动 | 构建后服务端以占位文件作为 `NBASE_CREDENTIAL_KEY_FILE` 连接验收库启动，日志警告 “CalDAV is off”，`/api/ready` 200 |
+| 升级脚本 | 对老配置执行 `--add-credential-key`：新建 32 字节密钥并在 env 末尾加一行；再执行一次提示已配置、不改动；之后 `config` 指向新密钥。测试用的 env 与秘密目录已删除 |
+| 单元测试 | 空文件与仓库占位文件返回未配置；只有一个换行的文件仍是启动错误 |
+
+Docker 守护进程本轮未运行，没有实际 `up` 容器；`config` 只做插值与路径解析。

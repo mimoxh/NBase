@@ -98,9 +98,9 @@
 ### 凭据加密
 
 - 账号和密码作为一个 JSON 用 AES-256-GCM 加密后存在来源记录里：`版本(1 字节) | IV(12) | 密文 | 标签(16)`，附加数据为来源 ID，另存密钥指纹（SHA-256 的前 8 字节，十六进制）。
-- 密钥来自 `NBASE_CREDENTIAL_KEY_FILE` 指向的秘密文件：一行 base64，解码后正好 32 字节，读取规则同其他秘密文件。没有配置时 CalDAV 接口返回 503 `CREDENTIALS_UNAVAILABLE`，已有来源同步时记同样的错误；其他功能不受影响。
+- 密钥来自 `NBASE_CREDENTIAL_KEY_FILE` 指向的秘密文件：一行 base64，解码后正好 32 字节，读取规则同其他秘密文件。没有配置或文件为空（0 字节；Compose 没配密钥时挂载的占位文件 `deploy/no-credential-key`）时 CalDAV 接口返回 503 `CREDENTIALS_UNAVAILABLE`，已有来源同步时记同样的错误；其他功能不受影响。
 - 指纹与当前密钥不同（换了密钥或恢复到没有原密钥的实例）时，来源显示 `credentialsOk: false`，用 PATCH 的 `credentials` 重新输入即可，数据和对应关系不变。
-- 备份包含加密后的凭据，不含密钥文件。恢复时把原密钥文件放到新实例的秘密目录；没有原密钥就重新输入各账号密码。部署脚本生成 `.secrets/nbase/credential-key`，Compose 以 secret 挂载。轮换密钥 = 换文件后逐个重新输入密码。
+- 备份包含加密后的凭据，不含密钥文件。恢复时把原密钥文件放到新实例的秘密目录；没有原密钥就重新输入各账号密码。部署脚本生成 `.secrets/nbase/credential-key`，Compose 以 secret 挂载；二期之前的配置用 `--add-credential-key` 补上。轮换密钥 = 换文件后逐个重新输入密码。
 - 删除来源时凭据随来源记录删除。
 
 ### 存储（迁移 v22）

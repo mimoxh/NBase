@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { stat } from 'node:fs/promises';
 import type { CalDavAccount } from '@nbase/contracts';
 import { readSecretFile } from '../config.js';
 
@@ -30,12 +31,18 @@ export function credentialKeyFromText(text: string): CredentialKey {
   return { key, id: createHash('sha256').update(key).digest().subarray(0, 8).toString('hex') };
 }
 
-/** Null when NBASE_CREDENTIAL_KEY_FILE is unset; an unreadable or malformed file is a startup error. */
+/**
+ * Null when NBASE_CREDENTIAL_KEY_FILE is unset or names an empty file; an unreadable or malformed file is a
+ * startup error. Compose mounts an empty placeholder when no key is configured, so older configurations start.
+ */
 export async function loadCredentialKey(env: NodeJS.ProcessEnv = process.env): Promise<CredentialKey | null> {
   const path = env.NBASE_CREDENTIAL_KEY_FILE;
   if (path === undefined || path === '') return null;
   let text: string;
-  try { text = await readSecretFile(path); } catch (error) {
+  try {
+    if ((await stat(path)).size === 0) return null;
+    text = await readSecretFile(path);
+  } catch (error) {
     throw new Error(`NBASE_CREDENTIAL_KEY_FILE cannot be read: ${(error as Error).message}`);
   }
   return credentialKeyFromText(text);

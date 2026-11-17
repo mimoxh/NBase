@@ -74,9 +74,10 @@ secrets:
     file: ${NBASE_DB_PASSWORD_SOURCE:?Set the database password file path}
   owner_password:
     file: ${NBASE_OWNER_PASSWORD_SOURCE:?Set the owner password file path}
-  # Seals stored CalDAV credentials; kept out of backups. Older configurations: node -- scripts/setup-docker.mjs --add-credential-key
+  # Seals stored CalDAV credentials; kept out of backups. Without NBASE_CREDENTIAL_KEY_SOURCE the empty placeholder
+  # is mounted and CalDAV stays off; add a key with: node -- scripts/setup-docker.mjs --add-credential-key
   credential_key:
-    file: ${NBASE_CREDENTIAL_KEY_SOURCE:?Set the credential key file path}
+    file: ${NBASE_CREDENTIAL_KEY_SOURCE:-./deploy/no-credential-key}
 
 volumes:
   postgres_data:

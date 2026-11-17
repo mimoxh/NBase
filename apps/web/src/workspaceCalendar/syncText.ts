@@ -3,7 +3,7 @@ import { ApiError } from '../persistence/client';
 
 export const syncKindLabels: Record<CalendarSyncKind, string> = { 'ics-file': '导入文件', 'ics-url': '订阅', caldav: 'CalDAV' };
 
-export const credentialsUnavailableText = '服务端未配置凭据密钥，暂时不能连接 CalDAV。请联系管理员配置后再试。';
+export const credentialsUnavailableText = '服务端未配置凭据密钥，暂时不能连接 CalDAV。Docker 部署请在服务器上执行 node -- scripts/setup-docker.mjs --add-credential-key，再重新执行 docker compose up -d。';
 
 const syncErrorText: Record<CalendarSyncError, string> = {
   URL_INVALID: '网址无效',
