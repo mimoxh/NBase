@@ -75,6 +75,7 @@ export function PersistentWorkspace() {
   const [authError, setAuthError] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [reauth, setReauth] = useState(false);
+  const [historyNameRevision, setHistoryNameRevision] = useState<string | null>(null);
   const [showReauthForm, setShowReauthForm] = useState(false);
   const [pages, setPages] = useState<PageSummary[]>([]);
   const [readingPrefs, setReadingPrefs] = useReadingPrefs();
@@ -521,6 +522,16 @@ export function PersistentWorkspace() {
     await savePage(pageId);
     await waitForSave(pageId);
     if (draftsRef.current.has(pageId)) throw new Error('请先完成此页的保存或解决冲突。');
+  };
+
+  /** Saves pending edits first, so the name lands on a revision that holds what is on screen. */
+  const nameCurrentVersion = async (pageId: string) => {
+    if (!canWrite) return;
+    try { await settlePageBeforeWrite(pageId); }
+    catch (error) { setNotice(message(error)); return; }
+    const saved = docsRef.current.get(pageId);
+    if (!saved || activeIdRef.current !== pageId) return;
+    setHistoryNameRevision(saved.revision); setDialog('history');
   };
 
   const refreshTags = async () => {
@@ -1059,6 +1070,7 @@ export function PersistentWorkspace() {
   ] : current?.kind === 'whiteboard' ? [
     { key: 'mode', label: readOnly ? '切换为编辑' : '切换为只读', icon: 'focus', disabled: !canWrite, onSelect: () => setReadOnly(!readOnly) },
     { key: 'download', label: '下载白板数据 (JSON)', icon: 'download', onSelect: exportCurrent },
+    { key: 'name-version', label: '保存为命名版本…', icon: 'history', disabled: currentLocked || !canWrite, onSelect: () => void nameCurrentVersion(current.id) },
     { key: 'copy', label: '创建白板副本', icon: 'copy', disabled: createBusy || !canWrite, onSelect: duplicateBoard },
     { key: 'move', label: '移动到…', icon: 'folder', disabled: currentLocked || !canWrite, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialog('move'); } },
     'divider',
@@ -1071,6 +1083,7 @@ export function PersistentWorkspace() {
     { key: 'source', label: 'Markdown 源码', icon: 'code', onSelect: openSource },
     { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
     ...formatExportItems,
+    { key: 'name-version', label: '保存为命名版本…', icon: 'history', disabled: currentLocked || !canWrite, onSelect: () => void nameCurrentVersion(current.id) },
     ...(current.parentId ? [{ key: 'database', label: '返回数据库', icon: 'table' as const, onSelect: () => void openPage(current.parentId!) }] : []),
     { key: 'move', label: '移出数据库或移到别处…', icon: 'folder' as const, disabled: currentLocked || !canWrite, onSelect: () => { setMoveTarget(''); setDialog('move'); } },
     'divider',
@@ -1083,6 +1096,7 @@ export function PersistentWorkspace() {
     { key: 'source', label: 'Markdown 源码', icon: 'code', onSelect: openSource },
     { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
     ...formatExportItems,
+    { key: 'name-version', label: '保存为命名版本…', icon: 'history', disabled: currentLocked || !canWrite, onSelect: () => void nameCurrentVersion(current.id) },
     { key: 'folder-zip', label: '导出已保存的页面与子页面 ZIP', icon: 'download', disabled: folderExporting, onSelect: () => void exportFolder() },
     'divider',
     { key: 'child', label: '添加子页面', icon: 'plus', disabled: createBusy || currentLocked || !canWrite, onSelect: () => openNewNote(current.id) },
@@ -1126,7 +1140,7 @@ export function PersistentWorkspace() {
         onSidebarToggle={toggleSidebar}
         onOpenBreadcrumb={id => { if (id) void openPage(id); else leaveCurrent(); }}
         readOnly={readOnly} onToggleReadOnly={() => setReadOnly(!readOnly)}
-        onHistory={() => setDialog('history')} hideHistory={current?.kind === 'database'} disabled={currentLocked} pageMenuItems={pageMenuItems} />}
+        onHistory={() => { setHistoryNameRevision(null); setDialog('history'); }} hideHistory={current?.kind === 'database'} disabled={currentLocked} pageMenuItems={pageMenuItems} />}
       {!calendarOpen && !activeId && <header className="nb-topbar">
         <button className="icon-button nb-sidebar-toggle" aria-label="切换导航" onClick={toggleSidebar}><Icon name="sidebar" size={17} /></button>
         <nav className="nb-crumbs" aria-label="页面位置"><strong>工作台</strong></nav></header>}
@@ -1256,9 +1270,10 @@ export function PersistentWorkspace() {
     {dialog === 'graph' && graphSource && <LazyGraphDialog source={graphSource} currentPageId={activeId} tags={tags}
       onOpen={openReferencedPage} onClose={() => setDialog(null)} />}
     {dialog === 'history' && workspace && current && <PageHistoryDialog key={current.id} workspaceId={workspace.id}
-      pageId={current.id} currentRevision={current.revision} busy={pageActionBusy || !canWrite} pageReferences={pageReferenceAccess}
+      pageId={current.id} currentRevision={current.revision} busy={pageActionBusy} canWrite={canWrite} csrfToken={session.csrfToken}
+      nameRevision={historyNameRevision ?? undefined} pageReferences={pageReferenceAccess}
       onRestore={(version: PageVersion) => void beginPageAction('restore-version', current.id, current.revision, title, version.revision)}
-      onClose={() => setDialog(null)} />}
+      onAuthError={() => setReauth(true)} onClose={() => { setDialog(null); setHistoryNameRevision(null); }} />}
     {dialog === 'trash' && workspace && <TrashDialog workspaceId={workspace.id} busy={pageActionBusy || !canWrite}
       pages={pages} initialPageId={trashTarget} pageReferences={pageReferenceAccess}
       onRestore={(page: TrashedPageDocument) => void beginPageAction('restore', page.id, page.revision, page.title)}

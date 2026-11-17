@@ -652,4 +652,17 @@ ALTER TABLE calendar_sync_items
   ADD CONSTRAINT calendar_sync_items_aggregate CHECK ((database_id IS NULL) = (property_id IS NULL));
 `,
   },
+  {
+    version: 25,
+    name: 'page_version_labels',
+    sql: `
+-- Named versions (docs/architecture/history-trash.md). Naming a version changes neither the page revision nor the
+-- snapshot; it only marks a version worth finding again.
+ALTER TABLE page_versions
+  ADD COLUMN label text CHECK (label IS NULL OR char_length(label) BETWEEN 1 AND 100),
+  ADD COLUMN note text CHECK (note IS NULL OR char_length(note) BETWEEN 1 AND 1000),
+  ADD CONSTRAINT page_versions_note_needs_label CHECK (note IS NULL OR label IS NOT NULL);
+CREATE INDEX page_versions_named_idx ON page_versions (workspace_id, page_id, revision) WHERE label IS NOT NULL;
+`,
+  },
 ];

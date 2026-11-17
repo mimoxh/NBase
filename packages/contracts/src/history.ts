@@ -3,12 +3,20 @@ import type { PageCoverId, PageDocument, PageStateRequest, PageSummary, StoredDo
 
 export type PageVersionOperation = 'baseline' | 'create' | 'update' | 'trash' | 'restore' | 'restore-version';
 
+/** Characters (code points) after trimming. */
+export const pageVersionLabelLimit = 100;
+export const pageVersionNoteLimit = 1000;
+
 export interface PageVersionSummary {
   revision: string;
   title: string;
   savedAt: string;
   operation: PageVersionOperation;
   deleted: boolean;
+  /** A version with a label is a named version. */
+  label: string | null;
+  /** Only a named version has a note. */
+  note: string | null;
 }
 
 export interface PageVersion extends PageVersionSummary {
@@ -24,6 +32,12 @@ export interface PageVersion extends PageVersionSummary {
 export interface PageHistoryResponse {
   versions: PageVersionSummary[];
   nextBeforeRevision: string | null;
+}
+
+/** Sets the absolute label state of one version; `label: null` clears the name and the note. */
+export interface PageVersionLabelRequest {
+  label: string | null;
+  note: string | null;
 }
 
 export interface RestorePageVersionRequest extends PageStateRequest {

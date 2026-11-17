@@ -79,7 +79,7 @@ interface VersionRow {
   page_id: string; revision: string; title: string; parent_id: string | null;
   icon: string | null; cover: PageCoverId | null; row_properties: RowProperties | null;
   content_json: PageDocument['content']; saved_at: Date; operation: PageVersionOperation;
-  deleted_at: Date | null;
+  deleted_at: Date | null; label: string | null; note: string | null;
 }
 
 interface TrashRow extends PageRow {
@@ -94,7 +94,7 @@ type BacklinkRow = {
 
 function versionSummary(row: VersionRow): PageVersionSummary {
   return { revision: row.revision, title: row.title, savedAt: row.saved_at.toISOString(),
-    operation: row.operation, deleted: row.deleted_at !== null };
+    operation: row.operation, deleted: row.deleted_at !== null, label: row.label ?? null, note: row.note ?? null };
 }
 
 export interface MutationResult<T> {
@@ -168,12 +168,13 @@ export class PgPageRepository {
   }
 
   async history(workspaceId: string, actorId: string, pageId: string, limit: number,
-    before: string | null): Promise<PageHistoryResponse> {
+    before: string | null, named = false): Promise<PageHistoryResponse> {
     const result = await this.pool.query<VersionRow>(`SELECT h.revision::text AS revision, h.title,
-      h.saved_at, h.operation, h.deleted_at FROM page_versions h
+      h.saved_at, h.operation, h.deleted_at, h.label, h.note FROM page_versions h
       JOIN workspace_memberships m ON m.workspace_id = h.workspace_id AND m.user_id = $2
       WHERE h.workspace_id = $1 AND h.page_id = $3 AND ($4::bigint IS NULL OR h.revision < $4)
-      ORDER BY h.revision DESC LIMIT $5`, [workspaceId, actorId, pageId, before, limit + 1]);
+        AND (NOT $6::boolean OR h.label IS NOT NULL)
+      ORDER BY h.revision DESC LIMIT $5`, [workspaceId, actorId, pageId, before, limit + 1, named]);
     const visible = result.rows.slice(0, limit);
     return { versions: visible.map(versionSummary),
       nextBeforeRevision: result.rows.length > limit ? visible.at(-1)!.revision : null };
@@ -181,7 +182,8 @@ export class PgPageRepository {
 
   async version(workspaceId: string, actorId: string, pageId: string, revision: string): Promise<PageVersion | null> {
     const result = await this.pool.query<VersionRow>(`SELECT h.page_id, h.revision::text AS revision,
-      h.title, h.parent_id, h.icon, h.cover, h.row_properties, h.content_json, h.saved_at, h.operation, h.deleted_at FROM page_versions h
+      h.title, h.parent_id, h.icon, h.cover, h.row_properties, h.content_json, h.saved_at, h.operation, h.deleted_at,
+      h.label, h.note FROM page_versions h
       JOIN workspace_memberships m ON m.workspace_id = h.workspace_id AND m.user_id = $2
       WHERE h.workspace_id = $1 AND h.page_id = $3 AND h.revision = $4::bigint`,
     [workspaceId, actorId, pageId, revision]);
@@ -189,6 +191,19 @@ export class PgPageRepository {
     return row ? { ...versionSummary(row), pageId: row.page_id, parentId: row.parent_id,
       icon: row.icon ?? null, cover: row.cover ?? null, content: row.content_json,
       ...(row.row_properties ? { properties: row.row_properties } : {}) } : null;
+  }
+
+  /** Absolute state, so a retry after a lost response needs no receipt; the page revision does not change. */
+  async labelVersion(workspaceId: string, actorId: string, pageId: string, revision: string,
+    label: string | null, note: string | null): Promise<PageVersionSummary | null> {
+    const result = await this.pool.query<VersionRow>(`UPDATE page_versions h SET label = $5, note = $6
+      FROM workspace_memberships m
+      WHERE m.workspace_id = h.workspace_id AND m.user_id = $2
+        AND h.workspace_id = $1 AND h.page_id = $3 AND h.revision = $4::bigint
+      RETURNING h.revision::text AS revision, h.title, h.saved_at, h.operation, h.deleted_at, h.label, h.note`,
+    [workspaceId, actorId, pageId, revision, label, note]);
+    const row = result.rows[0];
+    return row ? versionSummary(row) : null;
   }
 
   async trashList(workspaceId: string, actorId: string, limit: number,

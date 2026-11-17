@@ -1,5 +1,5 @@
-import { useEffect, useState, type ReactNode } from 'react';
-import { isWhiteboardContent, type PageSummary, type PageVersion, type PageVersionSummary, type StoredDocumentContent, type TrashedPageDocument,
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { isWhiteboardContent, pageVersionLabelLimit, pageVersionNoteLimit, type PageSummary, type PageVersion, type PageVersionSummary, type StoredDocumentContent, type TrashedPageDocument,
   type TrashedPageSummary } from '@nbase/contracts';
 import { LazyWhiteboard } from '../whiteboard/lazy';
 import { attachmentContentUrl } from '../whiteboard/host';
@@ -9,6 +9,7 @@ import { DocumentEditor } from '../editor/DocumentEditor';
 import type { DocumentContent, EditorPageReferences } from '../editor/types';
 import { ApiError, pageClient } from './client';
 import { diffVersions, type DiffLine } from './versionDiff';
+import { groupHistory } from './historyGroups';
 import { PageIcon } from '../shell/PageTree';
 import { relativeTime } from '../shell/Topbar';
 
@@ -50,130 +51,278 @@ function diffLineView(line: DiffLine, index: number): ReactNode {
   return <div className={cls} key={index}>{line.block.checked ? <span className="nb-todo-done">{prefix}</span> : prefix}{line.block.text || ' '}</div>;
 }
 
-function sameLocalDay(a: Date, b: Date) {
-  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+type CompareBase = 'previous' | 'current' | `revision:${string}`;
+type BaseState = { status: 'loading' } | { status: 'ready'; version: PageVersion } | { status: 'none' | 'same' | 'error' };
+
+const labelControls = /[\u0000-\u001f\u007f]/g;
+const noteControls = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
+const loneSurrogates = /\p{Cs}/gu;
+const codePoints = (value: string) => [...value].length;
+const cleanLabel = (value: string) => value.replace(loneSurrogates, '').replace(labelControls, ' ').trim();
+const cleanNote = (value: string) => value.replace(loneSurrogates, '').replace(/\r\n?/g, '\n').replace(noteControls, ' ').trim();
+
+function labelFailure(error: unknown): string {
+  if (!(error instanceof ApiError)) return '名称未保存，请重试。';
+  if (error.status === 401) return '登录已失效，名称未保存。请重新登录后再试。';
+  if (error.status === 403) return '没有修改此工作区的权限。';
+  if (error.status === 404) return '这个版本已不存在。';
+  if (error.status === 0) return '网络不可用，名称未保存，请重试。';
+  return '名称未保存，请重试。';
 }
 
-export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, pageReferences, onRestore, onClose }: {
+const timeOf = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+/** Time of the version, led by its revision when a name takes the revision's place as the heading. */
+function versionCaption(version: PageVersionSummary): string {
+  const time = new Date(version.savedAt).toLocaleString();
+  return version.label ? `修订 ${version.revision} · ${time}` : time;
+}
+
+export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, canWrite, csrfToken, nameRevision, pageReferences,
+  onRestore, onAuthError, onClose }: {
   workspaceId: string; pageId: string; currentRevision: string; busy: boolean;
+  canWrite: boolean; csrfToken: string;
+  /** Opens with this version selected and its name form shown. */
+  nameRevision?: string | undefined;
   pageReferences?: EditorPageReferences | undefined;
-  onRestore: (version: PageVersion) => void; onClose: () => void;
+  onRestore: (version: PageVersion) => void; onAuthError?: () => void; onClose: () => void;
 }) {
+  const [filter, setFilter] = useState<'all' | 'named'>('all');
   const [versions, setVersions] = useState<PageVersionSummary[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | undefined>();
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(nameRevision ?? null);
   const [preview, setPreview] = useState<PageVersion | null>(null);
-  const [older, setOlder] = useState<PageVersion | null>(null);
   const [showDiff, setShowDiff] = useState(false);
+  const [compareTo, setCompareTo] = useState<CompareBase>('previous');
+  const [base, setBase] = useState<BaseState>({ status: 'loading' });
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [error, setError] = useState('');
   const [previewError, setPreviewError] = useState('');
   const [retry, setRetry] = useState(0);
   const [previewRetry, setPreviewRetry] = useState(0);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draftLabel, setDraftLabel] = useState('');
+  const [draftNote, setDraftNote] = useState('');
+  const [labelSaving, setLabelSaving] = useState(false);
+  const [labelError, setLabelError] = useState('');
+  const cache = useRef(new Map<string, PageVersion>());
+  const pendingName = useRef(nameRevision);
+  const authErrorRef = useRef(onAuthError);
+  authErrorRef.current = onAuthError;
+
+  const loadVersion = async (revision: string, signal: AbortSignal) => {
+    const cached = cache.current.get(revision);
+    if (cached) return cached;
+    const value = await pageClient.version(workspaceId, pageId, revision, signal);
+    cache.current.set(revision, value);
+    return value;
+  };
+  const startEditing = (version: PageVersionSummary) => {
+    setEditing(version.revision); setDraftLabel(version.label ?? ''); setDraftNote(version.note ?? ''); setLabelError('');
+  };
+
   useEffect(() => {
     const controller = new AbortController(); setLoading(true); setError('');
-    void pageClient.history(workspaceId, pageId, cursor, controller.signal).then(response => {
+    void pageClient.history(workspaceId, pageId, { before: cursor, named: filter === 'named' }, controller.signal).then(response => {
       if (controller.signal.aborted) return;
       setVersions(previous => cursor ? [...new Map([...previous, ...response.versions].map(item => [item.revision, item])).values()] : response.versions);
       setNext(response.nextBeforeRevision);
-      if (!cursor) setSelected(response.versions[0]?.revision ?? null);
+      if (!cursor) setSelected(previous => previous ?? response.versions[0]?.revision ?? null);
+      const naming = pendingName.current && response.versions.find(item => item.revision === pendingName.current);
+      if (naming) { pendingName.current = undefined; startEditing(naming); }
     }).catch(cause => { if (!controller.signal.aborted) setError(failure(cause)); })
       .finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
-  }, [workspaceId, pageId, cursor, retry]);
+  }, [workspaceId, pageId, cursor, retry, filter]);
   useEffect(() => {
-    setPreview(null); setOlder(null); setPreviewError('');
+    setPreview(null); setPreviewError('');
     if (!selected) return;
     const controller = new AbortController(); setPreviewLoading(true);
-    void pageClient.version(workspaceId, pageId, selected, controller.signal).then(value => {
+    void loadVersion(selected, controller.signal).then(value => {
       if (!controller.signal.aborted) setPreview(value);
     }).catch(cause => { if (!controller.signal.aborted) setPreviewError(failure(cause)); })
       .finally(() => { if (!controller.signal.aborted) setPreviewLoading(false); });
     return () => controller.abort();
   }, [workspaceId, pageId, selected, previewRetry]);
   useEffect(() => {
-    if (!showDiff || !selected) { setOlder(null); return; }
-    const index = versions.findIndex(item => item.revision === selected);
-    const olderSummary = versions[index + 1];
-    if (!olderSummary) {
-      if (next && index === versions.length - 1) { setCursor(next); }
-      return;
-    }
+    if (!showDiff || !selected) return;
     const controller = new AbortController();
-    void pageClient.version(workspaceId, pageId, olderSummary.revision, controller.signal).then(value => {
-      if (!controller.signal.aborted) setOlder(value);
-    }).catch(() => undefined);
+    setBase({ status: 'loading' });
+    void (async () => {
+      let revision: string | null;
+      if (compareTo === 'current') revision = currentRevision;
+      else if (compareTo !== 'previous') revision = compareTo.slice('revision:'.length);
+      else {
+        const index = versions.findIndex(item => item.revision === selected);
+        const listed = filter === 'all' && index >= 0 ? versions[index + 1] : undefined;
+        revision = listed?.revision ?? (await pageClient.history(workspaceId, pageId, { before: selected, limit: 1 },
+          controller.signal)).versions[0]?.revision ?? null;
+      }
+      if (controller.signal.aborted) return;
+      if (revision === null) { setBase({ status: 'none' }); return; }
+      if (revision === selected) { setBase({ status: 'same' }); return; }
+      const version = await loadVersion(revision, controller.signal);
+      if (!controller.signal.aborted) setBase({ status: 'ready', version });
+    })().catch(() => { if (!controller.signal.aborted) setBase({ status: 'error' }); });
     return () => controller.abort();
-  }, [workspaceId, pageId, selected, showDiff, versions, next]);
+    // `versions` only shortcuts the previous-version lookup; loading more of the list must not refetch the same base.
+  }, [workspaceId, pageId, selected, showDiff, compareTo, currentRevision, filter, previewRetry]);
 
-  const groups = (() => {
-    const today = new Date(); const yesterday = new Date(Date.now() - 86400_000);
-    const buckets: { label: string; items: PageVersionSummary[] }[] = [
-      { label: '今天', items: [] }, { label: '昨天', items: [] }, { label: '更早', items: [] }];
-    for (const version of versions) {
-      const date = new Date(version.savedAt);
-      if (sameLocalDay(date, today)) buckets[0]!.items.push(version);
-      else if (sameLocalDay(date, yesterday)) buckets[1]!.items.push(version);
-      else buckets[2]!.items.push(version);
-    }
-    return buckets.filter(bucket => bucket.items.length);
-  })();
+  const changeFilter = (value: 'all' | 'named') => {
+    if (value === filter) return;
+    setFilter(value); setCursor(undefined); setVersions([]); setNext(null);
+  };
+  const saveLabel = async (revision: string, label: string | null, note: string | null) => {
+    setLabelSaving(true); setLabelError('');
+    try {
+      const updated = await pageClient.labelVersion(workspaceId, pageId, revision, { label, note }, csrfToken);
+      setVersions(list => filter === 'named' && updated.label === null ? list.filter(item => item.revision !== revision)
+        : list.map(item => item.revision === revision ? updated : item));
+      const cached = cache.current.get(revision);
+      if (cached) cache.current.set(revision, { ...cached, label: updated.label, note: updated.note });
+      setPreview(value => value && value.revision === revision ? { ...value, label: updated.label, note: updated.note } : value);
+      setBase(value => value.status === 'ready' && value.version.revision === revision
+        ? { status: 'ready', version: { ...value.version, label: updated.label, note: updated.note } } : value);
+      setEditing(null);
+    } catch (cause) {
+      setLabelError(labelFailure(cause));
+      if (cause instanceof ApiError && cause.status === 401) authErrorRef.current?.();
+    } finally { setLabelSaving(false); }
+  };
 
-  const index = versions.findIndex(item => item.revision === selected);
-  const hasOlder = index >= 0 && (index < versions.length - 1 || Boolean(next));
-  const diff = showDiff && preview && older && preview.content.schemaVersion === 1 && older.content.schemaVersion === 1
-    && !isWhiteboardContent(preview.content) && !isWhiteboardContent(older.content)
-    ? diffVersions(older.content as DocumentContent, preview.content as DocumentContent) : null;
-  const titleChanged = showDiff && preview && older && preview.title !== older.title;
+  const days = groupHistory(versions, new Date());
+  const summary = versions.find(item => item.revision === selected)
+    ?? (preview && preview.revision === selected ? preview : null);
+  const pair = showDiff && preview && base.status === 'ready'
+    ? (BigInt(base.version.revision) < BigInt(preview.revision) ? [base.version, preview] as const : [preview, base.version] as const)
+    : null;
+  const diffable = (content: StoredDocumentContent) => content.schemaVersion === 1 && !isWhiteboardContent(content);
+  const diff = pair && diffable(pair[0].content) && diffable(pair[1].content)
+    ? diffVersions(pair[0].content as DocumentContent, pair[1].content as DocumentContent) : null;
+  const label = cleanLabel(draftLabel);
+  const note = cleanNote(draftNote);
+  const labelTooLong = codePoints(label) > pageVersionLabelLimit;
+  const noteTooLong = codePoints(note) > pageVersionNoteLimit;
+  const compareOptions = versions.filter(item => item.revision !== selected);
+  const pinned = compareTo.startsWith('revision:') ? compareTo.slice('revision:'.length) : null;
+
+  const item = (version: PageVersionSummary, nested = false) => <button key={version.revision}
+    className={`nb-hist-item ${selected === version.revision ? 'selected' : ''} ${nested ? 'nb-hist-nested' : ''}`}
+    aria-current={selected === version.revision ? 'true' : undefined}
+    onClick={() => { setSelected(version.revision); if (editing !== version.revision) setEditing(null); }} disabled={busy}>
+    <strong>{timeOf(version.savedAt)} · 修订 {version.revision}
+      {version.revision === currentRevision && <span className="nb-hist-cur">当前</span>}</strong>
+    {version.label && <span className="nb-hist-label">{version.label}</span>}
+    <span>{operationNames[version.operation]}{version.deleted ? ' · 已删除' : ''}</span>
+  </button>;
 
   return <Modal title="历史" variant="large" onClose={onClose}>
     <div className="nb-hist">
       <div className="nb-hist-preview">
-        <label className="nb-hist-toggle"><input type="checkbox" checked={showDiff} onChange={event => setShowDiff(event.target.checked)} />显示变更</label>
+        <div className="nb-hist-bar">
+          <label className="nb-hist-toggle"><input type="checkbox" checked={showDiff} onChange={event => setShowDiff(event.target.checked)} />显示变更</label>
+          {showDiff && <label className="nb-hist-compare">对比
+            <select className="select-field" aria-label="对比版本" value={compareTo} onChange={event => setCompareTo(event.target.value as CompareBase)}>
+              <option value="previous">上一版本</option>
+              <option value="current">当前版本（修订 {currentRevision}）</option>
+              {pinned && !compareOptions.some(option => option.revision === pinned) && <option value={compareTo}>修订 {pinned}</option>}
+              {compareOptions.map(option => <option key={option.revision} value={`revision:${option.revision}`}>
+                修订 {option.revision} · {option.label ?? new Date(option.savedAt).toLocaleString()}</option>)}
+            </select></label>}
+        </div>
+        {summary && <div className="nb-hist-meta">
+          {editing === summary.revision ? <form className="nb-hist-label-form" onSubmit={event => {
+            event.preventDefault();
+            if (label && !labelTooLong && !noteTooLong) void saveLabel(summary.revision, label, note || null);
+          }}>
+            <input type="text" aria-label="版本名称" placeholder="版本名称，例如：评审稿" value={draftLabel} autoFocus
+              onChange={event => setDraftLabel(event.target.value)} disabled={labelSaving} />
+            <textarea aria-label="版本备注" placeholder="备注（可选）" rows={2} value={draftNote}
+              onChange={event => setDraftNote(event.target.value)} disabled={labelSaving} />
+            <div className="nb-hist-label-actions">
+              <span className={`nb-hist-count ${labelTooLong || noteTooLong ? 'over' : ''}`}>
+                名称 {codePoints(label)}/{pageVersionLabelLimit} · 备注 {codePoints(note)}/{pageVersionNoteLimit}</span>
+              {labelError && <span role="alert" className="nb-hist-label-error">{labelError}</span>}
+              {summary.label && <button type="button" className="nb-btn nb-btn-quiet" disabled={labelSaving}
+                onClick={() => void saveLabel(summary.revision, null, null)}>移除名称</button>}
+              <button type="button" className="nb-btn" disabled={labelSaving} onClick={() => setEditing(null)}>取消</button>
+              <button type="submit" className="nb-btn nb-btn-primary" disabled={labelSaving || !label || labelTooLong || noteTooLong}>
+                {labelSaving ? '正在保存…' : '保存名称'}</button>
+            </div>
+          </form> : <>
+            <div className="nb-hist-meta-main">
+              <strong>{summary.label ?? `修订 ${summary.revision}`}</strong>
+              <span>{versionCaption(summary)} · {operationNames[summary.operation]}</span>
+              {summary.note && <p className="nb-hist-note">{summary.note}</p>}
+            </div>
+            {canWrite && <button className="nb-btn nb-btn-quiet" disabled={busy} onClick={() => startEditing(summary)}>
+              {summary.label ? '编辑名称' : '命名此版本'}</button>}
+          </>}
+        </div>}
         <div className="nb-hist-preview-scroll">
           {previewLoading && <p role="status">正在读取预览…</p>}
           {previewError && <p role="alert">{previewError}<button onClick={() => setPreviewRetry(value => value + 1)}>重试预览</button></p>}
           {preview && !showDiff && <Preview id={`history:${pageId}:${preview.revision}`} title={preview.title} content={preview.content}
             workspaceId={workspaceId} pageReferences={pageReferences} />}
           {preview && showDiff && <div className="nbase-history-preview">
-            <h3>{preview.title || '未命名页面'}</h3>
-            {!older && hasOlder && <p role="status">正在读取对比版本…</p>}
-            {!hasOlder && <p className="nb-pal-msg">这是最早的版本</p>}
+            {base.status === 'loading' && <p role="status">正在读取对比版本…</p>}
+            {base.status === 'error' && <p role="alert">对比版本读取失败。<button onClick={() => setPreviewRetry(value => value + 1)}>重试</button></p>}
+            {base.status === 'none' && <p className="nb-pal-msg">这是最早的版本，没有可对比的上一版本</p>}
+            {base.status === 'same' && <p className="nb-pal-msg">对比的是同一个版本，请选择另一个版本</p>}
+            {pair && <p className="nb-hist-range">
+              <span className="nb-diff-del-tag">{pair[0].label ?? `修订 ${pair[0].revision}`}</span>
+              <span> {versionCaption(pair[0])} → </span>
+              <span className="nb-diff-add-tag">{pair[1].label ?? `修订 ${pair[1].revision}`}</span>
+              <span> {versionCaption(pair[1])}</span></p>}
+            {pair && !diff && <p className="nb-pal-msg">这种页面暂不支持显示变更</p>}
             {diff?.tooLarge && <p className="nb-pal-msg">内容过大，暂不显示变更</p>}
-            {diff && <div className="nb-diff">
-              {titleChanged && <>
-                <div className="nb-diff-block-del nb-diff-title">{older?.title || '未命名页面'}</div>
-                <div className="nb-diff-block-add nb-diff-title">{preview.title || '未命名页面'}</div>
-              </>}
-              {diff.lines.map(diffLineView)}
+            {pair && diff && !diff.tooLarge && <div className="nb-diff">
+              {pair[0].title !== pair[1].title ? <>
+                <div className="nb-diff-block-del nb-diff-title">{pair[0].title || '未命名页面'}</div>
+                <div className="nb-diff-block-add nb-diff-title">{pair[1].title || '未命名页面'}</div>
+              </> : <h3>{pair[1].title || '未命名页面'}</h3>}
+              {diff.lines.some(line => line.type !== 'keep') ? diff.lines.map(diffLineView)
+                : <><p className="nb-pal-msg">正文文字没有变化</p>{diff.lines.map(diffLineView)}</>}
             </div>}
           </div>}
         </div>
       </div>
       <div className="nb-hist-side">
+        <div className="nb-hist-filter" role="group" aria-label="版本筛选">
+          <button className={filter === 'all' ? 'active' : ''} aria-pressed={filter === 'all'} onClick={() => changeFilter('all')}>全部</button>
+          <button className={filter === 'named' ? 'active' : ''} aria-pressed={filter === 'named'} onClick={() => changeFilter('named')}>已命名</button>
+        </div>
         <div className="nb-hist-side-list" aria-label="版本列表">
-          {groups.map(group => <div key={group.label}>
-            <div className="nb-hist-group">{group.label}</div>
-            {group.items.map(version => <button key={version.revision}
-              className={`nb-hist-item ${selected === version.revision ? 'selected' : ''}`}
-              onClick={() => setSelected(version.revision)} disabled={busy}>
-              <strong>{new Date(version.savedAt).toLocaleTimeString()} · 修订 {version.revision}
-                {version.revision === currentRevision && <span className="nb-hist-cur">当前</span>}</strong>
-              <span>{operationNames[version.operation]}{version.deleted ? ' · 已删除' : ''}</span>
-            </button>)}
+          {days.map(day => <div key={day.key}>
+            <div className="nb-hist-group">{day.label}</div>
+            {day.entries.map(entry => {
+              const open = expanded.has(entry.version.revision) || entry.hidden.some(version => version.revision === selected);
+              const oldest = entry.hidden.at(-1);
+              return <div key={entry.version.revision} className="nb-hist-run">
+                {item(entry.version)}
+                {oldest && <button className="nb-hist-fold" aria-expanded={open} onClick={() => setExpanded(previous => {
+                  const value = new Set(previous);
+                  if (open) value.delete(entry.version.revision); else value.add(entry.version.revision);
+                  return value;
+                })}>{open ? '收起' : '展开'}另外 {entry.hidden.length} 次连续保存 · {timeOf(oldest.savedAt)} 起</button>}
+                {open && entry.hidden.map(version => item(version, true))}
+              </div>;
+            })}
           </div>)}
           {loading && <p role="status">正在读取历史…</p>}
           {error && <p role="alert">{error}<button onClick={() => setRetry(value => value + 1)}>重试</button></p>}
-          {!loading && !error && !versions.length && <p>还没有可读取的历史</p>}
+          {!loading && !error && !versions.length && <p className="nb-pal-msg">{filter === 'named'
+            ? '还没有命名版本。选中一个版本后点“命名此版本”，或在页面菜单里选“保存为命名版本”。' : '还没有可读取的历史'}</p>}
           {next && !loading && <button className="nb-btn nb-btn-quiet" onClick={() => setCursor(next)}>加载更早版本</button>}
         </div>
       </div>
     </div>
     <div className="dialog-actions"><span className="dialog-description" style={{ marginRight: 'auto' }}>恢复会生成新版本，当前内容仍保留在历史中，页面位置和图标不变。</span>
       <button className="nb-btn" onClick={onClose}>关闭</button>
-      <button className="nb-btn nb-btn-primary" disabled={busy || !preview || preview.revision === currentRevision || preview.content.schemaVersion !== 1}
+      <button className="nb-btn nb-btn-primary" disabled={busy || !canWrite || !preview || preview.revision === currentRevision || preview.content.schemaVersion !== 1}
         onClick={() => { if (preview) onRestore(preview); }}>{busy ? '正在处理…' : '恢复此版本'}</button></div>
   </Modal>;
 }

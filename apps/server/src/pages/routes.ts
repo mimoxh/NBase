@@ -1,5 +1,6 @@
-import { databasePropertyLimit, pageTagLimit, type CreatePageRequest, type PageStateRequest, type PropertyValue,
-  type RowProperties, type UpdatePageRequest } from '@nbase/contracts';
+import { databasePropertyLimit, pageTagLimit, pageVersionLabelLimit, pageVersionNoteLimit, type CreatePageRequest,
+  type PageStateRequest, type PageVersionLabelRequest, type PropertyValue, type RowProperties,
+  type UpdatePageRequest } from '@nbase/contracts';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AuthRepository } from '../auth/repository.js';
 import {
@@ -91,6 +92,24 @@ function stateBody(value: unknown): PageStateRequest {
   return { clientMutationId: value.clientMutationId, expectedRevision: value.expectedRevision };
 }
 
+function labelText(value: unknown, limit: number, controls: RegExp): string | null {
+  if (value === null) return null;
+  if (typeof value !== 'string' || /\p{Cs}/u.test(value)) throw new RouteError(400, 'INVALID_REQUEST');
+  const text = value.trim();
+  if (!text) return null;
+  if ([...text].length > limit || controls.test(text)) throw new RouteError(400, 'INVALID_REQUEST');
+  return text;
+}
+
+/** Blank strings mean "none"; a note needs a label so that every note belongs to a named version. */
+function labelBody(value: unknown): PageVersionLabelRequest {
+  if (!object(value) || !Object.hasOwn(value, 'label') || !Object.hasOwn(value, 'note')) throw new RouteError(400, 'INVALID_REQUEST');
+  const label = labelText(value.label, pageVersionLabelLimit, /[\u0000-\u001f\u007f]/);
+  const note = labelText(typeof value.note === 'string' ? value.note.replace(/\r\n?/g, '\n') : value.note, pageVersionNoteLimit, /[\u0000-\u0008\u000b-\u001f\u007f]/);
+  if (note !== null && label === null) throw new RouteError(400, 'INVALID_REQUEST');
+  return { label, note };
+}
+
 export function sendError(request: FastifyRequest, reply: FastifyReply, error: unknown, secure: boolean) {
   reply.header('Cache-Control', 'no-store');
   if (error instanceof PageError) return reply.code(error.statusCode).send(error.response());
@@ -174,9 +193,10 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
       if (!object(query)) throw new RouteError(400, 'INVALID_REQUEST');
       const limit = query.limit === undefined ? 50 : Number(query.limit);
       if (!Number.isInteger(limit) || limit < 1 || limit > 100
-        || (query.beforeRevision !== undefined && !isRevision(query.beforeRevision))) throw new RouteError(400, 'INVALID_REQUEST');
+        || (query.beforeRevision !== undefined && !isRevision(query.beforeRevision))
+        || (query.named !== undefined && query.named !== 'true')) throw new RouteError(400, 'INVALID_REQUEST');
       return reply.send(await pages.history(request.params.workspaceId, actorId, request.params.pageId,
-        limit, query.beforeRevision as string | undefined ?? null));
+        limit, query.beforeRevision as string | undefined ?? null, query.named === 'true'));
     } catch (error) { return sendError(request, reply, error, secure); }
   });
 
@@ -197,6 +217,18 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
       const actorId = await authorize(request, request.params.workspaceId, false);
       if (!isUuid(request.params.pageId) || !isRevision(request.params.revision)) throw new RouteError(404, 'NOT_FOUND');
       const version = await pages.version(request.params.workspaceId, actorId, request.params.pageId, request.params.revision);
+      return version ? reply.send(version) : reply.code(404).send({ error: 'NOT_FOUND' });
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.put<{ Params: VersionParams }>('/api/workspaces/:workspaceId/pages/:pageId/history/:revision/label', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const actorId = await authorize(request, request.params.workspaceId, true);
+      if (!isUuid(request.params.pageId) || !isRevision(request.params.revision)) throw new RouteError(404, 'NOT_FOUND');
+      const body = labelBody(request.body);
+      const version = await pages.labelVersion(request.params.workspaceId, actorId, request.params.pageId,
+        request.params.revision, body.label, body.note);
       return version ? reply.send(version) : reply.code(404).send({ error: 'NOT_FOUND' });
     } catch (error) { return sendError(request, reply, error, secure); }
   });

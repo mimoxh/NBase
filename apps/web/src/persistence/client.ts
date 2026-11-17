@@ -1,6 +1,6 @@
 import type {
   AttachmentMetadata, AuthSessionResponse, CreatePageRequest, FavoriteListResponse, PageBacklinksResponse, PageDocument, PageTreeResponse, SearchResponse,
-  PageSummary, PageHistoryResponse, PageVersion, PageStateRequest, RestorePageVersionRequest,
+  PageSummary, PageHistoryResponse, PageVersion, PageVersionLabelRequest, PageVersionSummary, PageStateRequest, RestorePageVersionRequest,
   TagWriteRequest, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest, WorkspaceTag,
 } from '@nbase/contracts';
 
@@ -82,9 +82,17 @@ export const pageClient = {
     request<void>(`${workspacePath(workspaceId)}/favorites/${encodeURIComponent(pageId)}`, 'PUT', {}, csrfToken),
   removeFavorite: (workspaceId: string, pageId: string, csrfToken: string) =>
     request<void>(`${workspacePath(workspaceId)}/favorites/${encodeURIComponent(pageId)}`, 'DELETE', {}, csrfToken),
-  history: (workspaceId: string, pageId: string, before?: string, signal?: AbortSignal) =>
-    request<PageHistoryResponse>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}/history?limit=30${before ? `&beforeRevision=${encodeURIComponent(before)}` : ''}`,
-      'GET', undefined, undefined, signal),
+  history: (workspaceId: string, pageId: string, options: { before?: string | undefined; named?: boolean; limit?: number } = {},
+    signal?: AbortSignal) => {
+    const query = new URLSearchParams({ limit: String(options.limit ?? 30) });
+    if (options.before) query.set('beforeRevision', options.before);
+    if (options.named) query.set('named', 'true');
+    return request<PageHistoryResponse>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}/history?${query}`,
+      'GET', undefined, undefined, signal);
+  },
+  labelVersion: (workspaceId: string, pageId: string, revision: string, body: PageVersionLabelRequest, csrfToken: string) =>
+    request<PageVersionSummary>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}/history/${encodeURIComponent(revision)}/label`,
+      'PUT', body, csrfToken),
   version: (workspaceId: string, pageId: string, revision: string, signal?: AbortSignal) =>
     request<PageVersion>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}/history/${encodeURIComponent(revision)}`,
       'GET', undefined, undefined, signal),

@@ -45,7 +45,8 @@ export { isFootnoteId, isMarkdownDate, isMarkdownFrontMatter, isMarkdownMetadata
   markdownFrontMatterMaxBytes, markdownFrontMatterMaxDepth, markdownFrontMatterMaxNodes } from './markdownMetadata.js';
 export type { MarkdownFrontMatter, MarkdownMetadataValue } from './markdownMetadata.js';
 export type { SearchResponse, SearchResult } from './search.js';
-export type { PageHistoryResponse, PageVersion, PageVersionOperation, PageVersionSummary,
+export { pageVersionLabelLimit, pageVersionNoteLimit } from './history.js';
+export type { PageHistoryResponse, PageVersion, PageVersionLabelRequest, PageVersionOperation, PageVersionSummary,
   RestorePageVersionRequest, TrashedPageDocument, TrashedPageSummary, TrashListResponse } from './history.js';
 
 export interface HealthResponse {

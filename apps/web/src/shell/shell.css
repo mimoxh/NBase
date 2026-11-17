@@ -337,7 +337,31 @@
 .nb-hist-item span { display: block; font-size: 11px; color: var(--nb-muted); }
 .nb-hist-cur { display: inline-block; width: auto; margin-left: 5px; font-size: 10px; font-weight: 600; color: var(--nb-accent-text); background: var(--nb-accent-soft); border-radius: 999px; padding: 1px 7px; vertical-align: 1px; }
 .nb-hist-item span.nb-hist-cur { display: inline-block; width: auto; font-size: 10px; color: var(--nb-accent-text); }
-.nb-hist-toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--nb-muted); padding: 8px 28px 6px; cursor: pointer; flex: 0 0 auto; }
+.nb-hist-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 18px; padding: 8px 28px 6px; flex: 0 0 auto; }
+.nb-hist-toggle { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--nb-muted); cursor: pointer; }
+.nb-hist-compare { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--nb-muted); min-width: 0; }
+.nb-hist-compare .select-field { width: auto; max-width: 320px; padding: 4px 8px; font-size: 12px; }
+.nb-hist-meta { display: flex; align-items: flex-start; gap: 12px; padding: 4px 28px 10px; border-bottom: 1px solid var(--nb-line); flex: 0 0 auto; }
+.nb-hist-meta-main { flex: 1; min-width: 0; }
+.nb-hist-meta-main strong { display: block; font-size: 14px; overflow-wrap: anywhere; }
+.nb-hist-meta-main span { display: block; font-size: 12px; color: var(--nb-muted); }
+.nb-hist-note { margin: 6px 0 0; font-size: 13px; color: var(--nb-text); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 7.5em; overflow-y: auto; }
+.nb-hist-label-form { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.nb-hist-label-form textarea { resize: vertical; min-height: 3.2em; }
+.nb-hist-label-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.nb-hist-count { margin-right: auto; font-size: 11px; color: var(--nb-faint); }
+.nb-hist-count.over { color: var(--nb-danger); }
+.nb-hist-label-error { font-size: 12px; color: var(--nb-danger); }
+.nb-hist-range { font-size: 12px; color: var(--nb-muted); margin: 0 0 10px; overflow-wrap: anywhere; }
+.nb-hist-range .nb-diff-del-tag { color: var(--nb-danger); font-weight: 600; }
+.nb-hist-range .nb-diff-add-tag { color: var(--nb-ok); font-weight: 600; }
+.nb-hist-filter { display: flex; gap: 4px; padding: 8px 8px 0; flex: 0 0 auto; }
+.nb-hist-filter button { flex: 1; border: 1px solid var(--nb-line); background: transparent; color: var(--nb-muted); border-radius: 6px; padding: 4px 0; font: inherit; font-size: 12px; cursor: pointer; }
+.nb-hist-filter button.active { background: var(--nb-accent-soft); color: var(--nb-accent-text); border-color: transparent; font-weight: 600; }
+.nb-hist-item span.nb-hist-label { font-size: 12px; font-weight: 600; color: var(--nb-accent-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nb-hist-item.nb-hist-nested { padding-left: 21px; }
+.nb-hist .nb-hist-fold { display: block; width: 100%; border: 0; background: transparent; color: var(--nb-faint); font: inherit; font-size: 11px; text-align: left; padding: 0 9px 5px; cursor: pointer; }
+.nb-hist .nb-hist-fold:hover { color: var(--nb-accent-text); }
 .nb-hist-toggle input { appearance: none; width: 28px; height: 16px; border-radius: 999px; background: var(--nb-line); position: relative; cursor: pointer; transition: background .15s; margin: 0; }
 .nb-hist-toggle input::after { content: ''; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: var(--nb-bg); box-shadow: 0 1px 2px rgba(0,0,0,.2); transition: left .15s; }
 .nb-hist-toggle input:checked { background: var(--nb-accent); }
@@ -396,9 +420,15 @@
   .modal-large { width: 100vw; height: 100dvh; max-height: none; }
   .nb-trash-grid { flex-direction: column; }
   .nb-trash-list { width: 100%; flex: 0 0 auto; max-height: 45%; border-right: 0; border-bottom: 1px solid var(--nb-line); }
-  .nb-hist { flex-direction: column; }
-  .nb-hist-preview { border-right: 0; order: 2; }
+  /* One scroll for the whole history so the name form never ends up squeezed under the actions. */
+  .nb-hist { flex-direction: column; overflow-y: auto; }
+  .nb-hist-preview { border-right: 0; order: 2; flex: 0 0 auto; }
+  .nb-hist-preview-scroll { flex: 0 0 auto; overflow: visible; padding: 10px 16px 24px; }
+  .nb-hist-bar, .nb-hist-meta { padding-left: 16px; padding-right: 16px; }
   .nb-hist-side { width: 100%; flex: 0 0 auto; order: 1; border-bottom: 1px solid var(--nb-line); }
+  .nb-hist-side-list { max-height: 34dvh; }
+  .nb-app .modal-large > .nb-hist + .dialog-actions { flex-wrap: wrap; }
+  .nb-hist + .dialog-actions .dialog-description { flex-basis: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   .nb-app *, .nb-app *::before, .nb-app *::after { transition: none !important; animation: none !important; }
