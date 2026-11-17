@@ -42,7 +42,7 @@ export function ContextMenu({ x, y, items, bounds, onClose }: { x: number; y: nu
   </div>;
 }
 
-export interface PickablePage { id: string; title: string; icon: string | null; kind?: string | undefined }
+export interface PickablePage { id: string; title: string; icon: string | null; kind?: string | undefined; calendarSync?: boolean | undefined }
 
 export function PagePicker({ pages, onPick, onClose, label = '插入页面卡片', placeholder = '搜索要引用的页面' }: {
   pages: readonly PickablePage[]; onPick: (page: PickablePage) => void; onClose: () => void; label?: string; placeholder?: string;

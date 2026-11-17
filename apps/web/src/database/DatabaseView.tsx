@@ -11,7 +11,7 @@ import { todayIn } from '../calendar/model';
 import { nextOptionColor, operatorLabel, relativeDateLabels, typeLabels } from './labels';
 import type { Panel } from './panel';
 import { useRowStore } from './rowStore';
-import { lockedPropertyIds } from './sync';
+import { syncLocks } from './sync';
 import { announceDatabaseChange, useDatabase, type DatabaseDataSource } from './source';
 import { DatabaseTagsContext, type DatabaseTagHost } from './tags';
 import { FieldsPanel } from './toolbar/FieldsPanel';
@@ -120,7 +120,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
   };
   const setCell = (row: DatabaseRow, def: PropertyDefinition, value: PropertyValue | null) =>
     void store.updateRow(row.id, { properties: { [def.id]: value } });
-  const locked = lockedPropertyIds(doc);
+  const locked = syncLocks(doc);
   const addRow = async () => {
     // On a calendar a new row starts today, so it shows up where the reader is looking.
     const today = dateDef?.type === 'date' && !locked.has(dateDef.id) ? { [dateDef.id]: todayIn(readerContext.timeZone) } : {};

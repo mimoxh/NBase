@@ -444,7 +444,7 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     ];
   };
 
-  const pickable = useMemo(() => props.pages.filter(page => page.id !== props.boardId), [props.pages, props.boardId]);
+  const pickable = useMemo(() => props.pages.filter(page => page.id !== props.boardId && !page.calendarSync), [props.pages, props.boardId]);
 
   return <div ref={containerRef} className={`wb-root ${props.readOnly ? 'wb-readonly' : ''} ${props.embedded ? 'wb-embedded' : ''}`} tabIndex={0} aria-label="白板画布"
     aria-roledescription="白板" style={{ cursor }}

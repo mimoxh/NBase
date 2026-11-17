@@ -22,7 +22,10 @@ export interface GraphEdgeRow { source: string; target: string; kind: string; co
 const linkSources = `
   SELECT workspace_id, source_page_id, target_page_id, 'page-reference'::text AS kind FROM page_links`;
 
-/** Active non-row pages, most recently updated first so a truncated graph keeps the pages in use. */
+/**
+ * Active non-row pages, most recently updated first so a truncated graph keeps the pages in use.
+ * Calendar-synced databases stay out, and with them every link to or from their rows.
+ */
 const nodeQuery = `
   SELECT p.id, p.title, p.icon, p.kind,
     CASE WHEN parent.kind = 'row' THEN parent.parent_id ELSE p.parent_id END AS parent_id,
@@ -31,6 +34,7 @@ const nodeQuery = `
   JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
   LEFT JOIN pages parent ON parent.workspace_id = p.workspace_id AND parent.id = p.parent_id
   WHERE p.workspace_id = $1 AND p.deleted_at IS NULL AND p.kind <> 'row'
+    AND NOT EXISTS (SELECT 1 FROM calendar_sync_sources cs WHERE cs.workspace_id = p.workspace_id AND cs.database_id = p.id)
   ORDER BY p.updated_at DESC, p.id LIMIT $3`;
 
 /** Rows count as their database on both ends; links inside one node and links to trashed pages drop out. */

@@ -3,7 +3,7 @@ import type { AuthSessionResponse, PageDocument, UpdatePageRequest } from '@nbas
 import type { EditorSnapshot } from '../editor/types';
 import { ApiError, pageClient } from './client';
 import { draftKey, localDrafts, type LocalPageDraft, type LocalPendingAction } from './drafts';
-import { matchesServer } from './draftCompare';
+import { canonicalContent, matchesServer } from './draftCompare';
 import { isDefiniteUpdateRejection, releaseRejectedMutation } from './savePolicy';
 import { isAuthError, message } from './workspaceErrors';
 
@@ -159,6 +159,18 @@ export function usePageSaver({ session, workspace, tabId, actionsLoaded, activeI
             if (activeIdRef.current === pageId && !draftsRef.current.has(pageId)) {
               setConflict(null); setStatus('已保存到服务端');
             }
+            return;
+          }
+          const base = docsRef.current.get(pageId);
+          // Only row properties or other fields changed (a calendar sync, say): the edit applies to the newer revision as is.
+          if (latest && base && base.revision === latest.baseRevision && base.title === server.title
+            && canonicalContent(base.content) === canonicalContent(server.content)) {
+            const { pending: _pending, ...remaining } = latest;
+            void _pending;
+            const rebased: LocalPageDraft = { ...remaining, baseRevision: server.revision };
+            draftsRef.current.set(pageId, rebased);
+            docsRef.current.set(pageId, server);
+            if (await persistDraft(rebased)) scheduleSave(pageId, 0);
             return;
           }
           if (latest && activeIdRef.current === pageId) setConflict({ server, draft: latest });

@@ -500,4 +500,73 @@ CREATE TABLE calendar_sync_items (
 CREATE INDEX calendar_sync_items_row_idx ON calendar_sync_items (workspace_id, row_id);
 `,
   },
+  {
+    version: 22,
+    name: 'calendar_caldav',
+    sql: `
+-- CalDAV sources (docs/architecture/calendar.md). caldav_json holds the server and calendar addresses, the
+-- calendar name and whether it is writable; credentials are AES-256-GCM sealed with a key outside the database.
+ALTER TABLE calendar_sync_sources DROP CONSTRAINT calendar_sync_sources_kind_check;
+ALTER TABLE calendar_sync_sources DROP CONSTRAINT calendar_sync_sources_subscription;
+ALTER TABLE calendar_sync_sources
+  ADD COLUMN caldav_json jsonb CHECK (caldav_json IS NULL OR jsonb_typeof(caldav_json) = 'object'),
+  ADD COLUMN credential_cipher bytea CHECK (credential_cipher IS NULL OR octet_length(credential_cipher) BETWEEN 30 AND 4096),
+  ADD COLUMN credential_key_id text CHECK (credential_key_id IS NULL OR credential_key_id ~ '^[0-9a-f]{16}$'),
+  ADD COLUMN sync_token text CHECK (sync_token IS NULL OR char_length(sync_token) BETWEEN 1 AND 2000),
+  ADD COLUMN ctag text CHECK (ctag IS NULL OR char_length(ctag) BETWEEN 1 AND 1000),
+  ADD CONSTRAINT calendar_sync_sources_kind CHECK (kind IN ('ics-file', 'ics-url', 'caldav')),
+  ADD CONSTRAINT calendar_sync_sources_subscription CHECK (
+    (kind = 'ics-url') = (url IS NOT NULL)
+    AND (kind IN ('ics-url', 'caldav')) = (interval_minutes IS NOT NULL)
+    AND (kind = 'caldav') = (caldav_json IS NOT NULL)
+    AND (kind = 'caldav') = (credential_cipher IS NOT NULL)
+    AND (credential_cipher IS NULL) = (credential_key_id IS NULL)
+    AND (kind = 'caldav' OR (sync_token IS NULL AND ctag IS NULL)));
+DROP INDEX calendar_sync_sources_due_idx;
+CREATE INDEX calendar_sync_sources_due_idx ON calendar_sync_sources (next_run_at) WHERE kind IN ('ics-url', 'caldav');
+
+-- One row per external resource (an .ics address in the collection) and the text last read or written, so
+-- that writing back changes only what NBase knows. body is NULL when the text is larger than 1 MB.
+CREATE TABLE calendar_sync_resources (
+  workspace_id uuid NOT NULL,
+  source_id uuid NOT NULL,
+  href text COLLATE "C" NOT NULL CHECK (char_length(href) BETWEEN 1 AND 2000),
+  etag text CHECK (etag IS NULL OR char_length(etag) BETWEEN 1 AND 512),
+  body text CHECK (body IS NULL OR octet_length(body) <= 1048576),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (source_id, href),
+  FOREIGN KEY (workspace_id, source_id) REFERENCES calendar_sync_sources (workspace_id, id) ON DELETE CASCADE
+);
+
+-- The resource an event lives in; attendees marks events NBase never writes back.
+ALTER TABLE calendar_sync_items
+  ADD COLUMN href text COLLATE "C" CHECK (href IS NULL OR char_length(href) BETWEEN 1 AND 2000),
+  ADD COLUMN attendees boolean NOT NULL DEFAULT false;
+CREATE INDEX calendar_sync_items_href_idx ON calendar_sync_items (source_id, href) WHERE href IS NOT NULL;
+CREATE INDEX calendar_sync_items_attendees_idx ON calendar_sync_items (source_id, row_id) WHERE attendees;
+
+-- Events changed on both sides; writing back waits until each is resolved. remote_json is the external
+-- side's synced fields, NULL once the event is gone there; remote_etag and remote_body are the external text.
+CREATE TABLE calendar_sync_conflicts (
+  workspace_id uuid NOT NULL,
+  source_id uuid NOT NULL,
+  uid text COLLATE "C" NOT NULL CHECK (char_length(uid) BETWEEN 1 AND 1000),
+  row_id uuid NOT NULL,
+  copy_row_id uuid,
+  kind text NOT NULL CHECK (kind IN ('both-changed', 'remote-deleted', 'local-deleted')),
+  remote_href text COLLATE "C" CHECK (remote_href IS NULL OR char_length(remote_href) BETWEEN 1 AND 2000),
+  remote_etag text CHECK (remote_etag IS NULL OR char_length(remote_etag) BETWEEN 1 AND 512),
+  remote_body text CHECK (remote_body IS NULL OR octet_length(remote_body) <= 1048576),
+  remote_json jsonb CHECK (remote_json IS NULL OR jsonb_typeof(remote_json) = 'object'),
+  detected_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (source_id, uid),
+  UNIQUE (source_id, row_id),
+  FOREIGN KEY (workspace_id, source_id) REFERENCES calendar_sync_sources (workspace_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, row_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT,
+  FOREIGN KEY (workspace_id, copy_row_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT,
+  CONSTRAINT calendar_sync_conflicts_copy CHECK ((kind = 'both-changed') = (copy_row_id IS NOT NULL))
+);
+CREATE INDEX calendar_sync_conflicts_copy_idx ON calendar_sync_conflicts (source_id, copy_row_id) WHERE copy_row_id IS NOT NULL;
+`,
+  },
 ];

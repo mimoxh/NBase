@@ -46,6 +46,8 @@ CROSS JOIN LATERAL (SELECT CASE WHEN r.tier = 5 THEN
   - least(length(p.title), 999)
   ELSE 0 END AS score) s
 WHERE p.workspace_id = $1 AND p.deleted_at IS NULL AND r.tier IS NOT NULL
+  -- Calendar-synced databases and their rows are reached from the calendar, not from search.
+  AND NOT EXISTS (SELECT 1 FROM calendar_sync_sources cs WHERE cs.workspace_id = p.workspace_id AND cs.database_id IN (p.id, p.parent_id))
   AND NOT EXISTS (
     SELECT 1 FROM unnest($5::uuid[]) AS required(tag_id)
     WHERE NOT EXISTS (SELECT 1 FROM page_tags pt

@@ -34,7 +34,8 @@ export function buildPageReferenceCatalog(pages: readonly PageSummary[]): PageRe
   }
 
   const byExactTitle = new Map<string, string | null>();
-  const candidates = pages.map(page => {
+  // Calendar-synced databases still resolve existing references but are never offered as new targets.
+  const candidates = pages.filter(page => !page.calendarSync).map(page => {
     const exact = exactReferenceTitle(page.title);
     if (exact) byExactTitle.set(exact, byExactTitle.has(exact) ? null : page.id);
     return { id: page.id, title: page.title.trim() || '未命名页面', parentPath: pathTo(page.parentId) || '工作区根目录' };

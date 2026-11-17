@@ -9,7 +9,7 @@ import { serverConfig } from './config.js';
 
 let pool: pg.Pool | undefined;
 try {
-  const { host, port, database, publicOrigin, attachmentDir } = await serverConfig();
+  const { host, port, database, publicOrigin, attachmentDir, credentialKey, caldavPrivate } = await serverConfig();
   pool = database ? new pg.Pool({ ...database, max: 10 }) : undefined;
   // A dropped idle connection must not crash the process; readiness reports the outage.
   pool?.on('error', () => console.error('NBase idle database connection lost'));
@@ -20,6 +20,7 @@ try {
   const app = await buildApp({
     logger: true,
     staticRoot,
+    calendar: { credentialKey, caldavPrivate },
     ...(pool && publicOrigin ? { auth: { repository: new PgAuthRepository(pool), publicOrigin } } : {}),
     ...(pool ? { pages: new PgPageRepository(pool), notesPool: pool } : {}),
     ...(pool && attachmentRoot ? { attachments: new PgAttachmentRepository(pool, attachmentRoot) } : {}),

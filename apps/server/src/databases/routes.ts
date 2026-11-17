@@ -11,7 +11,7 @@ import { authorizeWorkspace, WorkspaceRouteError } from '../auth/workspace.js';
 import { isRevision, isUuid, PageError, type PgPageRepository } from '../pages/repository.js';
 import { sendError } from '../pages/routes.js';
 import { managedPropertyIds } from '../calendar/locks.js';
-import { sourceForDatabase, toSyncSource } from '../calendar/sources.js';
+import { attendeeRowIds, sourceForDatabase, toSyncSource } from '../calendar/sources.js';
 import { validatePageIcon } from '../pages/validate.js';
 import { applyBulk } from './bulk.js';
 import { markSchemaChanged } from './computed.js';
@@ -63,7 +63,7 @@ function pageSummary(row: DatabasePageRow): PageSummary {
 const wholeReadLimit = 2000;
 
 async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorId: string,
-  pageId: string, withRows: boolean): Promise<DatabaseDocument | null> {
+  pageId: string, withRows: boolean, credentialKeyId: string | null): Promise<DatabaseDocument | null> {
   const page = await db.query<DatabasePageRow & { properties_json: PropertyDefinition[]; views_json: DatabaseView[];
     schema_revision: string }>(`
     SELECT p.id, p.workspace_id, p.parent_id, p.title, p.icon, p.cover, p.revision::text AS revision, p.created_at, p.updated_at,
@@ -76,7 +76,8 @@ async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorI
   const head = page.rows[0];
   if (!head) return null;
   const source = await sourceForDatabase(db, workspaceId, pageId);
-  const sync = source ? { calendarSync: toSyncSource(source) } : {};
+  const readOnlyRowIds = source?.kind === 'caldav' ? await attendeeRowIds(db, workspaceId, source.id) : undefined;
+  const sync = source ? { calendarSync: toSyncSource(source, { keyId: credentialKeyId, ...(readOnlyRowIds ? { readOnlyRowIds } : {}) }) } : {};
   if (!withRows) return { page: pageSummary(head), properties: head.properties_json, views: head.views_json,
     schemaRevision: head.schema_revision, rows: [], ...sync };
   const rows = await db.query<RowRecord>(`
@@ -109,8 +110,9 @@ async function reindexRows(client: PoolClient, workspaceId: string, pageId: stri
   return true;
 }
 
+/** `credentialKeyId` is the id of the CalDAV credential key this server holds, for `calendarSync.caldav.credentialsOk`. */
 export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: PgPageRepository,
-  auth: AuthRepository, publicOrigin: string): void {
+  auth: AuthRepository, publicOrigin: string, credentialKeyId: string | null = null): void {
   const { origin, secure } = publicOriginConfig(publicOrigin);
   const worker = new DatabaseWorker(pool, error => app.log.error({ err: error }, 'database worker failed'));
   worker.start();
@@ -215,7 +217,8 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
       const { workspaceId, pageId } = request.params;
       const actorId = await authorize(request, workspaceId, false);
       if (!isUuid(pageId)) throw new PageError(404, 'NOT_FOUND');
-      const database = await readDatabase(pool, workspaceId, actorId, pageId.toLowerCase(), request.query.rows !== 'none');
+      const database = await readDatabase(pool, workspaceId, actorId, pageId.toLowerCase(), request.query.rows !== 'none',
+        credentialKeyId);
       if (!database) throw new PageError(404, 'NOT_FOUND');
       return reply.send(database);
     } catch (error) { return sendError(request, reply, error, secure); }

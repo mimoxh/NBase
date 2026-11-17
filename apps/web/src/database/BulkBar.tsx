@@ -4,12 +4,13 @@ import { Modal } from '../components/Modal';
 import { Popover } from '../components/Popover';
 import { EditableCell } from './cells';
 import type { RowStore } from './rowStore';
+import type { SyncLocks } from './sync';
 
 const editable = (def: PropertyDefinition) => !['created_time', 'updated_time', 'relation', 'formula', 'rollup'].includes(def.type);
 
 /** Actions for the rows ticked in the table. */
 export function BulkBar({ store, properties, locked, selected, onClear, canSort, notice }: {
-  store: RowStore; properties: PropertyDefinition[]; locked?: ReadonlySet<string> | undefined; selected: ReadonlySet<string>; onClear: () => void; canSort: boolean; notice: (text: string) => void;
+  store: RowStore; properties: PropertyDefinition[]; locked?: SyncLocks | undefined; selected: ReadonlySet<string>; onClear: () => void; canSort: boolean; notice: (text: string) => void;
 }) {
   const fields = activeProperties(properties).filter(def => editable(def) && !locked?.has(def.id));
   const [editing, setEditing] = useState(false);
@@ -26,9 +27,13 @@ export function BulkBar({ store, properties, locked, selected, onClear, canSort,
   const apply = async () => {
     if (!def) return;
     setEditing(false);
-    const ok = await store.patchRows(ids.map(id => def.type === 'title' ? { id, title: draftTitle } : { id, properties: { [def.id]: draft } }), report);
+    // Read-only rows of a CalDAV calendar keep their title and synced fields; the server would refuse the whole batch.
+    const targets = ids.filter(id => !locked?.has(def.id, id));
+    const skipped = ids.length - targets.length;
+    if (!targets.length) { notice(`所选的 ${ids.length} 行由外部日历维护，这一列只读。`); return; }
+    const ok = await store.patchRows(targets.map(id => def.type === 'title' ? { id, title: draftTitle } : { id, properties: { [def.id]: draft } }), report);
     setProgress(null);
-    if (ok) notice(`已修改 ${ids.length} 行。`);
+    if (ok) notice(`已修改 ${targets.length} 行。${skipped ? `${skipped} 行由外部日历维护，已跳过。` : ''}`);
   };
   const remove = async () => {
     setConfirming(false);

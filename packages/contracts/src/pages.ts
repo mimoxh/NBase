@@ -22,6 +22,11 @@ export interface PageSummary {
   tagIds?: string[];
   /** Omitted by older servers and stored receipts; treat as 'document'. */
   kind?: PageKind;
+  /**
+   * Database pages kept up to date by a calendar import, subscription or CalDAV source. Clients keep
+   * them and their rows out of navigation and pickers; the calendar opens them. Omitted when false.
+   */
+  calendarSync?: true;
   revision: string;
   createdAt: string;
   updatedAt: string;

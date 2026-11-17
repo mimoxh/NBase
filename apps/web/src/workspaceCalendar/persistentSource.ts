@@ -1,11 +1,10 @@
-import { defaultCalendarSettings, type CalendarEventsRequest, type CalendarEventsResponse, type CalendarImportRequest,
-  type CalendarImportResponse, type CalendarReaderContext, type CalendarSettings, type CalendarSourcesResponse,
-  type CalendarSyncListResponse, type CalendarSyncSource, type CreateCalendarSubscriptionRequest,
-  type UpdateCalendarSyncRequest } from '@nbase/contracts';
+import { defaultCalendarSettings, type CalDavDiscoverResponse, type CalendarEventsRequest, type CalendarEventsResponse,
+  type CalendarImportRequest, type CalendarImportResponse, type CalendarReaderContext, type CalendarSettings, type CalendarSourcesResponse,
+  type CalendarSyncConflictsResponse, type CalendarSyncListResponse, type CalendarSyncSource, type CreateCalendarSubscriptionRequest,
+  type ResolveCalendarConflictRequest, type ResolveCalendarConflictResponse, type UpdateCalendarSyncRequest } from '@nbase/contracts';
 import { ApiError, pageClient, request, workspacePath } from '../persistence/client';
 import { databaseClient, rowFromPage } from '../database/persistentSource';
-import { lockedPropertyIds } from '../database/sync';
-import { copiedProperties } from '../database/views/CalendarView';
+import { copiedProperties, detachedSkip } from '../database/views/CalendarView';
 import { createContentFromMarkdown } from '../editor/markdown';
 import type { CalendarSyncApi, RowDateWrite, WorkspaceCalendarSource } from './source';
 
@@ -16,6 +15,7 @@ export interface PersistentCalendarOptions {
   context: CalendarReaderContext;
   notice: (text: string) => void;
   openRow: (rowId: string) => void;
+  openDatabase: (databaseId: string) => void;
   openDailyNote: (date: string, pageId?: string) => void;
   /** A row open in the workbench is written through `updatePageMeta`, so its revision stays in step with body saves. */
   isRowOpen?: (rowId: string) => boolean;
@@ -23,6 +23,9 @@ export interface PersistentCalendarOptions {
   /** Tells open database views to reload after a calendar write. */
   onDatabaseChanged?: (databaseId: string) => void;
 }
+
+/** Discovery and credential checks talk to the external server, which may answer slowly (30 s per request). */
+export const caldavTimeoutMs = 90_000;
 
 /** A lost response is answered from the server's receipt for the same mutation. */
 async function withReceipt<T>(workspaceId: string, mutationId: string, send: () => Promise<T>): Promise<T> {
@@ -49,6 +52,18 @@ export function createPersistentCalendarSource(options: PersistentCalendarOption
     update: (id, body) => request<CalendarSyncSource>(path(`/sync/${encodeURIComponent(id)}`), 'PATCH', body, csrfToken),
     run: id => request<CalendarSyncSource>(path(`/sync/${encodeURIComponent(id)}/run`), 'POST', {}, csrfToken),
     remove: id => request<void>(path(`/sync/${encodeURIComponent(id)}`), 'DELETE', {}, csrfToken),
+    discoverCaldav: body => request<CalDavDiscoverResponse>(path('/caldav/discover'), 'POST', body, csrfToken, undefined, caldavTimeoutMs),
+    createCaldav: body => withReceipt(workspaceId, body.clientMutationId, () =>
+      request<CalendarSyncSource>(path('/caldav'), 'POST', body, csrfToken, undefined, caldavTimeoutMs)),
+    updateCredentials: (id, credentials) => {
+      const body: UpdateCalendarSyncRequest = { credentials };
+      return request<CalendarSyncSource>(path(`/sync/${encodeURIComponent(id)}`), 'PATCH', body, csrfToken, undefined, caldavTimeoutMs);
+    },
+    conflicts: (id, signal) => request<CalendarSyncConflictsResponse>(path(`/sync/${encodeURIComponent(id)}/conflicts`), 'GET', undefined, undefined, signal),
+    resolveConflict: (id, rowId, choice) => {
+      const body: ResolveCalendarConflictRequest = { choice };
+      return request<ResolveCalendarConflictResponse>(path(`/sync/${encodeURIComponent(id)}/conflicts/${encodeURIComponent(rowId)}`), 'POST', body, csrfToken);
+    },
   };
 
   return {
@@ -88,8 +103,7 @@ export function createPersistentCalendarSource(options: PersistentCalendarOption
     createDetachedRow: async ({ databaseId, rowId, propertyId, value }) => {
       const [doc, series] = await Promise.all([
         databaseClient.get(workspaceId, databaseId), pageClient.get(workspaceId, rowId)]);
-      const skip = new Set([...lockedPropertyIds(doc), ...(doc.calendarSync ? [doc.calendarSync.fields.uidId] : [])]);
-      const properties = { ...copiedProperties(rowFromPage(series), doc.properties, skip), [propertyId]: value };
+      const properties = { ...copiedProperties(rowFromPage(series), doc.properties, detachedSkip(doc)), [propertyId]: value };
       const body = { clientMutationId: crypto.randomUUID(), parentId: databaseId, title: series.title,
         content: createContentFromMarkdown(''), properties };
       const page = await withReceipt(workspaceId, body.clientMutationId, () => pageClient.create(workspaceId, body, csrfToken));
@@ -97,6 +111,7 @@ export function createPersistentCalendarSource(options: PersistentCalendarOption
       return page.id;
     },
     openRow: options.openRow,
+    openDatabase: options.openDatabase,
     openDailyNote: options.openDailyNote,
     notice: options.notice,
     sync,

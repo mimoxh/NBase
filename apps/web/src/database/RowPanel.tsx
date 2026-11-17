@@ -4,22 +4,26 @@ import { nextOptionColor } from './labels';
 import type { RelationHost } from './RelationEditor';
 import { RowProperties } from './RowProperties';
 import { announceDatabaseChange, useDatabase, type DatabaseDataSource } from './source';
-import { lockedPropertyIds } from './sync';
+import { isTitleLocked, lockedPropertyIdsForRow } from './sync';
 import { DatabaseTagsContext } from './tags';
 
 /**
  * Row page header block: reads the parent database's schema and lets the host write the
  * row's values, because the host owns the row page's revision and draft state.
  */
-export function RowPanel({ source, databaseId, row, editable, pending, onChange }: {
+export function RowPanel({ source, databaseId, row, editable, pending, onChange, onTitleLock }: {
   source: DatabaseDataSource;
   databaseId: string;
   row: DatabaseRow;
   editable: boolean;
   pending: boolean;
   onChange: (propertyId: string, value: PropertyValue | null) => void;
+  /** Tells the host whether the row's title is kept by a calendar sync source, since the host renders the title. */
+  onTitleLock?: ((locked: boolean) => void) | undefined;
 }) {
   const state = useDatabase(source, databaseId);
+  const titleLocked = isTitleLocked(state.doc, row.id);
+  useEffect(() => { onTitleLock?.(titleLocked); }, [onTitleLock, titleLocked]);
   const [relations, setRelations] = useState<Record<string, RelationCell> | undefined>();
   const [computed, setComputed] = useState<DatabaseRow['computed']>();
   const needsRead = state.doc?.properties.some(p => (p.type === 'relation' || isComputedProperty(p)) && !p.deletedAt) ?? false;
@@ -57,6 +61,6 @@ export function RowPanel({ source, databaseId, row, editable, pending, onChange 
   return <DatabaseTagsContext.Provider value={workspaceTags ? { tags: workspaceTags } : null}>
     <RowProperties row={{ ...row, ...(relations ? { relations } : {}), ...(computed ? { computed } : {}) }} properties={state.doc.properties} editable={editable && source.canWrite} pending={pending}
       onChange={onChange} onCreateOption={createOption} databaseTitle={state.doc.page.title} databaseIcon={state.doc.page.icon}
-      onOpenDatabase={() => source.openDatabase(databaseId)} relationHostFor={relationHost} locked={lockedPropertyIds(state.doc)} />
+      onOpenDatabase={() => source.openDatabase(databaseId)} relationHostFor={relationHost} locked={lockedPropertyIdsForRow(state.doc, row.id)} />
   </DatabaseTagsContext.Provider>;
 }

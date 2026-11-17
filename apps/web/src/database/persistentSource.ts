@@ -74,7 +74,7 @@ export function createPersistentSource(options: PersistentSourceOptions): Databa
     load: (databaseId, signal) => databaseClient.get(workspaceId, databaseId, signal),
     query: (databaseId, body) => databaseClient.query(workspaceId, databaseId, body, csrfToken),
     readRows: (databaseId, ids, relationPreview) => databaseClient.readRows(workspaceId, databaseId, ids, csrfToken, relationPreview),
-    listDatabases: async () => (await loadPageTree(workspaceId)).filter(page => page.kind === 'database').map(page => ({ id: page.id, title: page.title, icon: page.icon })),
+    listDatabases: async () => (await loadPageTree(workspaceId)).filter(page => page.kind === 'database' && !page.calendarSync).map(page => ({ id: page.id, title: page.title, icon: page.icon })),
     createRelation: (databaseId, body) => withReceipt(workspaceId, body.clientMutationId, () => request<DatabaseSchemaResponse>(
       `${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/relations`, 'POST', body, csrfToken)),
     changeRelation: async (databaseId, rowId, propertyId, body) => {

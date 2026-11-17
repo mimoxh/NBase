@@ -12,7 +12,7 @@ import { contentMatchesKind, isWhiteboardContent } from '../whiteboards/content.
 import { extractDocumentIndex, type IndexedPageReference } from './search-text.js';
 import { searchPages } from '../search/search.js';
 import { refreshPagePinyin } from '../search/write.js';
-import { changesKeptField, syncLock } from '../calendar/locks.js';
+import { changesKeptField, nudgeCaldav, syncLock } from '../calendar/locks.js';
 
 const maxRevision = 9223372036854775807n;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -63,6 +63,7 @@ interface PageRow {
   revision: string;
   created_at: Date;
   updated_at: Date;
+  calendar_sync?: boolean;
   cursor_created_at?: string;
 }
 
@@ -111,6 +112,7 @@ function pageFromRow(row: PageRow): PageDocument {
     cover: row.cover ?? null,
     tagIds: row.tag_ids ?? [],
     kind: row.kind ?? 'document',
+    ...(row.calendar_sync ? { calendarSync: true as const } : {}),
     content: row.content_json,
     ...(row.kind === 'row' ? { properties: row.row_properties ?? {} } : {}),
     revision: row.revision,
@@ -146,9 +148,11 @@ const pageReceiptOperations = new Set(['create', 'update', 'trash', 'restore', '
 const sortPositionGap = 1024;
 
 const pageColumns = `id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, kind, row_properties,
-  revision::text AS revision, created_at, updated_at`;
+  revision::text AS revision, created_at, updated_at,
+  EXISTS (SELECT 1 FROM calendar_sync_sources cs WHERE cs.workspace_id = pages.workspace_id AND cs.database_id = pages.id) AS calendar_sync`;
 const joinedPageColumns = `p.id, p.workspace_id, p.parent_id, p.title, p.icon, p.cover, p.content_json, p.content_schema_version,
   p.kind, p.row_properties, p.revision::text AS revision, p.created_at, p.updated_at,
+  EXISTS (SELECT 1 FROM calendar_sync_sources cs WHERE cs.workspace_id = p.workspace_id AND cs.database_id = p.id) AS calendar_sync,
   ARRAY(SELECT pt.tag_id FROM page_tags pt WHERE pt.workspace_id = p.workspace_id AND pt.page_id = p.id ORDER BY pt.tag_id) AS tag_ids`;
 
 export class PgPageRepository {
@@ -494,7 +498,10 @@ export class PgPageRepository {
     if (body.tagIds?.length) page.tagIds = await this.replaceTags(client, workspaceId, page.id, body.tagIds);
     if (index.references.length) await replacePageLinks(client, workspaceId, page.id, index.references);
     await this.snapshot(client, workspaceId, [page.id], actorId, 'create');
-    if (kind === 'row' && body.parentId) await this.rowChanged(client, workspaceId, body.parentId, [page.id]);
+    if (kind === 'row' && body.parentId) {
+      await this.rowChanged(client, workspaceId, body.parentId, [page.id]);
+      await nudgeCaldav(client, workspaceId, body.parentId);
+    }
     return { statusCode: 201, body: page };
   }
 
@@ -584,8 +591,8 @@ export class PgPageRepository {
       searchText = index?.searchText ?? extractDocumentIndex(row.content_json).searchText;
     }
     if (!moving && row.kind === 'row' && row.parent_id && (body.title !== undefined || body.properties)
-      && changesKeptField(await syncLock(client, workspaceId, row.parent_id), { title: body.title, previousTitle: row.title,
-        properties: body.properties, previous: row.row_properties })) throw syncedFieldError();
+      && changesKeptField(await syncLock(client, workspaceId, row.parent_id, [pageId]), { title: body.title, previousTitle: row.title,
+        properties: body.properties, previous: row.row_properties, rowId: pageId })) throw syncedFieldError();
     if (!joined && !left && row.kind === 'row' && (index || body.properties)) {
       const schema = row.parent_id ? await loadDatabaseSchema(client, workspaceId, row.parent_id) : null;
       if (!schema) throw new PageError(422, 'DATABASE_UNAVAILABLE');
@@ -619,6 +626,9 @@ export class PgPageRepository {
     if (left) await this.rowChanged(client, workspaceId, left, [pageId]);
     if (joined) await this.rowChanged(client, workspaceId, joined, [pageId]);
     else if (!left && row.kind === 'row' && row.parent_id && (body.properties || body.title !== undefined)) await this.rowChanged(client, workspaceId, row.parent_id, [pageId]);
+    if (left) await nudgeCaldav(client, workspaceId, left);
+    if (joined) await nudgeCaldav(client, workspaceId, joined);
+    else if (!left && row.kind === 'row' && row.parent_id) await nudgeCaldav(client, workspaceId, row.parent_id);
     return { statusCode: 200, body: pageFromRow({ ...result.rows[0], tag_ids: tagIds ?? [] }) };
   }
 
@@ -667,7 +677,10 @@ export class PgPageRepository {
       if (!root.rows[0]) throw new PageError(404, 'NOT_FOUND');
       await this.snapshot(client, workspaceId, deleted.rows.filter(item => item.kind !== 'row' || item.id === pageId).map(item => item.id),
         actorId, 'trash');
-      if (root.rows[0].kind === 'row' && root.rows[0].parent_id) await this.rowChanged(client, workspaceId, root.rows[0].parent_id, [pageId]);
+      if (root.rows[0].kind === 'row' && root.rows[0].parent_id) {
+        await this.rowChanged(client, workspaceId, root.rows[0].parent_id, [pageId]);
+        await nudgeCaldav(client, workspaceId, root.rows[0].parent_id);
+      }
       return { statusCode: 200, body: pageFromRow({ ...root.rows[0], tag_ids: row.tag_ids ?? [] }) };
     });
   }
@@ -712,7 +725,10 @@ export class PgPageRepository {
       if (!root.rows[0]) throw new PageError(404, 'NOT_FOUND');
       await this.snapshot(client, workspaceId, restored.rows.filter(item => item.kind !== 'row' || item.id === pageId).map(item => item.id),
         actorId, 'restore');
-      if (root.rows[0].kind === 'row' && root.rows[0].parent_id) await this.rowChanged(client, workspaceId, root.rows[0].parent_id, [pageId]);
+      if (root.rows[0].kind === 'row' && root.rows[0].parent_id) {
+        await this.rowChanged(client, workspaceId, root.rows[0].parent_id, [pageId]);
+        await nudgeCaldav(client, workspaceId, root.rows[0].parent_id);
+      }
       return { statusCode: 200, body: pageFromRow({ ...root.rows[0], tag_ids: row.tag_ids ?? [] }) };
     });
   }
@@ -744,9 +760,11 @@ export class PgPageRepository {
         const schema = current.parent_id ? await loadDatabaseSchema(client, workspaceId, current.parent_id) : null;
         if (!schema) throw new PageError(422, 'DATABASE_UNAVAILABLE');
         rowProperties = version.row_properties ?? current.row_properties ?? {};
-        const lock = current.parent_id ? await syncLock(client, workspaceId, current.parent_id) : null;
-        const kept = Object.fromEntries([...lock?.propertyIds ?? []].map(id => [id, rowProperties?.[id] ?? null]));
-        if (changesKeptField(lock, { title: version.title, previousTitle: current.title, properties: kept, previous: current.row_properties })) {
+        const lock = current.parent_id ? await syncLock(client, workspaceId, current.parent_id, [pageId]) : null;
+        const keptIds = lock?.rows.has(pageId.toLowerCase()) ? lock.rowPropertyIds : lock?.propertyIds ?? new Set<string>();
+        const kept = Object.fromEntries([...keptIds].map(id => [id, rowProperties?.[id] ?? null]));
+        if (changesKeptField(lock, { title: version.title, previousTitle: current.title, properties: kept, previous: current.row_properties,
+          rowId: pageId })) {
           throw syncedFieldError();
         }
         searchText = rowIndexText(index.searchText, schema.properties_json, rowProperties);
@@ -765,6 +783,7 @@ export class PgPageRepository {
           await syncRelationLinks(client, workspaceId, schema.properties_json, [{ id: pageId, values: rowProperties ?? {} }]);
           await markRowsChanged(client, workspaceId, current.parent_id, schema.properties_json, [pageId]);
         }
+        await nudgeCaldav(client, workspaceId, current.parent_id);
       }
       await this.snapshot(client, workspaceId, [pageId], actorId, 'restore-version');
       return { statusCode: 200, body: pageFromRow({ ...result.rows[0]!, tag_ids: current.tag_ids ?? [] }) };

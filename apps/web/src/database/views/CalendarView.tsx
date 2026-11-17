@@ -8,7 +8,7 @@ import { buildEvents, type CalendarEvent, type CalendarEventInput } from '../../
 import { RecurrenceScopeDialog } from '../../calendar/RecurrenceScopeDialog';
 import type { RowStore } from '../rowStore';
 import type { DatabaseDataSource } from '../source';
-import { lockedPropertyIds, syncedReadOnlyHint } from '../sync';
+import { syncLocks, syncedReadOnlyHint, type SyncLocks } from '../sync';
 import type { CalendarNav } from './calendarNav';
 
 export const calendarRowCap = 1000;
@@ -26,13 +26,28 @@ export function copiedProperties(row: DatabaseRow, properties: PropertyDefinitio
 }
 
 /** One calendar input per row with a value in the date field. Page times are moments without length. */
-export function calendarInputs(rows: readonly DatabaseRow[], dateField: PropertyDefinition, readOnly: boolean): CalendarEventInput[] {
+export function calendarInputs(rows: readonly DatabaseRow[], dateField: PropertyDefinition,
+  readOnly: boolean | ((row: DatabaseRow) => boolean)): CalendarEventInput[] {
   return rows.flatMap(row => {
     const value = cellValue(row, dateField);
     if (value === undefined || value === null || value === '') return [];
     return [{ sourceId: dateField.id, rowId: row.id, title: row.title, icon: row.icon, value: String(value),
-      kind: dateField.type === 'date' ? 'date' as const : 'moment' as const, readOnly }];
+      kind: dateField.type === 'date' ? 'date' as const : 'moment' as const,
+      readOnly: typeof readOnly === 'function' ? readOnly(row) : readOnly }];
   });
+}
+
+/** Whether an event of a row can be moved on the calendar: the field is writable and the row does not lock it. */
+export function rowDateReadOnly(locks: SyncLocks, dateFieldId: string, writable: boolean) {
+  return (row: Pick<DatabaseRow, 'id'>) => !writable || locks.has(dateFieldId, row.id);
+}
+
+/** What a detached occurrence must not copy: locked fields and the external id, which belongs to the series. */
+export function detachedSkip(doc: Pick<DatabaseDocument, 'calendarSync' | 'properties'>, locks: SyncLocks = syncLocks(doc)): ReadonlySet<string> {
+  const skip = new Set<string>();
+  for (const def of doc.properties) if (locks.has(def.id)) skip.add(def.id);
+  if (doc.calendarSync) skip.add(doc.calendarSync.fields.uidId);
+  return skip;
 }
 
 /**
@@ -43,7 +58,7 @@ export default function CalendarView({ source, store, doc, dateField, canWrite, 
   source: DatabaseDataSource; store: RowStore; doc: DatabaseDocument; dateField: PropertyDefinition; canWrite: boolean;
   nav: CalendarNav; timeZone: string; weekStart: WeekStart; defaults: RowProperties;
 }) {
-  const locked = lockedPropertyIds(doc);
+  const locked = syncLocks(doc);
   const writable = canWrite && dateField.type === 'date' && !locked.has(dateField.id);
   const [pending, setPending] = useState<{ event: CalendarEvent; next: EventSpan } | null>(null);
   useEffect(() => { store.ensure(0, calendarRowCap); }, [store, store.order]);
@@ -52,17 +67,18 @@ export default function CalendarView({ source, store, doc, dateField, canWrite, 
     const rows: DatabaseRow[] = [];
     const count = Math.min(store.order.length, calendarRowCap);
     for (let index = 0; index < count; index += 1) { const row = store.rowAt(index); if (row) rows.push(row); }
-    return buildEvents(calendarInputs(rows, dateField, !writable), nav.range, timeZone);
-  }, [store, version, dateField, writable, nav.range.from, nav.range.to, timeZone]); // eslint-disable-line react-hooks/exhaustive-deps
+    return buildEvents(calendarInputs(rows, dateField, rowDateReadOnly(locked, dateField.id, writable)), nav.range, timeZone);
+  }, [store, version, dateField, writable, doc, nav.range.from, nav.range.to, timeZone]); // eslint-disable-line react-hooks/exhaustive-deps
+  const someRowsLocked = writable && events.some(event => event.readOnly);
 
   const write = async (event: CalendarEvent, change: EventWrite | null) => {
     if (!change) { source.notice('这个日期不能这样修改。'); return; }
+    if (locked.has(dateField.id, event.rowId)) { source.notice(syncedReadOnlyHint); return; }
     const row = store.rowById(event.rowId);
     if (change.series === null) await store.trashRow(event.rowId);
     else await store.updateRow(event.rowId, { properties: { [dateField.id]: change.series } });
     if (change.detached !== undefined && row) {
-      const skip = new Set([...locked, ...(doc.calendarSync ? [doc.calendarSync.fields.uidId] : [])]);
-      await store.createRow(row.title, { ...copiedProperties(row, doc.properties, skip), [dateField.id]: change.detached });
+      await store.createRow(row.title, { ...copiedProperties(row, doc.properties, detachedSkip(doc, locked)), [dateField.id]: change.detached });
     }
   };
   const change = (event: CalendarEvent, next: EventSpan) => {
@@ -84,6 +100,7 @@ export default function CalendarView({ source, store, doc, dateField, canWrite, 
     {store.loading && <span role="status">正在读取…</span>}
     {store.total > calendarRowCap && <span className="nb-db-invalid-note" role="status">这段时间有 {store.total} 行，只显示前 {calendarRowCap} 行。可以用筛选缩小范围。</span>}
     {canWrite && !writable && <span>{locked.has(dateField.id) ? syncedReadOnlyHint : `${dateField.name}由系统记录，不能在日历上修改。`}</span>}
+    {someRowsLocked && <span>带参会人的日程由外部日历维护，只读。</span>}
   </>;
   return <>
     <Calendar mode={nav.mode} anchor={nav.anchor} weekStart={weekStart} timeZone={timeZone} today={nav.today} events={events}

@@ -34,6 +34,7 @@ import { LazyGraphDialog, LazyLocalGraph, useGraphShortcut } from '../graph/lazy
 import { createPersistentGraphSource } from '../graph/persistentSource';
 import { LazyWorkspaceCalendar } from '../workspaceCalendar/lazy';
 import { createPersistentCalendarSource } from '../workspaceCalendar/persistentSource';
+import { syncedReadOnlyHint } from '../database/sync';
 import { startReminderRunner } from '../reminders/runner';
 import { FolderImportDialog } from './FolderImportDialog';
 import { resolveImportTags } from './importTags';
@@ -331,6 +332,8 @@ export function PersistentWorkspace() {
     setDialog(null); void openPageRef.current(pageId);
   }, []);
   const pageReferenceAccess = useMemo(() => ({ pages, open: openReferencedPage }), [pages, openReferencedPage]);
+  /** Calendar-synced databases stay reachable by id (links, breadcrumbs, the calendar) but out of navigation and pickers. */
+  const visiblePages = useMemo(() => pages.filter(page => !page.calendarSync), [pages]);
   const graphWorkspaceId = workspace?.id;
   const graphSource = useMemo(() => graphWorkspaceId ? createPersistentGraphSource(graphWorkspaceId) : null, [graphWorkspaceId]);
   useGraphShortcut(() => setDialog('graph'), sessionPhase !== 'ready' || !graphSource || dialog !== null);
@@ -697,6 +700,7 @@ export function PersistentWorkspace() {
     context: { timeZone: calendarTimeZone, weekStart: 1 },
     notice: setNotice,
     openRow: id => void openPageRef.current(id),
+    openDatabase: id => void openPageRef.current(id),
     openDailyNote: (date, pageId) => {
       if (pageId) { void openPageRef.current(pageId); return; }
       setDailyNoteDate(date); setDialog('today');
@@ -705,8 +709,6 @@ export function PersistentWorkspace() {
     writeOpenRowDate: (id, propertyId, value) => updatePageMetaRef.current(id, { properties: { [propertyId]: value } }, ''),
     onDatabaseChanged: id => announceDatabaseChange(id),
   }) : null, [session, workspace, canWrite, readOnly, calendarTimeZone]);
-  const calendarParents = useMemo(() => pages.filter(page => (page.kind ?? 'document') === 'document')
-    .map(page => ({ id: page.id, title: page.title })), [pages]);
 
   useEffect(() => {
     if (!session || !workspace || sessionPhase !== 'ready') return;
@@ -716,6 +718,8 @@ export function PersistentWorkspace() {
 
   /** Rows of the open row page are written here so the page's revision stays in step with its body saves. */
   const [rowSaving, setRowSaving] = useState(false);
+  /** The open row whose title a calendar sync source keeps; its header title is read-only. */
+  const [lockedTitleRow, setLockedTitleRow] = useState<string | null>(null);
   const setRowProperty = async (pageId: string, propertyId: string, value: PropertyValue | null) => {
     setRowSaving(true);
     try { await updatePageMeta(pageId, { properties: { [propertyId]: value } }, ''); }
@@ -745,8 +749,8 @@ export function PersistentWorkspace() {
   const createDatabaseRef = useRef(createDatabase);
   createDatabaseRef.current = createDatabase;
   const createWhiteboard = (parentId: string | null) => { if (canWrite) void createPage(parentId, '未命名白板', whiteboardContent([])); };
-  const databaseChoices = useMemo(() => pages.filter(page => page.kind === 'database')
-    .map(page => ({ id: page.id, title: page.title, icon: page.icon })), [pages]);
+  const databaseChoices = useMemo(() => visiblePages.filter(page => page.kind === 'database')
+    .map(page => ({ id: page.id, title: page.title, icon: page.icon })), [visiblePages]);
 
   const tagsRef = useRef(tags);
   tagsRef.current = tags;
@@ -999,9 +1003,9 @@ export function PersistentWorkspace() {
   };
   const ancestors = ancestorChain(pages, current?.parentId ?? null);
   const favoriteSet = new Set(favoriteIds);
-  const favoritePages = favoriteIds.flatMap(id => pages.filter(page => page.id === id));
-  const recentPages = recentIds.flatMap(id => pages.filter(page => page.id === id)).slice(0, 5);
-  const homePages = [...pages].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 10);
+  const favoritePages = favoriteIds.flatMap(id => visiblePages.filter(page => page.id === id));
+  const recentPages = recentIds.flatMap(id => visiblePages.filter(page => page.id === id)).slice(0, 5);
+  const homePages = [...visiblePages].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 10);
   const editorReadOnly = readOnly || currentLocked || !canWrite;
   uploadFilesRef.current = uploadFiles;
   const pickAttachment = (kind: AttachmentPickKind) => {
@@ -1110,7 +1114,7 @@ export function PersistentWorkspace() {
       onNewPage={() => openNewNote(null)} onImport={() => { if (canWrite) fileRef.current?.click(); }}
       {...(canWrite ? { onNewDatabase: () => void createDatabase(null), onNewWhiteboard: () => createWhiteboard(null) } : {})}
       {...(canWrite ? { onImportFolder: () => setDialog('folder-import') } : {})}
-      createBusy={createBusy || !canWrite} pages={filterPageTree(pages, treeTagIds)} activeId={activeId}
+      createBusy={createBusy || !canWrite} pages={filterPageTree(visiblePages, treeTagIds)} activeId={activeId}
       favorites={favoriteSet} favoritePages={favoritePages} recentPages={recentPages}
       treeLoading={treeLoading} treeError={treeError} onTreeRetry={() => void reloadTree(session)}
       treeActions={treeActions} open={mobileOpen} onClose={() => setMobileOpen(false)} />
@@ -1137,7 +1141,7 @@ export function PersistentWorkspace() {
         draftsRef={draftsRef} recoverOtherDraft={recoverOtherDraft} setNotice={setNotice} />
       <main className="nb-scroll">
         {calendarOpen && calendarSource ? <LazyWorkspaceCalendar source={calendarSource} timeZone={calendarTimeZone} weekStart={1}
-          parents={calendarParents} />
+          onDatabasesChanged={() => { if (session) void reloadTree(session); }} />
           : activeId ? loadingPage ? <div className="nb-home" role="status">正在读取页面…</div>
           : conflict ? <ConflictCard conflict={conflict} conflictMarkdown={conflictMarkdown} createBusy={createBusy} onDownload={exportCurrent}
             onSaveCopy={() => void createPage(conflict.server.parentId, `${conflict.draft.title || '未命名页面'}（冲突副本）`, conflict.draft.content, conflict.draft)} />
@@ -1180,17 +1184,19 @@ export function PersistentWorkspace() {
             <PageHeader icon={current.icon} cover={current.cover} editable={!editorReadOnly}
               onIcon={icon => setIcon(current.id, icon)} onCover={cover => setCover(current.id, cover)}
               title={readOnly || !canWrite ? <h1 className="nb-doc-title-static" data-nbase-find-title>{title || '未命名页面'}</h1>
-                : <input className="nb-doc-title page-title" data-nbase-find-title aria-label="页面标题" value={title} disabled={currentLocked}
+                : <input className="nb-doc-title page-title" data-nbase-find-title aria-label="页面标题" value={title}
+                  disabled={currentLocked || lockedTitleRow === current.id} title={lockedTitleRow === current.id ? syncedReadOnlyHint : undefined}
                   onChange={event => changeTitle(event.target.value)} placeholder="未命名页面" />} />
             <div className="nb-doc-body">
               {current.kind === 'row' && current.parentId && databaseSource && <RowPanel key={current.parentId}
                 source={databaseSource} databaseId={current.parentId} row={rowFromPage(current)} pending={rowSaving}
-                editable={!editorReadOnly} onChange={(propertyId, value) => void setRowProperty(current.id, propertyId, value)} />}
-              {(tags.length > 0 || current.tagIds?.length) && <PageTagControls tags={tags} value={current.tagIds ?? []}
+                editable={!editorReadOnly} onChange={(propertyId, value) => void setRowProperty(current.id, propertyId, value)}
+                onTitleLock={locked => setLockedTitleRow(previous => locked ? current.id : previous === current.id ? null : previous)} />}
+              {(tags.length > 0 || !!current.tagIds?.length) && <PageTagControls tags={tags} value={current.tagIds ?? []}
                 disabled={editorReadOnly} {...(canWrite ? { onApply: (tagIds: string[]) => updatePageMeta(current.id, { tagIds }, '页面标签已保存。') } : {})} />}
               {supported && initialContent ? <DocumentEditor key={`${current.id}:${editorEpoch}`} ref={editorRef} documentId={current.id}
                 pageReferences={pageReferenceAccess}
-                title={title} onReplaceTitle={(value, bodyChanged) => bodyChanged ? setCurrentTitle(value) : changeTitle(value)}
+                title={title} onReplaceTitle={(value, bodyChanged) => { if (lockedTitleRow === current.id) return; if (bodyChanged) setCurrentTitle(value); else changeTitle(value); }}
                 initialContent={initialContent} readOnly={editorReadOnly}
                 onChange={(id, snapshot) => { if (id === activeIdRef.current) markDraft(id, titleRef.current, snapshot); }}
                 onReady={(id, snapshot) => { setEditorSnapshot(snapshot);
@@ -1213,7 +1219,7 @@ export function PersistentWorkspace() {
             </div>
             <Toc outline={editorSnapshot?.outline ?? []} onJump={id => editorRef.current?.jumpToHeading(id)} />
           </> : <section className="nb-home" role="alert">页面暂时无法打开。{saveStatus.text}</section>
-          : pages.length ? <HomePanel workspaceName={workspace?.name} pages={pages} homePages={homePages} createBusy={createBusy} canWrite={canWrite}
+          : visiblePages.length ? <HomePanel workspaceName={workspace?.name} pages={pages} homePages={homePages} createBusy={createBusy} canWrite={canWrite}
             onOpen={id => void openPage(id)} onNew={() => openNewNote(null)} />
           : treeLoading ? <section className="nb-home" role="status">正在加载目录…</section>
           : <EmptyPanel createBusy={createBusy} canWrite={canWrite} onNew={() => openNewNote(null)} onImport={() => fileRef.current?.click()} />}
@@ -1264,23 +1270,23 @@ export function PersistentWorkspace() {
     {dialog === 'templates' && workspace && canWrite && <TemplateManagerDialog key={JSON.stringify([session.user.id, workspace.id])}
       userId={session.user.id} workspaceId={workspace.id}
       csrfToken={session.csrfToken} {...(templateSource ? { source: templateSource } : {})} onClose={() => setDialog(null)} />}
-    {dialog === 'copy' && workspace && current && canWrite && <CopyNoteDialog source={current} pages={pages}
+    {dialog === 'copy' && workspace && current && canWrite && <CopyNoteDialog source={current} pages={visiblePages}
       busy={copyPreparing || noteWrites.busy} error={noteDialogError} onCopy={(nextTitle, parentId) => void copyCurrentNote(nextTitle, parentId)}
       onClose={() => setDialog(null)} />}
     {dialog === 'tags' && workspace && canWrite && <TagManagerDialog tags={tags} workspaceId={workspace.id} csrfToken={session.csrfToken}
       onChanged={async () => { await Promise.all([refreshTags(), reloadTree(session)]); }} onClose={() => setDialog(null)}
       onAuthError={() => { setDialog(null); setReauth(true); setShowReauthForm(true); }} />}
-    {dailyMode && workspace && <DailyNoteDialog workspaceId={workspace.id} mode={dailyMode} initialDate={dailyNoteDate} templates={templates} parents={pages}
+    {dailyMode && workspace && <DailyNoteDialog workspaceId={workspace.id} mode={dailyMode} initialDate={dailyNoteDate} templates={templates} parents={visiblePages}
       readOnly={!canWrite || !noteWrites.ready} onClose={() => { setDialog(null); setDailyNoteDate(undefined); }}
       onOpenPage={async id => { if (!await openPage(id)) throw new Error('页面暂时无法打开。'); }}
       onRestorePage={id => openTrash(id)} onCreate={openDailyNote} onCapture={quickCapture} onSaveSettings={saveDailySettings} />}
     {dialog === 'delete' && current && <TrashPageDialog title={title} childCount={subtreeIds(pages, current.id).length - 1} busy={pageActionBusy}
       onConfirm={() => void beginPageAction('trash', current.id, current.revision, title)} onClose={() => setDialog(null)} />}
     {dialog === 'move' && current && <MovePageDialog current={current} target={moveTarget} onTarget={setMoveTarget}
-      pages={pages.filter(page => page.kind !== 'whiteboard' && (page.kind !== 'database' || current.kind === 'row' || (current.kind ?? 'document') === 'document'))}
+      pages={visiblePages.filter(page => page.kind !== 'whiteboard' && (page.kind !== 'database' || current.kind === 'row' || (current.kind ?? 'document') === 'document'))}
       onConfirm={() => void movePage()} onClose={() => setDialog(null)} />}
     {dialog === 'folder-import' && workspace && canWrite && <FolderImportDialog userId={session.user.id} workspaceId={workspace.id}
-      csrfToken={session.csrfToken} pages={pages} defaultParentId={activeId} parseMarkdown={parseMarkdownImport}
+      csrfToken={session.csrfToken} pages={visiblePages} defaultParentId={activeId} parseMarkdown={parseMarkdownImport}
       resolveTagIds={names => resolveImportTags(workspace.id, session.csrfToken, names)}
       onOpenPage={id => { setDialog(null); void openPage(id); }}
       onImported={() => { void reloadTree(session); void refreshTags().catch(() => undefined); }} onClose={() => setDialog(null)} />}

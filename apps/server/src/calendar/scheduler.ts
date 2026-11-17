@@ -1,6 +1,9 @@
 import type { CalendarSyncCounts } from '@nbase/contracts';
 import type { Pool } from 'pg';
 import type { PgPageRepository } from '../pages/repository.js';
+import { openCredentials, type CredentialKey } from '../secrets/credentials.js';
+import { CalDavClient, CalDavError, guardedDavTransport, type DavTransport } from './caldav/client.js';
+import { syncCaldav } from './caldav/sync.js';
 import { fetchCalendar, fetchErrorCode, guardedCalendarFetcher, type CalendarFetcher } from './fetch.js';
 import { IcsError, parseIcs } from './ics.js';
 import { finishSource, sourceColumns, staleClaim, urlHost, type SourceRow } from './sources.js';
@@ -12,9 +15,15 @@ const failureMs = 5 * 60000;
 const perTick = 20;
 
 export interface CalendarSyncOptions {
-  /** False when NBASE_CALENDAR_FETCH=off: subscriptions are kept but report DISABLED. */
+  /** False when NBASE_CALENDAR_FETCH=off: subscriptions and CalDAV sources are kept but report DISABLED. */
   fetchEnabled: boolean;
   fetcher?: CalendarFetcher;
+  /** Key for stored CalDAV credentials (NBASE_CREDENTIAL_KEY_FILE); without one CalDAV runs report CREDENTIALS_UNAVAILABLE. */
+  credentialKey?: CredentialKey | null;
+  /** Replaces the guarded network transport of CalDAV requests; for tests. */
+  caldavTransport?: DavTransport;
+  /** NBASE_CALDAV_PRIVATE=allow: CalDAV may reach loopback and private addresses on any port. */
+  caldavPrivate?: boolean;
   log?: (message: string, details: Record<string, unknown>) => void;
 }
 
@@ -50,10 +59,46 @@ export async function runSubscription(pool: Pool, pages: PgPageRepository, sourc
   }
 }
 
-/** Takes the most overdue subscription that no other process is syncing. */
+/** Syncs one claimed CalDAV source and records the outcome. Never throws for server or credential problems. */
+export async function runCaldav(pool: Pool, pages: PgPageRepository, source: SourceRow, options: CalendarSyncOptions): Promise<SourceRow | null> {
+  if (!options.fetchEnabled) return finishSource(pool, source.id, { error: 'DISABLED' });
+  const host = urlHost(source.caldav_json?.serverUrl ?? null);
+  try {
+    const alive = await pool.query(`SELECT 1 FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`,
+      [source.workspace_id, source.database_id]);
+    if (!alive.rows[0]) return finishSource(pool, source.id, {});
+    const key = options.credentialKey ?? null;
+    const stored = await pool.query<{ credential_cipher: Buffer | null }>('SELECT credential_cipher FROM calendar_sync_sources WHERE id = $1', [source.id]);
+    const cipher = stored.rows[0]?.credential_cipher;
+    const account = key && cipher ? openCredentials(key, source.id, cipher, source.credential_key_id) : null;
+    if (!account || !source.caldav_json) return finishSource(pool, source.id, { error: 'CREDENTIALS_UNAVAILABLE' });
+    const allowPrivate = options.caldavPrivate ?? false;
+    const client = new CalDavClient(options.caldavTransport ?? guardedDavTransport(allowPrivate), account, allowPrivate);
+    const result = await syncCaldav(pool, pages.snapshot.bind(pages), source, client, { timeZone: await workspaceZone(pool, source.workspace_id) });
+    return finishSource(pool, source.id, { counts: result.counts, warnings: result.warnings,
+      caldav: { syncToken: result.syncToken, ctag: result.ctag, writable: result.writable } });
+  } catch (error) {
+    if (error instanceof SyncFailure && error.code === 'GONE') return finishSource(pool, source.id, {});
+    if (error instanceof SyncFailure) return finishSource(pool, source.id, { error: 'ROW_LIMIT' });
+    if (error instanceof CalDavError) {
+      // Only the host is logged: never paths, accounts or response bodies.
+      if (error.code === 'FETCH_FAILED') options.log?.('caldav sync failed', { host });
+      return finishSource(pool, source.id, { error: error.code });
+    }
+    options.log?.('caldav sync failed', { host, err: error });
+    return finishSource(pool, source.id, { error: 'FETCH_FAILED' });
+  }
+}
+
+/** Runs a claimed source of either scheduled kind. */
+export function runSource(pool: Pool, pages: PgPageRepository, source: SourceRow, options: CalendarSyncOptions): Promise<SourceRow | null> {
+  return source.kind === 'caldav' ? runCaldav(pool, pages, source, options) : runSubscription(pool, pages, source, options);
+}
+
+/** Takes the most overdue scheduled source (subscription or CalDAV) that no other process is syncing. */
 export async function claimDueSource(pool: Pool): Promise<SourceRow | null> {
   const result = await pool.query<SourceRow>(`UPDATE calendar_sync_sources s SET status = 'running', running_since = now(), updated_at = now()
-    WHERE s.id = (SELECT id FROM calendar_sync_sources WHERE kind = 'ics-url' AND next_run_at <= now()
+    WHERE s.id = (SELECT id FROM calendar_sync_sources WHERE kind IN ('ics-url', 'caldav') AND next_run_at <= now()
       AND (status <> 'running' OR running_since < now() - ${staleClaim}) ORDER BY next_run_at, id LIMIT 1 FOR UPDATE SKIP LOCKED)
     RETURNING ${sourceColumns}`);
   return result.rows[0] ?? null;
@@ -102,7 +147,7 @@ export class CalendarScheduler {
       for (let n = 0; n < perTick && !this.stopped; n++) {
         const source = await claimDueSource(this.pool);
         if (!source) break;
-        await runSubscription(this.pool, this.pages, source, this.options);
+        await runSource(this.pool, this.pages, source, this.options);
         if (n === perTick - 1) delay = 10;
       }
     } catch (error) {

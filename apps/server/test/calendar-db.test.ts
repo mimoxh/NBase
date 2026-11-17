@@ -232,9 +232,38 @@ test('calendar import, subscription sync, read-only fields and calendar reads', 
     const reminders = (await call('POST', '/calendar/reminders', { from: '2026-03-10T00:00:00Z', to: '2026-03-11T00:00:00Z' })).json() as CalendarRemindersResponse;
     assert.deepEqual(reminders.items.map(item => [item.title, item.at, item.minutes]), [['站会（改）', '2026-03-10T00:45:00.000Z', 15]]);
 
+    // Synced databases are flagged for clients and stay out of search and the graph; they still open by id.
+    type Summary = { id: string; calendarSync?: true };
+    const tree = async () => new Map(((await call('GET', '/page-tree')).json() as { pages: Summary[] }).pages.map(p => [p.id, p]));
+    const search = async (q: string) => ((await call('GET', `/search?q=${encodeURIComponent(q)}`)).json() as { results: { pageId: string }[] })
+      .results.map(r => r.pageId);
+    const graphIds = async () => ((await call('GET', '/graph')).json() as { nodes: { id: string }[] }).nodes.map(n => n.id);
+    let listed = await tree();
+    assert.equal(listed.get(subDb)?.calendarSync, true);
+    assert.equal(listed.get(fileDb)?.calendarSync, true);
+    assert.ok(listed.has(plainDb.page.id) && !('calendarSync' in listed.get(plainDb.page.id)!));
+    const fileDbPage = (await call('GET', `/pages/${fileDb}`)).json() as Summary & { revision: string };
+    assert.equal(fileDbPage.calendarSync, true);
+    const renamedDb = await call('PATCH', `/pages/${fileDb}`, { clientMutationId: randomUUID(), expectedRevision: fileDbPage.revision, title: '导入日历（改）' });
+    assert.equal(renamedDb.statusCode, 200, renamedDb.body);
+    assert.equal(renamedDb.json().calendarSync, true);
+    assert.deepEqual(await search('站会'), []);
+    assert.deepEqual(await search('导入日历'), []);
+    assert.deepEqual(await search('普通表'), [plainDb.page.id]);
+    const nodes = await graphIds();
+    assert.ok(nodes.includes(plainDb.page.id));
+    assert.ok(!nodes.includes(subDb) && !nodes.includes(fileDb));
+
     // Removing the subscription unlocks the fields; the database and rows stay.
     assert.equal((await call('DELETE', `/calendar/sync/${subscription.id}`)).statusCode, 204);
     assert.equal((await call('DELETE', `/calendar/sync/${subscription.id}`)).statusCode, 404);
+    // ...and the database becomes an ordinary one again, at the top level where the sync created it.
+    listed = await tree();
+    assert.ok(listed.has(subDb) && !('calendarSync' in listed.get(subDb)!));
+    assert.equal(listed.get(fileDb)?.calendarSync, true);
+    assert.equal((await search('推迟')).length, 1);
+    assert.deepEqual(await search('站会（改）'), []);
+    assert.ok((await graphIds()).includes(subDb));
     const unlocked = await database(subDb);
     assert.equal(unlocked.calendarSync, undefined);
     assert.equal(unlocked.rows.length, 2);

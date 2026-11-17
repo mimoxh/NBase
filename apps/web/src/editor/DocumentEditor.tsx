@@ -16,7 +16,7 @@ import { HorizontalRulePlugin } from '@lexical/react/LexicalHorizontalRulePlugin
 import { MarkdownShortcutPlugin } from '@lexical/react/LexicalMarkdownShortcutPlugin';
 import { createContentFromMarkdown, isSafeLinkUrl, MARKDOWN_TRANSFORMERS, readEditorSnapshot } from './markdown';
 import { EDITOR_NODES } from './nodes';
-import type { DocumentEditorHandle, DocumentEditorProps } from './types';
+import type { DocumentContent, DocumentEditorHandle, DocumentEditorProps } from './types';
 import { ToolbarPlugin } from './plugins/ToolbarPlugin';
 import { SafePastePlugin } from './plugins/SafePastePlugin';
 import { CodeHighlightPlugin } from './plugins/CodeHighlightPlugin';
@@ -70,6 +70,14 @@ const theme = {
     symbol: 'nbase-token-property', tag: 'nbase-token-property', url: 'nbase-token-operator', variable: 'nbase-token-variable',
   },
 };
+
+/** Rows made on the server (imports, calendar syncs) start with a bare root, which Lexical counts as an empty state. */
+function withBody(state: DocumentContent['editorState']): DocumentContent['editorState'] {
+  const root = state?.root;
+  if (!root || !Array.isArray(root.children) || root.children.length) return state;
+  const paragraph = { type: 'paragraph', version: 1, direction: null, format: '', indent: 0, textFormat: 0, textStyle: '', children: [] };
+  return { ...state, root: { ...root, children: [paragraph] } } as DocumentContent['editorState'];
+}
 
 class EditorBoundary extends Component<{ children: ReactNode; original: string }, { failed: boolean }> {
   state = { failed: false };
@@ -205,12 +213,13 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
     const content = props.initialContent ?? createContentFromMarkdown(props.initialMarkdown ?? '');
     if (content.schemaVersion !== 1) throw new Error('不支持的文档内容版本');
     const validator = createEditor({ nodes: EDITOR_NODES, onError: (error) => { throw error; } });
-    const parsed = validator.parseEditorState(content.editorState);
+    const editorState = withBody(content.editorState);
+    const parsed = validator.parseEditorState(editorState);
     if (parsed.isEmpty()) throw new Error('文档内容为空或不完整');
     return {
     namespace: 'nbase-document',
     nodes: EDITOR_NODES, theme, editable: !props.readOnly,
-    editorState: JSON.stringify(content.editorState),
+    editorState: JSON.stringify(editorState),
     onError: (error: Error) => {
       queueMicrotask(() => { setFailure(error.message); noticeRef.current?.('编辑器发生错误；请保留当前文档并重新打开。'); });
     },

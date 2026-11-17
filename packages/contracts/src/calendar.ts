@@ -92,17 +92,23 @@ export interface CalendarRemindersResponse { items: CalendarReminderItem[] }
 // ---------------------------------------------------------------------------------------------------------
 // Sync sources
 
-/** `ics-file`: imported once, fields stay editable. `ics-url`: fetched on a schedule, synced fields are read-only. */
-export const calendarSyncKinds = ['ics-file', 'ics-url'] as const;
+/**
+ * `ics-file`: imported once, fields stay editable. `ics-url`: fetched on a schedule, synced fields are read-only.
+ * `caldav`: one external CalDAV calendar, synced both ways on a schedule; see CalendarCaldavInfo.
+ */
+export const calendarSyncKinds = ['ics-file', 'ics-url', 'caldav'] as const;
 export type CalendarSyncKind = typeof calendarSyncKinds[number];
 
 export const calendarSyncErrors = ['URL_INVALID', 'URL_BLOCKED', 'FETCH_FAILED', 'NOT_CALENDAR', 'TOO_LARGE', 'PARSE_FAILED',
-  'ROW_LIMIT', 'DISABLED'] as const;
+  'ROW_LIMIT', 'DISABLED', 'AUTH_FAILED', 'CREDENTIALS_UNAVAILABLE', 'CALENDAR_NOT_FOUND', 'NOT_CALDAV'] as const;
 export type CalendarSyncError = typeof calendarSyncErrors[number];
 
-export interface CalendarSyncCounts { created: number; updated: number; unchanged: number; removed: number; conflicts: number; skipped: number }
+/** `pushed` counts events a CalDAV run created, changed or deleted on the external calendar. */
+export interface CalendarSyncCounts { created: number; updated: number; unchanged: number; removed: number; conflicts: number; skipped: number;
+  pushed?: number }
 
-export const calendarImportWarnings = ['RULE_UNSUPPORTED', 'TIMEZONE_UNKNOWN', 'EVENT_INVALID', 'TRUNCATED', 'VALUE_SHORTENED'] as const;
+export const calendarImportWarnings = ['RULE_UNSUPPORTED', 'TIMEZONE_UNKNOWN', 'EVENT_INVALID', 'TRUNCATED', 'VALUE_SHORTENED',
+  'WRITE_REJECTED'] as const;
 export type CalendarImportWarningCode = typeof calendarImportWarnings[number];
 export interface CalendarImportWarning { code: CalendarImportWarningCode; count: number }
 
@@ -133,6 +139,25 @@ export interface CalendarSyncSource {
   fields: CalendarSyncFields;
   /** Properties rows may not change by hand; empty for file imports. The title is read-only when it lists `titleId`. */
   readOnlyPropertyIds: string[];
+  /** Present for `caldav` sources. */
+  caldav: CalendarCaldavInfo | null;
+  /**
+   * Rows whose synced fields and title are read-only although the calendar is writable: events with
+   * attendees, which NBase never writes back. Only in GET /databases/:id; absent elsewhere.
+   */
+  readOnlyRowIds?: string[];
+}
+
+/** What a CalDAV source shows. The account name and password are stored encrypted and never returned. */
+export interface CalendarCaldavInfo {
+  serverHost: string;
+  calendarName: string;
+  /** False when the external calendar refuses writes: the source then behaves like a subscription. */
+  writable: boolean;
+  /** False when the stored credentials cannot be decrypted (no key, or a different key); re-enter them with PATCH. */
+  credentialsOk: boolean;
+  /** Open conflicts; see GET /calendar/sync/:id/conflicts. */
+  conflictCount: number;
 }
 
 /** GET /calendar/sync */
@@ -160,8 +185,90 @@ export interface CreateCalendarSubscriptionRequest {
   intervalMinutes: number;
 }
 
-/** PATCH /calendar/sync/:id. POST /calendar/sync/:id/run syncs now. DELETE stops syncing and unlocks the fields; the database stays. */
-export interface UpdateCalendarSyncRequest { name?: string; intervalMinutes?: number; url?: string }
+/**
+ * PATCH /calendar/sync/:id. `url` is for subscriptions, `credentials` for CalDAV sources (checked against the
+ * server before they are stored). POST /calendar/sync/:id/run syncs now. DELETE stops syncing, unlocks the
+ * fields and deletes stored credentials; the database stays and the external calendar is not touched.
+ */
+export interface UpdateCalendarSyncRequest { name?: string; intervalMinutes?: number; url?: string; credentials?: CalDavAccount }
+
+// ---------------------------------------------------------------------------------------------------------
+// CalDAV
+
+/** Server presets the interface offers; any other https address works the same way. */
+export const caldavPresets = [
+  { id: 'icloud', name: 'iCloud', serverUrl: 'https://caldav.icloud.com' },
+  { id: 'feishu', name: '飞书', serverUrl: 'https://caldav.feishu.cn' },
+  { id: 'dingtalk', name: '钉钉', serverUrl: 'https://calendar.dingtalk.com' },
+  { id: 'wecom', name: '企业微信', serverUrl: 'https://caldav.wecom.work' },
+] as const;
+
+export interface CalDavAccount { username: string; password: string }
+
+/**
+ * POST /calendar/caldav/discover: signs in and lists the account's event calendars. `serverUrl` is an http(s)
+ * address; a bare host name means https. Nothing is stored.
+ */
+export interface CalDavDiscoverRequest extends CalDavAccount { serverUrl: string }
+
+export interface CalDavCalendarOption {
+  /** Absolute URL of the calendar collection; pass it back unchanged as `calendarUrl`. */
+  url: string;
+  name: string;
+  /** `#rrggbb` when the server reports a colour. */
+  color: string | null;
+  writable: boolean;
+}
+
+export interface CalDavDiscoverResponse { calendars: CalDavCalendarOption[] }
+
+/**
+ * POST /calendar/caldav: creates the database and the source, stores the credentials encrypted, then syncs in
+ * the background. `calendarUrl` must be one of the calendars discovery lists for this account.
+ */
+export interface CreateCalDavSourceRequest extends CalDavDiscoverRequest {
+  clientMutationId: string;
+  calendarUrl: string;
+  name: string;
+  parentId: string | null;
+  intervalMinutes: number;
+}
+
+export const calendarConflictKinds = ['both-changed', 'remote-deleted', 'local-deleted'] as const;
+export type CalendarConflictKind = typeof calendarConflictKinds[number];
+
+/** The synced fields of one side of a conflict. `value` is a date cell value without `remind=`. */
+export interface CalendarEventSnapshot { title: string; value: string; location: string; description: string }
+
+/**
+ * One event changed on both sides since the last sync. Writing back pauses for it until it is resolved.
+ * - both-changed: the row keeps the NBase version; `copyRowId` is a new row holding the external version.
+ * - remote-deleted: the row was changed in NBase and the event was deleted outside; `remote` is null.
+ * - local-deleted: the row was moved to the trash in NBase and the event was changed outside; `local` is null.
+ */
+export interface CalendarSyncConflict {
+  rowId: string;
+  copyRowId: string | null;
+  kind: CalendarConflictKind;
+  local: CalendarEventSnapshot | null;
+  remote: CalendarEventSnapshot | null;
+  detectedAt: string;
+}
+
+/** GET /calendar/sync/:id/conflicts */
+export interface CalendarSyncConflictsResponse { conflicts: CalendarSyncConflict[] }
+
+/**
+ * POST /calendar/sync/:id/conflicts/:rowId resolves one conflict; the result is written back on the next run,
+ * which starts right away.
+ * - local: keep the NBase version (or the deletion) and write it to the external calendar; the copy goes to the trash.
+ * - remote: take the external version (or deletion) into the row; the copy goes to the trash.
+ * - both (both-changed only): the row keeps the NBase version and the copy becomes a new external event.
+ */
+export const calendarConflictChoices = ['local', 'remote', 'both'] as const;
+export type CalendarConflictChoice = typeof calendarConflictChoices[number];
+export interface ResolveCalendarConflictRequest { choice: CalendarConflictChoice }
+export interface ResolveCalendarConflictResponse { source: CalendarSyncSource }
 
 // ---------------------------------------------------------------------------------------------------------
 // Validators
@@ -237,8 +344,42 @@ export function isCreateCalendarSubscriptionRequest(value: unknown): value is Cr
 }
 
 export function isUpdateCalendarSyncRequest(value: unknown): value is UpdateCalendarSyncRequest {
-  if (!isRecord(value) || !hasOnly(value, ['name', 'intervalMinutes', 'url']) || Object.keys(value).length === 0) return false;
+  if (!isRecord(value) || !hasOnly(value, ['name', 'intervalMinutes', 'url', 'credentials']) || Object.keys(value).length === 0) return false;
   return (value.name === undefined || isName(value.name))
     && (value.intervalMinutes === undefined || (calendarSyncIntervals as readonly unknown[]).includes(value.intervalMinutes))
-    && (value.url === undefined || isSyncUrl(value.url));
+    && (value.url === undefined || isSyncUrl(value.url))
+    && (value.credentials === undefined || isCalDavAccount(value.credentials, true));
+}
+
+function isSecretText(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
+}
+
+function isCalDavAccount(value: unknown, exact: boolean): value is CalDavAccount {
+  return isRecord(value) && (!exact || hasOnly(value, ['username', 'password']))
+    && isSecretText(value.username, 256) && isSecretText(value.password, 1024);
+}
+
+/** An http(s) URL or a bare host name, at most 2000 characters. */
+export function isCalDavServerUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.trim().length === 0 || value.length > 2000 || /\s/.test(value.trim())) return false;
+  const text = value.trim();
+  return /^https?:\/\//i.test(text) || !/^[a-z][a-z0-9+.-]*:/i.test(text);
+}
+
+export function isCalDavDiscoverRequest(value: unknown): value is CalDavDiscoverRequest {
+  return isRecord(value) && hasOnly(value, ['serverUrl', 'username', 'password']) && isCalDavServerUrl(value.serverUrl)
+    && isCalDavAccount(value, false);
+}
+
+export function isCreateCalDavSourceRequest(value: unknown): value is CreateCalDavSourceRequest {
+  return isRecord(value) && hasOnly(value, ['clientMutationId', 'serverUrl', 'username', 'password', 'calendarUrl', 'name', 'parentId',
+    'intervalMinutes']) && isDatabaseId(value.clientMutationId) && isCalDavServerUrl(value.serverUrl) && isCalDavAccount(value, false)
+    && typeof value.calendarUrl === 'string' && /^https?:\/\//i.test(value.calendarUrl) && value.calendarUrl.length <= 2000
+    && isName(value.name) && (value.parentId === null || isDatabaseId(value.parentId))
+    && (calendarSyncIntervals as readonly unknown[]).includes(value.intervalMinutes);
+}
+
+export function isResolveCalendarConflictRequest(value: unknown): value is ResolveCalendarConflictRequest {
+  return isRecord(value) && hasOnly(value, ['choice']) && (calendarConflictChoices as readonly unknown[]).includes(value.choice);
 }

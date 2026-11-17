@@ -99,4 +99,10 @@ describe('demo calendar source', () => {
     const events = await source.loadEvents('2026-11-01', '2026-11-30');
     expect(events.dailyNotes).toEqual([{ date: '2026-11-16', pageId: note.id, title: '2026-11-16' }]);
   });
+
+  it('offers no sync endpoints, so the dialog explains that CalDAV needs a server', () => {
+    const { source } = host();
+    expect(source.persistent).toBe(false);
+    expect(source.sync).toBeUndefined();
+  });
 });

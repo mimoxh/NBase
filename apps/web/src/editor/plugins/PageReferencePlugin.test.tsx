@@ -71,6 +71,15 @@ it('finds same-title candidates by their parent path', () => {
   expect(searchPageReferences(catalog, '运营 / 同名').map(option => option.id)).toEqual([id(4)]);
 });
 
+it('never offers calendar-synced databases but still resolves links to them', () => {
+  const synced: PageSummary = { ...summary(6, '团队日历'), kind: 'database', calendarSync: true };
+  const catalog = buildPageReferenceCatalog([...pages, synced]);
+  expect(searchPageReferences(catalog, '团队日历')).toEqual([]);
+  expect(searchPageReferences(catalog, '').map(option => option.id)).not.toContain(id(6));
+  expect(catalog.byExactTitle.has('团队日历')).toBe(false);
+  expect(catalog.activeIds.has(id(6))).toBe(true);
+});
+
 it('previews old references without editing, converts only unique targets and undoes them together', async () => {
   await mount('前 **[[唯一]]** 和 [[唯一]]，还有 [[同名]]、[[缺失]] 与 `[[唯一]]`。');
   const before = editor.read('latest', $createSnapshot).content;

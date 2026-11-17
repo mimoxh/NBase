@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Clipboa
 import { isComputedProperty, type BulkRowPatch, type DatabaseRow, type PropertyDefinition, type PropertyValue } from '@nbase/contracts';
 import { setCellEditSeed, type CellNavigation } from '../cells';
 import type { RowStore } from '../rowStore';
+import type { SyncLocks } from '../sync';
 import { cellClipboardText, parseCellText, parseTsv, toTsv } from './clipboard';
 import { rowHeight } from './useWindowedRows';
 
@@ -25,8 +26,8 @@ function acceptsValue(def: PropertyDefinition): boolean {
 /** Spreadsheet-style cursor and range. Keys, IME text and clipboard all land in one hidden input that follows the cursor. */
 export function useGrid({ store, columns, rowCount, canWrite, locked, notice, rootRef, bodyRef }: {
   store: RowStore; columns: PropertyDefinition[]; rowCount: number; canWrite: boolean; notice: (text: string) => void;
-  /** Properties a calendar subscription writes; paste and clear skip them. */
-  locked?: ReadonlySet<string> | undefined;
+  /** Cells a calendar sync source writes; paste and clear skip them. */
+  locked?: SyncLocks | undefined;
   rootRef: RefObject<HTMLDivElement | null>; bodyRef: RefObject<HTMLTableSectionElement | null>;
 }) {
   const [focus, setFocus] = useState<GridPoint | null>(null);
@@ -112,7 +113,7 @@ export function useGrid({ store, columns, rowCount, canWrite, locked, notice, ro
     const cells: { row: number; col: number; value: null }[] = [];
     for (let row = range.top; row <= range.bottom; row += 1) {
       editableColumns(range.left, range.right).forEach((def, offset) => {
-        if (acceptsValue(def) && !locked?.has(def.id)) cells.push({ row, col: range.left + offset, value: null });
+        if (acceptsValue(def) && !locked?.has(def.id, store.order[row])) cells.push({ row, col: range.left + offset, value: null });
       });
     }
     writeCells(cells);
@@ -151,7 +152,7 @@ export function useGrid({ store, columns, rowCount, canWrite, locked, notice, ro
         const col = range.left + x;
         const def = columns[col];
         if (row >= rowCount || !def) { clipped += 1; continue; }
-        if (!acceptsValue(def) || locked?.has(def.id)) { invalid += 1; continue; }
+        if (!acceptsValue(def) || locked?.has(def.id, store.order[row])) { invalid += 1; continue; }
         if (def.type === 'title') { cells.push({ row, col, value: text }); continue; }
         const parsed = parseCellText(def, text);
         if (parsed.ok) cells.push({ row, col, value: parsed.value }); else invalid += 1;

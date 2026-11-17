@@ -20,6 +20,12 @@ export interface IcsEvent {
   value: string;
   location: string;
   description: string;
+  /** With `details`: whether the VEVENT lists attendees. */
+  attendees?: boolean;
+  /** With `details`: position of the VEVENT among the top-level VEVENTs of the text. */
+  component?: number;
+  /** With `details`, on a series: starts of its changed or cancelled occurrences, which the value lists as exdates. */
+  overrides?: string[];
 }
 
 export interface IcsParseResult {
@@ -35,6 +41,8 @@ export interface IcsOptions {
   /** Zone for floating times when the calendar names none. */
   timeZone: string;
   limit?: number;
+  /** Adds `attendees`, `component` and `overrides` to the events, for writing them back. */
+  details?: boolean;
 }
 
 interface Prop { name: string; params: Map<string, string[]>; value: string }
@@ -47,7 +55,7 @@ const uidLimit = 900;
 const pointPattern = /^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z?))?$/;
 const windowsLookup = new Map(Object.entries(windowsZones).map(([key, value]) => [key.toLowerCase(), value]));
 
-function unfold(text: string): string[] {
+export function unfold(text: string): string[] {
   const lines: string[] = [];
   for (const raw of text.split(/\r\n|\n|\r/)) {
     if ((raw.startsWith(' ') || raw.startsWith('\t')) && lines.length) lines[lines.length - 1] += raw.slice(1);
@@ -423,7 +431,8 @@ export function parseIcs(text: string, options: IcsOptions): IcsParseResult {
       if (cell && !cell.allDay && !cell.timeZone && ctx.calendarZone) cell.timeZone = ctx.calendarZone;
       const value = cell ? formatDateCell(cell) : null;
       if (!value) { skipped++; ctx.flags.add('EVENT_INVALID'); done(); continue; }
-      events.push({ uid: `${uid}#${point}`, value, ...textOf(event), order: event.order });
+      events.push({ uid: `${uid}#${point}`, value, ...textOf(event), order: event.order,
+        ...(options.details ? { attendees: event.props.has('ATTENDEE'), component: event.order } : {}) });
       done();
     }
     if (!master) continue;
@@ -452,7 +461,8 @@ export function parseIcs(text: string, options: IcsOptions): IcsParseResult {
       value = formatDateCell({ ...cell, rrule: undefined, exdates: undefined });
     }
     if (!value) { skipped++; ctx.flags.add('EVENT_INVALID'); done(); continue; }
-    events.push({ uid, value, ...textOf(master), order: master.order });
+    events.push({ uid, value, ...textOf(master), order: master.order,
+      ...(options.details ? { attendees: master.props.has('ATTENDEE'), component: master.order, overrides: [...new Set(removed)].sort() } : {}) });
     done();
   }
 

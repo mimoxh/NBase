@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { evaluateView, type DatabaseDocument, type DatabaseRow, type PropertyDefinition } from '@nbase/contracts';
 import { monthWeeks, shiftMonth, visibleRange } from '../../calendar/layout';
 import { buildEvents } from '../../calendar/model';
-import { lockedPropertyIds } from '../sync';
-import { calendarInputs, copiedProperties } from './CalendarView';
+import { isTitleLocked, lockedPropertyIds, lockedPropertyIdsForRow, syncLocks } from '../sync';
+import { calendarInputs, copiedProperties, detachedSkip, rowDateReadOnly } from './CalendarView';
 
 const ids = { title: '11111111-1111-4111-8111-111111111111', date: '22222222-2222-4222-8222-222222222222', note: '33333333-3333-4333-8333-333333333333',
   uid: '44444444-4444-4444-8444-444444444444', formula: '55555555-5555-4555-8555-555555555555' };
@@ -69,5 +69,40 @@ describe('subscribed fields', () => {
     const doc = { properties, calendarSync: sync } as unknown as DatabaseDocument;
     expect([...lockedPropertyIds(doc)].sort()).toEqual([ids.title, ids.date].sort());
     expect(lockedPropertyIds({ properties }).size).toBe(0);
+  });
+});
+
+describe('read-only rows of a CalDAV calendar', () => {
+  const sync = { kind: 'caldav', readOnlyPropertyIds: [ids.uid], readOnlyRowIds: ['locked-row'],
+    fields: { titleId: ids.title, dateId: ids.date, locationId: ids.note, descriptionId: '', uidId: ids.uid } };
+  const doc = { properties, calendarSync: sync } as unknown as DatabaseDocument;
+
+  it('locks title and synced fields only on the listed rows', () => {
+    expect([...lockedPropertyIdsForRow(doc, 'free-row')]).toEqual([ids.uid]);
+    expect([...lockedPropertyIdsForRow(doc, 'locked-row')].sort()).toEqual([ids.title, ids.date, ids.note, ids.uid].sort());
+    const locks = syncLocks(doc);
+    expect(locks.has(ids.date)).toBe(false);
+    expect(locks.has(ids.date, 'locked-row')).toBe(true);
+    expect(locks.has(ids.date, 'free-row')).toBe(false);
+    expect(locks.has(ids.formula, 'locked-row')).toBe(false);
+    expect(locks.has(ids.uid, 'free-row')).toBe(true);
+    expect(isTitleLocked(doc, 'locked-row')).toBe(true);
+    expect(isTitleLocked(doc, 'free-row')).toBe(false);
+    expect(isTitleLocked({ properties }, 'locked-row')).toBe(false);
+  });
+
+  it('keeps the events of read-only rows from moving on the database calendar', () => {
+    const rows = [row('locked-row', '有参会人', { [ids.date]: '2026-11-16' }), row('free-row', '自己的', { [ids.date]: '2026-11-17' })];
+    const inputs = calendarInputs(rows, properties[1]!, rowDateReadOnly(syncLocks(doc), ids.date, true));
+    expect(inputs.map(input => [input.rowId, input.readOnly])).toEqual([['locked-row', true], ['free-row', false]]);
+    const notWritable = calendarInputs(rows, properties[1]!, rowDateReadOnly(syncLocks(doc), ids.date, false));
+    expect(notWritable.every(input => input.readOnly)).toBe(true);
+  });
+
+  it('leaves the external id and locked fields out of a detached occurrence', () => {
+    expect([...detachedSkip(doc)]).toEqual([ids.uid]);
+    const readOnlyCalendar = { properties, calendarSync: { ...sync, readOnlyPropertyIds: [ids.title, ids.date, ids.note, ids.uid] } } as unknown as DatabaseDocument;
+    expect([...detachedSkip(readOnlyCalendar)].sort()).toEqual([ids.title, ids.date, ids.note, ids.uid].sort());
+    expect(detachedSkip({ properties } as unknown as DatabaseDocument).size).toBe(0);
   });
 });

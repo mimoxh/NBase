@@ -15,7 +15,7 @@ export class SyncFailure extends Error {
   constructor(public readonly code: 'ROW_LIMIT' | 'GONE') { super(code); }
 }
 
-type Snapshot = (client: PoolClient, workspaceId: string, ids: string[], actorId: string,
+export type Snapshot = (client: PoolClient, workspaceId: string, ids: string[], actorId: string,
   operation: 'create' | 'update' | 'trash' | 'restore') => Promise<void>;
 
 export interface SyncTarget {
@@ -38,7 +38,8 @@ type Op =
   | { kind: 'update'; event: IcsEvent; hash: Buffer; rowId: string; expected: string | null; restore: boolean }
   | { kind: 'remove'; uid: string; rowId: string };
 
-export function eventHash(event: IcsEvent): Buffer {
+/** Digest of the synced fields: title, date value, location and description. */
+export function eventHash(event: Pick<IcsEvent, 'title' | 'value' | 'location' | 'description'>): Buffer {
   return createHash('sha256').update(JSON.stringify([event.title, event.value, event.location, event.description])).digest();
 }
 
@@ -227,7 +228,7 @@ async function writeChunk(pool: Pool, target: SyncTarget, ops: Op[], counts: Cal
     await saveItems(client, target, items);
     if (changedRows.length) await markRowsChanged(client, target.workspaceId, target.databaseId, properties, changedRows);
     await client.query('COMMIT');
-    for (const key of Object.keys(local) as (keyof CalendarSyncCounts)[]) counts[key] += local[key];
+    for (const key of Object.keys(local) as (keyof CalendarSyncCounts)[]) counts[key] = (counts[key] ?? 0) + (local[key] ?? 0);
   } catch (error) {
     await client.query('ROLLBACK').catch(() => undefined);
     throw error;

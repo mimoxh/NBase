@@ -125,6 +125,38 @@ it('surfaces a revision conflict and keeps the local content', async () => {
   expect(localDrafts.removeIfUnchanged).not.toHaveBeenCalled();
 });
 
+it('moves the edit onto a newer revision whose title and body are unchanged', async () => {
+  vi.useFakeTimers();
+  try {
+    const newer = { ...server('3', '旧正文'), properties: { uid: 'event@nbase' } } as PageDocument;
+    const update = vi.spyOn(pageClient, 'update').mockRejectedValueOnce(new ApiError(409, 'REVISION_CONFLICT'))
+      .mockResolvedValue(server('4', '我的修改'));
+    vi.spyOn(pageClient, 'get').mockResolvedValue(newer);
+    const page = await mount(draftFor('我的修改'));
+
+    await act(async () => { await page.saver.savePage('page'); });
+    expect(page.setConflict).not.toHaveBeenCalled();
+    expect(page.drafts.current.get('page')).toMatchObject({ baseRevision: '3', content: content('我的修改') });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(update.mock.calls[1]![2]).toMatchObject({ expectedRevision: '3', content: content('我的修改') });
+    expect(update.mock.calls[1]![2].clientMutationId).not.toBe(update.mock.calls[0]![2].clientMutationId);
+    expect(page.drafts.current.has('page')).toBe(false);
+  } finally { vi.useRealTimers(); }
+});
+
+it('still reports a conflict when the newer revision changed the title', async () => {
+  vi.spyOn(pageClient, 'update').mockRejectedValue(new ApiError(409, 'REVISION_CONFLICT'));
+  const latest = { ...server('3', '旧正文'), title: '别处改的标题' };
+  vi.spyOn(pageClient, 'get').mockResolvedValue(latest);
+  const page = await mount(draftFor('我的修改'));
+
+  await act(async () => { await page.saver.savePage('page'); });
+
+  expect(page.setConflict).toHaveBeenCalledWith({ server: latest, draft: page.drafts.current.get('page') });
+});
+
 it('treats a conflict with identical server content as already saved', async () => {
   vi.spyOn(pageClient, 'update').mockRejectedValue(new ApiError(409, 'REVISION_CONFLICT'));
   vi.spyOn(pageClient, 'get').mockResolvedValue(server('2', '新正文'));

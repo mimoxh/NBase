@@ -14,12 +14,12 @@ export class ApiError extends Error {
 }
 
 export async function request<T>(path: string, method = 'GET', body?: unknown, csrfToken?: string,
-  signal?: AbortSignal): Promise<T> {
+  signal?: AbortSignal, timeout = timeoutMs): Promise<T> {
   const controller = new AbortController();
   const cancel = () => controller.abort(signal?.reason);
   if (signal?.aborted) cancel();
   else signal?.addEventListener('abort', cancel, { once: true });
-  const timeout = setTimeout(() => controller.abort(new DOMException('请求超时', 'TimeoutError')), timeoutMs);
+  const timer = setTimeout(() => controller.abort(new DOMException('请求超时', 'TimeoutError')), timeout);
   try {
     controller.signal.throwIfAborted();
     const response = await fetch(path, {
@@ -45,7 +45,7 @@ export async function request<T>(path: string, method = 'GET', body?: unknown, c
     if (error instanceof TypeError) throw new ApiError(0, 'NETWORK_UNAVAILABLE');
     throw error;
   } finally {
-    clearTimeout(timeout);
+    clearTimeout(timer);
     signal?.removeEventListener('abort', cancel);
   }
 }

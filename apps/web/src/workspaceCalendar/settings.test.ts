@@ -12,6 +12,7 @@ const db = (id: string, types: ('date' | 'created_time' | 'updated_time')[], rea
     id: 'sync-1', databaseId: id, kind: 'ics-url', name: '订阅', urlHost: 'example.com', intervalMinutes: 60,
     status: 'idle', lastSyncedAt: null, lastError: null, lastCounts: null, warnings: [], eventCount: 0,
     fields: { titleId: 't', dateId: `${id}-p0`, locationId: 'l', descriptionId: 'd', uidId: 'u' }, readOnlyPropertyIds: readOnly,
+    caldav: null,
   } : null,
 });
 

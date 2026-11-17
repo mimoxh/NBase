@@ -1,10 +1,11 @@
-import type { CalendarDatabaseOption, CalendarEventsResponse, CalendarImportRequest, CalendarImportResponse,
-  CalendarSettings, CalendarSyncListResponse, CalendarSyncSource, CreateCalendarSubscriptionRequest,
-  UpdateCalendarSyncRequest } from '@nbase/contracts';
+import type { CalDavAccount, CalDavDiscoverRequest, CalDavDiscoverResponse, CalendarConflictChoice, CalendarDatabaseOption,
+  CalendarEventsResponse, CalendarImportRequest, CalendarImportResponse, CalendarSettings, CalendarSyncConflictsResponse,
+  CalendarSyncListResponse, CalendarSyncSource, CreateCalDavSourceRequest, CreateCalendarSubscriptionRequest,
+  ResolveCalendarConflictResponse, UpdateCalendarSyncRequest } from '@nbase/contracts';
 
 export interface RowDateWrite { rowId: string; propertyId: string; value: string; expectedRevision: string }
 
-/** Subscription and import endpoints; only a persistent workspace has them. */
+/** Import, subscription and CalDAV endpoints; only a persistent workspace has them. */
 export interface CalendarSyncApi {
   list(signal?: AbortSignal): Promise<CalendarSyncListResponse>;
   importIcs(body: CalendarImportRequest): Promise<CalendarImportResponse>;
@@ -12,6 +13,14 @@ export interface CalendarSyncApi {
   update(id: string, body: UpdateCalendarSyncRequest): Promise<CalendarSyncSource>;
   run(id: string): Promise<CalendarSyncSource>;
   remove(id: string): Promise<void>;
+  /** Signs in and lists the account's calendars; nothing is stored. */
+  discoverCaldav(body: CalDavDiscoverRequest): Promise<CalDavDiscoverResponse>;
+  /** Creates the database and the CalDAV source; a retry with the same `clientMutationId` returns the first result. */
+  createCaldav(body: CreateCalDavSourceRequest): Promise<CalendarSyncSource>;
+  /** Replaces the stored account name and password of a CalDAV source; the server checks them first. */
+  updateCredentials(id: string, credentials: CalDavAccount): Promise<CalendarSyncSource>;
+  conflicts(id: string, signal?: AbortSignal): Promise<CalendarSyncConflictsResponse>;
+  resolveConflict(id: string, rowId: string, choice: CalendarConflictChoice): Promise<ResolveCalendarConflictResponse>;
 }
 
 /**
@@ -35,6 +44,8 @@ export interface WorkspaceCalendarSource {
   createDetachedRow(input: { databaseId: string; rowId: string; propertyId: string; value: string }): Promise<string | null>;
   /** Opens a row page through the host's page-switch flow. */
   openRow(rowId: string): void;
+  /** Opens a database page; synced databases are not in the page tree, so the calendar is their way in. */
+  openDatabase(databaseId: string): void;
   /** Opens the day's daily note; without a page id the host runs its open-or-create flow. */
   openDailyNote(date: string, pageId?: string): void;
   notice(text: string): void;

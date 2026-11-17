@@ -55,6 +55,17 @@ describe('mounted document editor', () => {
     expect(ref.current!.getSnapshot().markdown).toContain('# 新标题');
   });
 
+  it('opens a server-made row whose root has no blocks yet as an empty, editable document', async () => {
+    const ref = createRef<DocumentEditorHandle>();
+    const onChange = vi.fn();
+    const bare = { schemaVersion: 1, editorState: { root: { type: 'root', version: 1, format: '', indent: 0, direction: null, children: [] } } } as unknown as DocumentContent;
+    await act(() => root.render(<DocumentEditor ref={ref} documentId="bare" initialContent={bare} onChange={onChange} />));
+    expect(host.querySelector('[role="alert"]')).toBeNull();
+    expect(host.querySelector('[aria-label="文档正文"]')).not.toBeNull();
+    expect(ref.current!.getSnapshot().markdown).toBe('');
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it('opens versioned content, exposes current Markdown and does not mark initial load dirty', async () => {
     const ref = createRef<DocumentEditorHandle>();
     const onReady = vi.fn();

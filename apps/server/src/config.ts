@@ -1,6 +1,7 @@
 import { readFile, stat } from 'node:fs/promises';
 import type { PoolConfig } from 'pg';
 import { publicOriginConfig } from './auth/session.js';
+import { loadCredentialKey } from './secrets/credentials.js';
 
 /** A single trailing line ending is convenient for files created by text editors. */
 export async function readSecretFile(path: string): Promise<string> {
@@ -53,5 +54,10 @@ export async function serverConfig(env: NodeJS.ProcessEnv = process.env) {
     if (!publicOrigin || !attachmentDir) throw new Error('NBASE_PUBLIC_ORIGIN and NBASE_ATTACHMENT_DIR are required for persistence');
     publicOriginConfig(publicOrigin); // Reject misconfiguration before touching the database.
   }
-  return { host: env.HOST ?? '127.0.0.1', port, database, publicOrigin, attachmentDir };
+  const caldavPrivate = env.NBASE_CALDAV_PRIVATE;
+  if (caldavPrivate !== undefined && !['', 'allow', 'deny'].includes(caldavPrivate)) throw new Error('NBASE_CALDAV_PRIVATE must be allow or deny');
+  // Read even without a database, so a broken key file is reported at once.
+  const credentialKey = await loadCredentialKey(env);
+  return { host: env.HOST ?? '127.0.0.1', port, database, publicOrigin, attachmentDir, credentialKey,
+    caldavPrivate: caldavPrivate === 'allow' };
 }

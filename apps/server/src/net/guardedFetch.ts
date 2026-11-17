@@ -41,23 +41,50 @@ export function guardedTarget(raw: unknown): URL {
   return url;
 }
 
-/** Resolves once and pins the connection to the checked address, so DNS rebinding cannot swap it. */
-async function resolvePublic(hostname: string): Promise<{ address: string; family: 4 | 6 }> {
-  const host = hostname.replace(/^\[|\]$/g, '');
-  const addresses = isIP(host) ? [{ address: host, family: isIP(host) as 4 | 6 }]
-    : await lookup(host, { all: true, verbatim: true }).catch(() => { throw new GuardedFetchError('FETCH_FAILED'); });
-  if (!addresses.length || addresses.some(item => isBlockedAddress(item.address))) throw new GuardedFetchError('URL_BLOCKED');
-  return addresses[0] as { address: string; family: 4 | 6 };
+/** Like `guardedTarget`, but any port is allowed; for CalDAV with NBASE_CALDAV_PRIVATE=allow. */
+export function anyPortTarget(raw: unknown): URL {
+  if (typeof raw !== 'string' || raw.length > 2000) throw new GuardedFetchError('URL_INVALID');
+  let url: URL;
+  try { url = new URL(raw.trim()); } catch { throw new GuardedFetchError('URL_INVALID'); }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) throw new GuardedFetchError('URL_INVALID');
+  return url;
 }
 
-function get(url: URL, pinned: { address: string; family: 4 | 6 }, headers: Record<string, string>, signal: AbortSignal): Promise<IncomingMessage> {
+type Pinned = { address: string; family: 4 | 6 };
+
+/**
+ * Which addresses a request may reach. `public`: public addresses only. `private`: any address, but plain
+ * http only toward loopback and private addresses, since requests may carry a password.
+ */
+export type AddressPolicy = 'public' | 'private';
+
+/** Resolves once and pins the connection to the checked address, so DNS rebinding cannot swap it. */
+async function resolveTarget(url: URL, policy: AddressPolicy): Promise<Pinned> {
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  const addresses = isIP(host) ? [{ address: host, family: isIP(host) as 4 | 6 }]
+    : await lookup(host, { all: true, verbatim: true }).catch(() => { throw new GuardedFetchError('FETCH_FAILED'); });
+  if (!addresses.length) throw new GuardedFetchError('URL_BLOCKED');
+  if (policy === 'public') {
+    if (addresses.some(item => isBlockedAddress(item.address))) throw new GuardedFetchError('URL_BLOCKED');
+  } else if (url.protocol === 'http:' && addresses.some(item => !isBlockedAddress(item.address))) {
+    throw new GuardedFetchError('URL_BLOCKED');
+  }
+  return addresses[0] as Pinned;
+}
+
+function send(url: URL, pinned: Pinned, method: string, headers: Record<string, string>, body: Buffer | undefined,
+  signal: AbortSignal): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
     const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
-      method: 'GET', signal, headers: { ...headers, 'Accept-Encoding': 'identity' },
-      lookup: (_host, _options, callback) => callback(null, pinned.address, pinned.family),
+      method, signal,
+      headers: { ...headers, 'Accept-Encoding': 'identity', ...(body ? { 'Content-Length': String(body.length) } : {}) },
+      // With autoSelectFamily (the default since Node 20) the lookup is asked for all addresses and must answer with a list.
+      lookup: (_host, options, callback) => options.all
+        ? (callback as (error: null, addresses: { address: string; family: number }[]) => void)(null, [pinned])
+        : callback(null, pinned.address, pinned.family),
     }, resolve);
     request.on('error', reject);
-    request.end();
+    request.end(body);
   });
 }
 
@@ -85,47 +112,99 @@ export interface GuardedFetchOptions {
   maxRedirects: number;
   /** What happens past `maxBytes`: keep the start, or fail with TOO_LARGE. */
   oversize: 'truncate' | 'error';
-  /** Statuses outside 2xx that are answers rather than failures, such as 304. */
-  acceptStatus?: number[];
+  /** Statuses outside 2xx that are answers rather than failures, such as 304; 'all' returns every final status. */
+  acceptStatus?: number[] | 'all';
   /** Checks a final response before its body is read; throw a GuardedFetchError (usually REJECTED) to stop. */
   inspect?: (status: number, headers: IncomingHttpHeaders) => void;
   /** Checks every URL, the first and each redirect target; defaults to `guardedTarget`. */
   target?: (raw: string) => URL;
+  /** Defaults to 'public'. */
+  addresses?: AddressPolicy;
+  /**
+   * Whether a redirect from the first URL may be followed with the same headers; when it returns false the
+   * request fails with FETCH_FAILED. Requests that carry credentials use `sameSiteRedirect`.
+   */
+  redirectAllowed?: (from: URL, to: URL) => boolean;
+}
+
+export interface GuardedRequestOptions extends GuardedFetchOptions {
+  method: string;
+  body?: string | Buffer;
 }
 
 export interface GuardedResponse { url: URL; status: number; headers: IncomingHttpHeaders; body: Buffer }
 
-export async function guardedGet(start: URL, options: GuardedFetchOptions): Promise<GuardedResponse> {
+const redirectStatuses = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Host names a redirect may lead to while keeping credentials: the same host, or a host in the domain the
+ * original host belongs to once its leftmost label is removed, when that leaves at least two labels
+ * (`caldav.icloud.com` to `p52-caldav.icloud.com`).
+ */
+export function sameSiteRedirect(from: URL, to: URL): boolean {
+  const a = from.hostname.toLowerCase().replace(/\.$/, '');
+  const b = to.hostname.toLowerCase().replace(/\.$/, '');
+  if (a === b) return true;
+  if (isIP(a.replace(/^\[|\]$/g, '')) || isIP(b.replace(/^\[|\]$/g, ''))) return false;
+  const labels = a.split('.');
+  if (labels.length < 3) return false;
+  const parent = labels.slice(1).join('.');
+  return b.endsWith(`.${parent}`);
+}
+
+/**
+ * Any method with an optional body. GET follows every redirect as GET; other methods re-issue the same
+ * method and body on 301, 302, 307 and 308, and fail on 303. With `maxRedirects: 0` a redirect is returned
+ * as the answer when `acceptStatus` takes it, and fails otherwise.
+ */
+export async function guardedRequest(start: URL, options: GuardedRequestOptions): Promise<GuardedResponse> {
   const check = options.target ?? guardedTarget;
-  let url = check(start.toString());
+  const first = check(start.toString());
+  let url = first;
+  const method = options.method.toUpperCase();
+  const body = options.body === undefined ? undefined : Buffer.isBuffer(options.body) ? options.body : Buffer.from(options.body, 'utf8');
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  const accepted = (status: number) => options.acceptStatus === 'all' || (options.acceptStatus?.includes(status) ?? false);
   try {
     for (let redirect = 0; ; redirect++) {
-      const response = await get(url, await resolvePublic(url.hostname), options.headers, controller.signal)
+      const response = await send(url, await resolveTarget(url, options.addresses ?? 'public'), method, options.headers,
+        body, controller.signal)
         .catch(error => { throw error instanceof GuardedFetchError ? error : new GuardedFetchError('FETCH_FAILED'); });
       const status = response.statusCode ?? 0;
-      if (status >= 300 && status < 400 && status !== 304 && response.headers.location) {
+      const location = response.headers.location;
+      const follows = method === 'GET' ? status >= 300 && status < 400 && status !== 304 : redirectStatuses.has(status) && status !== 303;
+      if (location && follows && (options.maxRedirects > 0 || !accepted(status))) {
         response.destroy();
         if (redirect >= options.maxRedirects) throw new GuardedFetchError('FETCH_FAILED');
         // Each hop is checked again, so a public page cannot redirect into the internal network.
-        url = check(new URL(response.headers.location, url).toString());
+        const next = check(new URL(location, url).toString());
+        if (options.redirectAllowed && !options.redirectAllowed(first, next)) throw new GuardedFetchError('FETCH_FAILED');
+        url = next;
         continue;
       }
-      if ((status < 200 || status >= 300) && !options.acceptStatus?.includes(status)) {
+      if (method !== 'GET' && status === 303 && !accepted(status)) {
+        response.destroy();
+        throw new GuardedFetchError('FETCH_FAILED');
+      }
+      if ((status < 200 || status >= 300) && !accepted(status)) {
         response.destroy();
         throw new GuardedFetchError('FETCH_FAILED');
       }
       try { options.inspect?.(status, response.headers); } catch (error) { response.destroy(); throw error; }
-      const body = status >= 200 && status < 300 ? await readBody(response, options.maxBytes, options.oversize) : Buffer.alloc(0);
-      if (!body.length) response.destroy();
-      return { url, status, headers: response.headers, body };
+      const readable = options.acceptStatus === 'all' ? status !== 204 && status !== 304 && method !== 'HEAD' : status >= 200 && status < 300;
+      const content = readable ? await readBody(response, options.maxBytes, options.oversize) : Buffer.alloc(0);
+      if (!content.length) response.destroy();
+      return { url, status, headers: response.headers, body: content };
     }
   } catch (error) {
     throw error instanceof GuardedFetchError ? error : new GuardedFetchError('FETCH_FAILED');
   } finally { clearTimeout(timer); }
 }
 
+export function guardedGet(start: URL, options: GuardedFetchOptions): Promise<GuardedResponse> {
+  return guardedRequest(start, { ...options, method: 'GET' });
+}
 /** Charset named by a Content-Type header, when there is one. */
 export function charsetOf(contentType: string | undefined): string | undefined {
   return /charset=["']?([\w-]+)/i.exec(contentType ?? '')?.[1];

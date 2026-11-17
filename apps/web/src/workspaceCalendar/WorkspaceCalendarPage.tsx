@@ -18,12 +18,12 @@ import './workspaceCalendar.css';
  * The workspace-wide calendar: events of every configured database, daily-note markers, sources and
  * sync management. Reads come from `loadEvents`; writes go back to the rows through the source.
  */
-export function WorkspaceCalendarPage({ source, timeZone, weekStart, parents = [] }: {
+export function WorkspaceCalendarPage({ source, timeZone, weekStart, onDatabasesChanged }: {
   source: WorkspaceCalendarSource;
   timeZone: string;
   weekStart: WeekStart;
-  /** Documents an import can create its database under; top level is always offered. */
-  parents?: readonly { id: string; title: string }[];
+  /** An import, subscription or CalDAV source may have created a database the page tree does not list yet. */
+  onDatabasesChanged?: () => void;
 }) {
   const nav = useCalendarNav('workspace', timeZone, weekStart);
   const [databases, setDatabases] = useState<CalendarDatabaseOption[] | null>(null);
@@ -194,7 +194,7 @@ export function WorkspaceCalendarPage({ source, timeZone, weekStart, parents = [
         <SourcesPanel databases={databases} settings={settings} canWrite={source.canWrite} onChange={updateSettings} />
       </Popover>}
     </span>
-    <button className="nb-btn nb-btn-quiet" onClick={() => setPanel('sync')}>导入与订阅</button>
+    <button className="nb-btn nb-btn-quiet" onClick={() => setPanel('sync')}>导入与同步</button>
     {source.persistent && permission === 'default' && <button className="nb-btn nb-btn-quiet"
       onClick={() => void requestReminderPermission().then(setPermission)}>开启提醒通知</button>}
     {source.persistent && permission === 'denied' && <span className="nb-wcal-muted">浏览器通知已关闭，提醒将显示在页面内。</span>}
@@ -213,7 +213,7 @@ export function WorkspaceCalendarPage({ source, timeZone, weekStart, parents = [
       onOpen={open} onCreate={source.canWrite ? create : undefined} onChange={source.canWrite ? change : undefined}
       onDayClick={dayClick} status={status} label="工作区日历" />
     {pending && <RecurrenceScopeDialog onChoose={choose} onClose={() => setPending(null)} />}
-    {panel === 'sync' && <SyncDialog source={source} parents={parents} onChanged={() => void reloadSources()}
+    {panel === 'sync' && <SyncDialog source={source} timeZone={timeZone} onChanged={() => { void reloadSources(); onDatabasesChanged?.(); }}
       onClose={() => setPanel(null)} />}
   </div>;
 }

@@ -17,8 +17,12 @@ x-app: &app
     NBASE_DATABASE_PASSWORD_FILE: /run/secrets/db_password
     NBASE_PUBLIC_ORIGIN: ${NBASE_PUBLIC_ORIGIN:?Set an exact origin in .env.docker}
     NBASE_ATTACHMENT_DIR: /data/attachments
+    NBASE_CREDENTIAL_KEY_FILE: /run/secrets/credential_key
+    # allow: CalDAV may reach loopback and private addresses on any port (a NAS Nextcloud or Radicale).
+    NBASE_CALDAV_PRIVATE: ${NBASE_CALDAV_PRIVATE:-deny}
   secrets:
     - db_password
+    - credential_key
   volumes:
     - attachments:/data/attachments
   depends_on:
@@ -70,6 +74,9 @@ secrets:
     file: ${NBASE_DB_PASSWORD_SOURCE:?Set the database password file path}
   owner_password:
     file: ${NBASE_OWNER_PASSWORD_SOURCE:?Set the owner password file path}
+  # Seals stored CalDAV credentials; kept out of backups. Older configurations: node -- scripts/setup-docker.mjs --add-credential-key
+  credential_key:
+    file: ${NBASE_CREDENTIAL_KEY_SOURCE:?Set the credential key file path}
 
 volumes:
   postgres_data:

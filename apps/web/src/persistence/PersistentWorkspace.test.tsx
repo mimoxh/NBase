@@ -40,6 +40,27 @@ it('keeps writing and export available when pending-action storage cannot be rea
   } finally { await act(() => root.unmount()); host.remove(); }
 });
 
+it('keeps calendar-synced databases out of the page tree and home list', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const session: AuthSessionResponse = { user: { id: 'user', loginName: 'owner' },
+    workspaces: [{ id: 'workspace', name: '我的空间', role: 'owner' }], csrfToken: 'csrf', expiresAt: '2099-01-01T00:00:00Z' };
+  const page: PageDocument = { id: 'page', workspaceId: 'workspace', parentId: null, icon: null, cover: null, title: '普通页面', revision: '1',
+    content: createContentFromMarkdown('正文'), createdAt: '2026-10-27T00:00:00Z', updatedAt: '2026-10-27T00:00:00Z' };
+  const synced = { ...page, id: 'synced', title: '团队日历', kind: 'database' as const, calendarSync: true as const };
+  vi.spyOn(pageClient, 'session').mockResolvedValue(session);
+  vi.spyOn(pageClient, 'tree').mockResolvedValue({ pages: [page, synced], truncated: false });
+  vi.spyOn(pageClient, 'favorites').mockResolvedValue({ pageIds: [synced.id] } as never);
+  vi.spyOn(localDrafts, 'forScopeActions').mockResolvedValue([]);
+  vi.spyOn(localDrafts, 'forScopeCreates').mockResolvedValue([]);
+  const host = document.createElement('div'); document.body.append(host);
+  const root = createRoot(host);
+  try {
+    await act(async () => root.render(<PersistentWorkspace />));
+    expect(host.textContent).toContain(page.title);
+    expect(host.textContent).not.toContain(synced.title);
+  } finally { await act(() => root.unmount()); host.remove(); }
+});
+
 it('refreshes the deletion subtree and refuses to delete a newly moved child with another tab draft', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
   const session: AuthSessionResponse = { user: { id: 'user', loginName: 'owner' },

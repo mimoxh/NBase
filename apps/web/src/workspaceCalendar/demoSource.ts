@@ -116,6 +116,7 @@ export function createDemoCalendarSource(options: {
       return insertRow(databaseId, series.title, { ...copied, [propertyId]: value });
     },
     openRow: options.openPage,
+    openDatabase: options.openPage,
     openDailyNote: (date, pageId) => {
       const existing = pageId ?? dailyNotes.get(date);
       const page = existing ? options.state.current.pages.find(p => p.id === existing && !p.deleted) : undefined;

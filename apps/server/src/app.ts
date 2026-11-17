@@ -30,7 +30,7 @@ interface AppOptions {
   pages?: PgPageRepository;
   attachments?: PgAttachmentRepository;
   notesPool?: Pool;
-  /** Defaults to fetching subscriptions unless NBASE_CALENDAR_FETCH=off. */
+  /** Defaults to fetching subscriptions and CalDAV calendars unless NBASE_CALENDAR_FETCH=off; no credential key. */
   calendar?: Partial<CalendarOptions>;
   readyCheck?: () => Promise<void>;
 }
@@ -67,7 +67,8 @@ export async function buildApp(options: AppOptions = {}) {
       registerTagRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
       registerTemplateRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
       registerDailyRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin, renderNoteTemplate);
-      registerDatabaseRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
+      registerDatabaseRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin,
+        options.calendar?.credentialKey?.id ?? null);
       registerGraphRoutes(app, options.notesPool, options.auth.repository, options.auth.publicOrigin);
       registerCalendarRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin, {
         fetchEnabled: process.env.NBASE_CALENDAR_FETCH !== 'off', ...options.calendar });
