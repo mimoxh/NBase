@@ -2,11 +2,13 @@ import type { IncomingHttpHeaders } from 'node:http';
 import { isIP } from 'node:net';
 import type { CalDavAccount, CalDavCalendarOption, CalendarSyncError } from '@nbase/contracts';
 import { anyPortTarget, GuardedFetchError, guardedRequest, guardedTarget, isBlockedAddress, sameSiteRedirect } from '../../net/guardedFetch.js';
+import type { RemoteCalendar } from '../remote.js';
 import { APPLE, CALDAV, CALSERVER, child, childrenOf, DAV, deepText, escapeXml, parseXml, XmlError, type XmlElement } from './xml.js';
 
 /** A CalDAV failure, with the code recorded on the source or returned by discovery. */
 export class CalDavError extends Error {
-  constructor(public readonly code: CalendarSyncError) { super(code); }
+  /** `detail` holds facts from the server's answer that are safe to log, such as a disabled Google API and its project. */
+  constructor(public readonly code: CalendarSyncError, public readonly detail: Readonly<Record<string, string>> = {}) { super(code); }
 }
 
 export interface DavRequest {
@@ -175,21 +177,31 @@ function headerText(headers: IncomingHttpHeaders, name: string): string | null {
   return typeof value === 'string' && value.length ? value : null;
 }
 
-/**
- * One account on one server. Requests use HTTP Basic. 401 always becomes AUTH_FAILED; reads that cannot
- * reach the calendar become CALENDAR_NOT_FOUND; other reading failures FETCH_FAILED.
- */
-export class CalDavClient {
-  private readonly authorization: string;
+export interface CalDavClientOptions {
+  /** False for servers that refuse `If-None-Match: *` on new resources (Google); new events are then created unconditionally. */
+  createCondition?: boolean;
+  /** Sees every answer except 401 first; may throw a CalDavError (Google reports a disabled API as 403). */
+  inspect?: (response: DavResponse) => void;
+}
 
-  constructor(private readonly transport: DavTransport, account: CalDavAccount, private readonly allowPrivate: boolean) {
-    this.authorization = `Basic ${Buffer.from(`${account.username}:${account.password}`, 'utf8').toString('base64')}`;
+/**
+ * One account on one server. Requests use HTTP Basic with `account`, or no Authorization header when it is null
+ * (the transport adds a bearer token). 401 always becomes AUTH_FAILED; reads that cannot reach the calendar
+ * become CALENDAR_NOT_FOUND; other reading failures FETCH_FAILED.
+ */
+export class CalDavClient implements RemoteCalendar {
+  private readonly authorization: string | null;
+
+  constructor(private readonly transport: DavTransport, account: CalDavAccount | null, private readonly allowPrivate: boolean,
+    private readonly options: CalDavClientOptions = {}) {
+    this.authorization = account ? `Basic ${Buffer.from(`${account.username}:${account.password}`, 'utf8').toString('base64')}` : null;
   }
 
   private async send(method: string, url: URL, options: { body?: string; depth?: '0' | '1'; headers?: Record<string, string>;
     follow?: boolean; type?: string } = {}): Promise<DavResponse> {
     const target = caldavTarget(url.toString(), this.allowPrivate);
-    const headers: Record<string, string> = { Authorization: this.authorization, 'User-Agent': 'NBase-CalDAV/1.0', ...options.headers };
+    const headers: Record<string, string> = { ...(this.authorization ? { Authorization: this.authorization } : {}), 'User-Agent': 'NBase-CalDAV/1.0',
+      ...options.headers };
     if (options.depth !== undefined) headers.Depth = options.depth;
     if (options.body !== undefined) headers['Content-Type'] = options.type ?? 'application/xml; charset=utf-8';
     let response: DavResponse;
@@ -198,6 +210,7 @@ export class CalDavClient {
         followRedirects: options.follow ?? (method === 'PROPFIND' || method === 'REPORT') });
     } catch (error) { throw new CalDavError(davErrorCode(error)); }
     if (response.status === 401) throw new CalDavError('AUTH_FAILED');
+    this.options.inspect?.(response);
     return response;
   }
 
@@ -364,7 +377,8 @@ export class CalDavClient {
   }
 
   async put(href: string, text: string, condition: { ifMatch: string } | { ifNoneMatch: '*' }): Promise<WriteResult> {
-    const headers = 'ifMatch' in condition ? { 'If-Match': condition.ifMatch } : { 'If-None-Match': '*' };
+    const headers: Record<string, string> = 'ifMatch' in condition ? { 'If-Match': condition.ifMatch }
+      : this.options.createCondition === false ? {} : { 'If-None-Match': '*' };
     const response = await this.send('PUT', new URL(href), { body: text, headers, type: 'text/calendar; charset=utf-8', follow: false });
     return { status: response.status, etag: headerText(response.headers, 'etag') };
   }

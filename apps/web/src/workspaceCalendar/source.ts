@@ -1,11 +1,13 @@
 import type { CalDavAccount, CalDavDiscoverRequest, CalDavDiscoverResponse, CalendarConflictChoice, CalendarDatabaseOption,
   CalendarEventsResponse, CalendarImportRequest, CalendarImportResponse, CalendarSettings, CalendarSyncConflictsResponse,
-  CalendarSyncListResponse, CalendarSyncSource, CreateCalDavSourceRequest, CreateCalendarSubscriptionRequest,
-  ResolveCalendarConflictResponse, UpdateCalendarSyncRequest } from '@nbase/contracts';
+  CalendarSyncListResponse, CalendarSyncSource, CreateCalDavSourceRequest, CreateCalendarSourcesResponse, CreateCalendarSubscriptionRequest,
+  CreateOAuthSourceRequest,
+  OAuthAppsResponse, OAuthFlowResponse, OAuthProvider, PutGoogleOAuthAppRequest, PutMicrosoftOAuthAppRequest,
+  ResolveCalendarConflictResponse, StartOAuthRequest, StartOAuthResponse, UpdateCalendarSyncRequest } from '@nbase/contracts';
 
 export interface RowDateWrite { rowId: string; propertyId: string; value: string; expectedRevision: string }
 
-/** Import, subscription and CalDAV endpoints; only a persistent workspace has them. */
+/** Import, subscription, CalDAV and OAuth endpoints; only a persistent workspace has them. */
 export interface CalendarSyncApi {
   list(signal?: AbortSignal): Promise<CalendarSyncListResponse>;
   importIcs(body: CalendarImportRequest): Promise<CalendarImportResponse>;
@@ -15,12 +17,26 @@ export interface CalendarSyncApi {
   remove(id: string): Promise<void>;
   /** Signs in and lists the account's calendars; nothing is stored. */
   discoverCaldav(body: CalDavDiscoverRequest): Promise<CalDavDiscoverResponse>;
-  /** Creates the database and the CalDAV source; a retry with the same `clientMutationId` returns the first result. */
-  createCaldav(body: CreateCalDavSourceRequest): Promise<CalendarSyncSource>;
+  /** Creates a database and a CalDAV source per chosen calendar; a retry with the same `clientMutationId` returns the first result. */
+  createCaldav(body: CreateCalDavSourceRequest): Promise<CreateCalendarSourcesResponse>;
   /** Replaces the stored account name and password of a CalDAV source; the server checks them first. */
   updateCredentials(id: string, credentials: CalDavAccount): Promise<CalendarSyncSource>;
   conflicts(id: string, signal?: AbortSignal): Promise<CalendarSyncConflictsResponse>;
   resolveConflict(id: string, rowId: string, choice: CalendarConflictChoice): Promise<ResolveCalendarConflictResponse>;
+  /** The workspace's Google and Microsoft OAuth apps, without secrets. */
+  oauthApps(signal?: AbortSignal): Promise<OAuthAppsResponse>;
+  putGoogleApp(body: PutGoogleOAuthAppRequest): Promise<OAuthAppsResponse>;
+  putMicrosoftApp(body: PutMicrosoftOAuthAppRequest): Promise<OAuthAppsResponse>;
+  /** Rejects with 409 OAUTH_APP_IN_USE while a source uses the app. */
+  deleteOAuthApp(provider: OAuthProvider): Promise<void>;
+  /** Starts a new-source flow, or re-authorizes the source given by `sourceId`. */
+  startOAuth(body: StartOAuthRequest): Promise<StartOAuthResponse>;
+  /** 404 once the flow is gone (expired, used up, or started by someone else). */
+  oauthFlow(flowId: string, signal?: AbortSignal): Promise<OAuthFlowResponse>;
+  /** Uses up a ready flow for one source per chosen calendar; a retry with the same `clientMutationId` returns the first result. */
+  createOAuthSource(body: CreateOAuthSourceRequest): Promise<CreateCalendarSourcesResponse>;
+  /** Puts a database made by a sync back into the page tree, search and graph. */
+  reveal(databaseId: string): Promise<void>;
 }
 
 /**

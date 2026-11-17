@@ -16,6 +16,12 @@ export const calendarSyncIntervals = [15, 30, 60, 180, 360, 720, 1440] as const;
 export const calendarImportByteLimit = 10 * 1024 * 1024;
 /** Events one import or subscription may hold. */
 export const calendarEventLimit = 10000;
+/** Colors sources get by default, by the database's position in GET /calendar/sources. */
+export const calendarPalette: readonly OptionColor[] = ['blue', 'green', 'orange', 'purple', 'pink', 'yellow', 'brown', 'red', 'gray', 'default'];
+
+export function calendarPaletteColor(index: number): OptionColor {
+  return calendarPalette[((index % calendarPalette.length) + calendarPalette.length) % calendarPalette.length]!;
+}
 
 export interface CalendarDateProperty { id: string; name: string; type: Extract<PropertyType, 'date' | 'created_time' | 'updated_time'> }
 
@@ -25,6 +31,11 @@ export interface CalendarDatabaseOption {
   icon: string | null;
   dateProperties: CalendarDateProperty[];
   sync: CalendarSyncSource | null;
+  /**
+   * Made by an import or a sync source and kept out of the page tree, also after syncing stopped.
+   * POST /calendar/databases/:id/reveal makes it an ordinary database.
+   */
+  hidden: boolean;
 }
 
 /** GET /calendar/sources: databases that have a date-like property, at most 200. */
@@ -43,9 +54,37 @@ export interface CalendarSettings {
   showDailyNotes: boolean;
   /** Where events created on the workspace calendar go. */
   defaultDatabaseId: string | null;
+  /**
+   * Databases with a date property that `sources` does not list join with their defaults (absent means true).
+   * GET /settings answers with them included; a database switched off keeps an entry with `visible: false`.
+   */
+  autoAdd?: boolean;
 }
 
 export const defaultCalendarSettings: CalendarSettings = { sources: [], showDailyNotes: true, defaultDatabaseId: null };
+
+/** The entry a database gets when it joins: its first `date` property (else the first date-like one), the color of its position. */
+export function defaultCalendarSource(databaseId: string, properties: readonly CalendarDateProperty[], index: number): CalendarSourceSetting | null {
+  const property = properties.find(p => p.type === 'date') ?? properties[0];
+  return property ? { databaseId, propertyId: property.id, color: calendarPaletteColor(index), visible: true } : null;
+}
+
+/**
+ * The settings GET /calendar/settings answers with: unless `autoAdd` is false, `databases` (in the order of
+ * GET /calendar/sources) that `sources` does not mention are added with their defaults. Returns `settings` itself when none is.
+ */
+export function withAutoAddedSources(settings: CalendarSettings,
+  databases: readonly Pick<CalendarDatabaseOption, 'databaseId' | 'dateProperties'>[]): CalendarSettings {
+  if (settings.autoAdd === false) return settings;
+  const known = new Set(settings.sources.map(source => source.databaseId));
+  const sources = [...settings.sources];
+  databases.forEach((database, index) => {
+    if (known.has(database.databaseId) || sources.length >= calendarSourceLimit) return;
+    const added = defaultCalendarSource(database.databaseId, database.dateProperties, index);
+    if (added) sources.push(added);
+  });
+  return sources.length === settings.sources.length ? settings : { ...settings, sources };
+}
 
 export interface CalendarReaderContext { timeZone?: string; weekStart?: 0 | 1 }
 
@@ -94,13 +133,19 @@ export interface CalendarRemindersResponse { items: CalendarReminderItem[] }
 
 /**
  * `ics-file`: imported once, fields stay editable. `ics-url`: fetched on a schedule, synced fields are read-only.
- * `caldav`: one external CalDAV calendar, synced both ways on a schedule; see CalendarCaldavInfo.
+ * `caldav`: one external calendar, synced both ways on a schedule; see CalendarCaldavInfo. `provider` there tells the
+ * protocol: CalDAV with a password, Google (CalDAV with OAuth) or Microsoft (Graph with OAuth). All behave alike.
  */
 export const calendarSyncKinds = ['ics-file', 'ics-url', 'caldav'] as const;
 export type CalendarSyncKind = typeof calendarSyncKinds[number];
 
+/**
+ * OAUTH_APP_MISSING: the workspace's OAuth app for the source's provider was removed. AUTH_FAILED on an OAuth source
+ * means re-authorize. API_DISABLED: the Google project has not enabled the CalDAV API or the Google Calendar API.
+ */
 export const calendarSyncErrors = ['URL_INVALID', 'URL_BLOCKED', 'FETCH_FAILED', 'NOT_CALENDAR', 'TOO_LARGE', 'PARSE_FAILED',
-  'ROW_LIMIT', 'DISABLED', 'AUTH_FAILED', 'CREDENTIALS_UNAVAILABLE', 'CALENDAR_NOT_FOUND', 'NOT_CALDAV'] as const;
+  'ROW_LIMIT', 'DISABLED', 'AUTH_FAILED', 'CREDENTIALS_UNAVAILABLE', 'CALENDAR_NOT_FOUND', 'NOT_CALDAV', 'OAUTH_APP_MISSING',
+  'API_DISABLED'] as const;
 export type CalendarSyncError = typeof calendarSyncErrors[number];
 
 /** `pushed` counts events a CalDAV run created, changed or deleted on the external calendar. */
@@ -148,16 +193,27 @@ export interface CalendarSyncSource {
   readOnlyRowIds?: string[];
 }
 
-/** What a CalDAV source shows. The account name and password are stored encrypted and never returned. */
+/** What a two-way source shows. Passwords and tokens are stored encrypted and never returned. */
 export interface CalendarCaldavInfo {
+  provider: CalendarAccountProvider;
+  /** Account e-mail of an OAuth source when the provider reports one; null for `caldav`. */
+  account: string | null;
   serverHost: string;
   calendarName: string;
   /** False when the external calendar refuses writes: the source then behaves like a subscription. */
   writable: boolean;
-  /** False when the stored credentials cannot be decrypted (no key, or a different key); re-enter them with PATCH. */
+  /**
+   * False when the stored credentials cannot be decrypted (no key, or a different key): re-enter them with PATCH
+   * for `caldav`, or authorize again (POST /calendar/oauth/start with `sourceId`) for OAuth providers.
+   */
   credentialsOk: boolean;
   /** Open conflicts; see GET /calendar/sync/:id/conflicts. */
   conflictCount: number;
+  /**
+   * The workspace's aggregate calendar: ordinary databases shown on the workspace calendar of the user who turned it
+   * on also sync here, both ways. At most one source per workspace; only writable calendars.
+   */
+  aggregate: boolean;
 }
 
 /** GET /calendar/sync */
@@ -186,11 +242,13 @@ export interface CreateCalendarSubscriptionRequest {
 }
 
 /**
- * PATCH /calendar/sync/:id. `url` is for subscriptions, `credentials` for CalDAV sources (checked against the
+ * PATCH /calendar/sync/:id. `url` is for subscriptions, `credentials` for `caldav`-provider sources (checked against the
  * server before they are stored). POST /calendar/sync/:id/run syncs now. DELETE stops syncing, unlocks the
  * fields and deletes stored credentials; the database stays and the external calendar is not touched.
  */
-export interface UpdateCalendarSyncRequest { name?: string; intervalMinutes?: number; url?: string; credentials?: CalDavAccount }
+export interface UpdateCalendarSyncRequest { name?: string; intervalMinutes?: number; url?: string; credentials?: CalDavAccount;
+  /** `caldav` sources with a writable calendar: makes this the aggregate calendar (for the caller's sources), or stops it. */
+  aggregate?: boolean }
 
 // ---------------------------------------------------------------------------------------------------------
 // CalDAV
@@ -222,15 +280,109 @@ export interface CalDavCalendarOption {
 
 export interface CalDavDiscoverResponse { calendars: CalDavCalendarOption[] }
 
+/** At most this many calendars are connected by one request. */
+export const calendarConnectLimit = 20;
+
+/** One calendar to connect and the name of the database it gets. */
+export interface CalendarConnectChoice {
+  /** One of the calendars discovery (or the OAuth flow) lists, passed back unchanged. */
+  calendarUrl: string;
+  name: string;
+}
+
 /**
- * POST /calendar/caldav: creates the database and the source, stores the credentials encrypted, then syncs in
- * the background. `calendarUrl` must be one of the calendars discovery lists for this account.
+ * POST /calendar/caldav: each chosen calendar gets its own database and source; all are created or none. The
+ * credentials are stored encrypted, then the sources sync in the background.
  */
 export interface CreateCalDavSourceRequest extends CalDavDiscoverRequest {
   clientMutationId: string;
-  calendarUrl: string;
-  name: string;
+  /** Distinct calendars, 1 to calendarConnectLimit. */
+  calendars: CalendarConnectChoice[];
   parentId: string | null;
+  intervalMinutes: number;
+}
+
+/** POST /calendar/caldav and POST /calendar/oauth/sources answer 201 with the new sources in request order. */
+export interface CreateCalendarSourcesResponse { sources: CalendarSyncSource[] }
+
+// ---------------------------------------------------------------------------------------------------------
+// OAuth accounts (三期): Google through its CalDAV API, Microsoft through Microsoft Graph. Each workspace registers
+// its own OAuth app with the provider; see docs/architecture/calendar.md.
+
+export const oauthProviders = ['google', 'microsoft'] as const;
+export type OAuthProvider = typeof oauthProviders[number];
+export type CalendarAccountProvider = 'caldav' | OAuthProvider;
+
+/** Path of the Google redirect URI under NBASE_PUBLIC_ORIGIN; not under a workspace. */
+export const googleOAuthCallbackPath = '/api/calendar/oauth/google/callback';
+
+/** GET /calendar/oauth/apps: the workspace's OAuth apps. Client secrets are never returned. */
+export interface OAuthAppsResponse {
+  /** The redirect URI to register for the Google client: NBASE_PUBLIC_ORIGIN + googleOAuthCallbackPath. */
+  googleRedirectUri: string;
+  /**
+   * `secretUnavailable` when the saved client secret does not open with the current credential key (the key was
+   * replaced): the app has to be saved again before it can be used, and starting a flow answers OAUTH_APP_MISSING.
+   */
+  google: { clientId: string; secretUnavailable?: true } | null;
+  microsoft: { clientId: string; tenant: string } | null;
+}
+
+/** PUT /calendar/oauth/apps/google, from the client JSON Google offers for download (`web` or `installed`). */
+export interface PutGoogleOAuthAppRequest { clientId: string; clientSecret: string }
+
+/**
+ * PUT /calendar/oauth/apps/microsoft: a public client that allows the device code flow. `tenant` is `common`,
+ * `consumers`, `organizations`, a tenant GUID or a tenant domain name.
+ */
+export interface PutMicrosoftOAuthAppRequest { clientId: string; tenant: string }
+
+/** Both PUTs answer with the new OAuthAppsResponse. DELETE /calendar/oauth/apps/:provider answers 204, or 409 OAUTH_APP_IN_USE. */
+
+/**
+ * POST /calendar/oauth/start. Without `sourceId` the flow ends with the account's calendars, for
+ * POST /calendar/oauth/sources. With `sourceId` (an OAuth source of the same provider) it re-authorizes that
+ * source: the new tokens replace the stored ones when the account is the same.
+ */
+export interface StartOAuthRequest { provider: OAuthProvider; sourceId?: string }
+
+/** Google: open `authorizeUrl` in a new tab. Microsoft: show `userCode` and a link to `verificationUri`. Then poll the flow. */
+export type StartOAuthResponse =
+  | { flowId: string; provider: 'google'; authorizeUrl: string; expiresAt: string }
+  | { flowId: string; provider: 'microsoft'; userCode: string; verificationUri: string; expiresAt: string; intervalSeconds: number };
+
+/**
+ * Why a flow failed. OAUTH_DENIED: the user declined. OAUTH_EXPIRED: not finished in time. ACCOUNT_MISMATCH:
+ * re-authorization signed in to another account. OAUTH_FAILED: the provider refused the app or the code
+ * (wrong client secret, redirect URI not registered, public client flows not allowed). OAUTH_DENIED also covers a
+ * Google consent that left out the calendar permission. API_DISABLED: as for sources.
+ */
+export const oauthFlowErrors = ['OAUTH_DENIED', 'OAUTH_EXPIRED', 'OAUTH_FAILED', 'ACCOUNT_MISMATCH', 'FETCH_FAILED', 'API_DISABLED'] as const;
+export type OAuthFlowError = typeof oauthFlowErrors[number];
+
+/**
+ * GET /calendar/oauth/flows/:flowId, by the user who started it. A pending Microsoft flow asks the token
+ * endpoint at most once per interval when this is read. Flows last 15 minutes.
+ */
+export interface OAuthFlowResponse {
+  status: 'pending' | 'ready' | 'failed';
+  error: OAuthFlowError | null;
+  account: string | null;
+  /** Ready new-source flows: the account's event calendars, as discovery lists them for CalDAV. */
+  calendars: CalDavCalendarOption[];
+  /** Ready re-authorization flows: the updated source, which syncs right away. */
+  source: CalendarSyncSource | null;
+}
+
+/**
+ * POST /calendar/oauth/sources: from a ready new-source flow, which is used up, each chosen calendar gets its own
+ * database and source, all or none; then they sync in the background. Answers like POST /calendar/caldav.
+ */
+export interface CreateOAuthSourceRequest {
+  clientMutationId: string;
+  flowId: string;
+  /** Distinct calendars from the flow's `calendars`, 1 to calendarConnectLimit. */
+  calendars: CalendarConnectChoice[];
   intervalMinutes: number;
 }
 
@@ -292,7 +444,8 @@ export function isCalendarReaderContext(value: unknown): value is CalendarReader
 }
 
 export function isCalendarSettings(value: unknown): value is CalendarSettings {
-  if (!isRecord(value) || !hasOnly(value, ['sources', 'showDailyNotes', 'defaultDatabaseId'])) return false;
+  if (!isRecord(value) || !hasOnly(value, ['sources', 'showDailyNotes', 'defaultDatabaseId', 'autoAdd'])) return false;
+  if (value.autoAdd !== undefined && typeof value.autoAdd !== 'boolean') return false;
   if (!Array.isArray(value.sources) || value.sources.length > calendarSourceLimit || typeof value.showDailyNotes !== 'boolean') return false;
   if (value.defaultDatabaseId !== null && !isDatabaseId(value.defaultDatabaseId)) return false;
   const keys = new Set<string>();
@@ -344,8 +497,9 @@ export function isCreateCalendarSubscriptionRequest(value: unknown): value is Cr
 }
 
 export function isUpdateCalendarSyncRequest(value: unknown): value is UpdateCalendarSyncRequest {
-  if (!isRecord(value) || !hasOnly(value, ['name', 'intervalMinutes', 'url', 'credentials']) || Object.keys(value).length === 0) return false;
+  if (!isRecord(value) || !hasOnly(value, ['name', 'intervalMinutes', 'url', 'credentials', 'aggregate']) || Object.keys(value).length === 0) return false;
   return (value.name === undefined || isName(value.name))
+    && (value.aggregate === undefined || typeof value.aggregate === 'boolean')
     && (value.intervalMinutes === undefined || (calendarSyncIntervals as readonly unknown[]).includes(value.intervalMinutes))
     && (value.url === undefined || isSyncUrl(value.url))
     && (value.credentials === undefined || isCalDavAccount(value.credentials, true));
@@ -372,11 +526,54 @@ export function isCalDavDiscoverRequest(value: unknown): value is CalDavDiscover
     && isCalDavAccount(value, false);
 }
 
+function isConnectChoices(value: unknown, scheme: RegExp): value is CalendarConnectChoice[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > calendarConnectLimit) return false;
+  const urls = new Set<string>();
+  for (const choice of value) {
+    if (!isRecord(choice) || !hasOnly(choice, ['calendarUrl', 'name']) || !isName(choice.name)) return false;
+    const url = choice.calendarUrl;
+    if (typeof url !== 'string' || !scheme.test(url) || url.length > 2000 || urls.has(url)) return false;
+    urls.add(url);
+  }
+  return true;
+}
+
 export function isCreateCalDavSourceRequest(value: unknown): value is CreateCalDavSourceRequest {
-  return isRecord(value) && hasOnly(value, ['clientMutationId', 'serverUrl', 'username', 'password', 'calendarUrl', 'name', 'parentId',
+  return isRecord(value) && hasOnly(value, ['clientMutationId', 'serverUrl', 'username', 'password', 'calendars', 'parentId',
     'intervalMinutes']) && isDatabaseId(value.clientMutationId) && isCalDavServerUrl(value.serverUrl) && isCalDavAccount(value, false)
-    && typeof value.calendarUrl === 'string' && /^https?:\/\//i.test(value.calendarUrl) && value.calendarUrl.length <= 2000
-    && isName(value.name) && (value.parentId === null || isDatabaseId(value.parentId))
+    && isConnectChoices(value.calendars, /^https?:\/\//i) && (value.parentId === null || isDatabaseId(value.parentId))
+    && (calendarSyncIntervals as readonly unknown[]).includes(value.intervalMinutes);
+}
+
+/** Google client IDs end in .apps.googleusercontent.com; checked loosely so other client forms still pass. */
+function isClientId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9._-]{8,256}$/.test(value);
+}
+
+const guidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isMicrosoftTenant(value: unknown): value is string {
+  return typeof value === 'string' && (['common', 'consumers', 'organizations'].includes(value) || guidPattern.test(value)
+    || (/^(?=.{3,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(value)));
+}
+
+export function isPutGoogleOAuthAppRequest(value: unknown): value is PutGoogleOAuthAppRequest {
+  return isRecord(value) && hasOnly(value, ['clientId', 'clientSecret']) && isClientId(value.clientId) && isSecretText(value.clientSecret, 256);
+}
+
+export function isPutMicrosoftOAuthAppRequest(value: unknown): value is PutMicrosoftOAuthAppRequest {
+  return isRecord(value) && hasOnly(value, ['clientId', 'tenant']) && typeof value.clientId === 'string' && guidPattern.test(value.clientId)
+    && isMicrosoftTenant(value.tenant);
+}
+
+export function isStartOAuthRequest(value: unknown): value is StartOAuthRequest {
+  return isRecord(value) && hasOnly(value, ['provider', 'sourceId']) && (oauthProviders as readonly unknown[]).includes(value.provider)
+    && (value.sourceId === undefined || isDatabaseId(value.sourceId));
+}
+
+export function isCreateOAuthSourceRequest(value: unknown): value is CreateOAuthSourceRequest {
+  return isRecord(value) && hasOnly(value, ['clientMutationId', 'flowId', 'calendars', 'intervalMinutes'])
+    && isDatabaseId(value.clientMutationId) && isDatabaseId(value.flowId) && isConnectChoices(value.calendars, /^https:\/\//i)
     && (calendarSyncIntervals as readonly unknown[]).includes(value.intervalMinutes);
 }
 

@@ -54,9 +54,10 @@ type Pinned = { address: string; family: 4 | 6 };
 
 /**
  * Which addresses a request may reach. `public`: public addresses only. `private`: any address, but plain
- * http only toward loopback and private addresses, since requests may carry a password.
+ * http only toward loopback and private addresses, since requests may carry a password. `any`: no address check,
+ * for fixed provider hosts that the `target` check allows by name (a local proxy may resolve them to 198.18.0.0/15).
  */
-export type AddressPolicy = 'public' | 'private';
+export type AddressPolicy = 'public' | 'private' | 'any';
 
 /** Resolves once and pins the connection to the checked address, so DNS rebinding cannot swap it. */
 async function resolveTarget(url: URL, policy: AddressPolicy): Promise<Pinned> {
@@ -64,6 +65,7 @@ async function resolveTarget(url: URL, policy: AddressPolicy): Promise<Pinned> {
   const addresses = isIP(host) ? [{ address: host, family: isIP(host) as 4 | 6 }]
     : await lookup(host, { all: true, verbatim: true }).catch(() => { throw new GuardedFetchError('FETCH_FAILED'); });
   if (!addresses.length) throw new GuardedFetchError('URL_BLOCKED');
+  if (policy === 'any') return addresses[0] as Pinned;
   if (policy === 'public') {
     if (addresses.some(item => isBlockedAddress(item.address))) throw new GuardedFetchError('URL_BLOCKED');
   } else if (url.protocol === 'http:' && addresses.some(item => !isBlockedAddress(item.address))) {

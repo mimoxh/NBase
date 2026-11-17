@@ -1,7 +1,8 @@
+import { useState } from 'react';
 import { optionColors, type CalendarDatabaseOption, type CalendarSettings, type OptionColor } from '@nbase/contracts';
-import { creationTarget, defaultColorFor, defaultsForDatabase, optionColorLabels, setDefaultDatabase,
+import { creationTarget, defaultColorFor, defaultsForDatabase, optionColorLabels, setAutoAdd, setDefaultDatabase,
   setShowDailyNotes, upsertSource } from './settings';
-import { syncKindLabels } from './syncText';
+import { syncSourceLabel } from './syncText';
 
 const propertyLabel = (property: CalendarDatabaseOption['dateProperties'][number]) =>
   `${property.name}${property.type === 'created_time' ? '（创建时间）' : property.type === 'updated_time' ? '（更新时间）' : ''}`;
@@ -11,24 +12,36 @@ const hasWritableDate = (db: CalendarDatabaseOption) =>
 
 export function syncBadge(db: Pick<CalendarDatabaseOption, 'sync'>): string | null {
   if (!db.sync) return null;
-  const kind = syncKindLabels[db.sync.kind];
+  const kind = syncSourceLabel(db.sync);
   if (db.sync.kind === 'ics-file') return kind;
   const conflicts = db.sync.caldav?.conflictCount ? ` · ${db.sync.caldav.conflictCount} 个冲突` : '';
   return db.sync.status === 'running' ? `${kind} · 同步中` : db.sync.status === 'error' ? `${kind} · 失败` : `${kind}${conflicts}`;
 }
 
-/** Source toggles, property and color choices, and the default database for new events. */
-export function SourcesPanel({ databases, settings, canWrite, onChange }: {
+/**
+ * Source toggles, property and color choices, the default database for new events, and a way back into the
+ * page tree for databases a sync made and left behind.
+ */
+export function SourcesPanel({ databases, settings, canWrite, onChange, onReveal }: {
   databases: readonly CalendarDatabaseOption[];
   settings: CalendarSettings;
   canWrite: boolean;
   onChange: (next: CalendarSettings) => void;
+  onReveal?: (databaseId: string) => Promise<void>;
 }) {
+  const [revealing, setRevealing] = useState<string | null>(null);
   const target = creationTarget(databases, settings);
   const writable = databases.filter(hasWritableDate);
+  const reveal = (databaseId: string) => {
+    if (!onReveal || revealing) return;
+    setRevealing(databaseId);
+    void onReveal(databaseId).finally(() => setRevealing(null));
+  };
   return <div className="nb-wcal-sources">
     <label className="nb-wcal-daily"><input type="checkbox" checked={settings.showDailyNotes}
       onChange={event => onChange(setShowDailyNotes(settings, event.target.checked))} />显示每日笔记</label>
+    <label className="nb-wcal-daily"><input type="checkbox" checked={settings.autoAdd !== false}
+      onChange={event => onChange(setAutoAdd(settings, event.target.checked))} />新数据库自动显示</label>
     {!databases.length && <p className="dialog-description">工作区里还没有带日期字段的数据库。</p>}
     {databases.map((db, index) => {
       const setting = settings.sources.find(s => s.databaseId === db.databaseId) ?? null;
@@ -44,6 +57,11 @@ export function SourcesPanel({ databases, settings, canWrite, onChange }: {
           <span className="nb-wcal-source-title">{db.title || '未命名数据库'}</span>
           {badge && <span className={`nb-wcal-sync-badge ${db.sync!.status}`}>{badge}</span>}
         </label>
+        {db.hidden && !db.sync && canWrite && onReveal && <div className="nb-wcal-source-body nb-wcal-source-reveal">
+          <span className="nb-wcal-muted">同步已停止，仍未显示在页面树</span>
+          <button className="nb-btn nb-btn-quiet" disabled={revealing !== null} onClick={() => reveal(db.databaseId)}>
+            {revealing === db.databaseId ? '正在显示…' : '显示到页面树'}</button>
+        </div>}
         {visible && <div className="nb-wcal-source-body">
           <select className="select-field" aria-label={`${db.title || '未命名数据库'}的日期字段`} value={propertyId}
             onChange={event => patch({ propertyId: event.target.value })}>

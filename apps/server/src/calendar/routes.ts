@@ -1,13 +1,14 @@
 import { randomUUID } from 'node:crypto';
-import { calendarImportByteLimit, calendarSourceRowCap, defaultCalendarSettings, isCalendarEventsRequest, isCalendarImportRequest,
+import { calendarImportByteLimit, calendarSourceRowCap, isCalendarEventsRequest, isCalendarImportRequest,
   isCalendarRemindersRequest, isCalendarSettings, isCreateCalendarSubscriptionRequest, isUpdateCalendarSyncRequest, parseDateCell,
   isCalDavDiscoverRequest, isCreateCalDavSourceRequest, isResolveCalendarConflictRequest,
   type CalDavAccount, type CalDavCalendarOption, type CalDavDiscoverResponse, type CalendarSyncConflictsResponse,
+  type CreateCalendarSourcesResponse,
   type ResolveCalendarConflictResponse,
-  dateCellLimits, dateCellReminders, shiftCalendarDay, activeProperties, isCalendarProperty,
-  type CalendarDatabaseOption, type CalendarDateProperty, type CalendarEventItem, type CalendarEventsResponse, type CalendarImportRequest,
+  dateCellLimits, dateCellReminders, shiftCalendarDay,
+  type CalendarDatabaseOption, type CalendarEventItem, type CalendarEventsResponse, type CalendarImportRequest,
   type CalendarImportResponse, type CalendarReminderItem, type CalendarRemindersResponse, type CalendarSettings, type CalendarSourcesResponse,
-  type CalendarSyncListResponse, type CalendarSyncSource, type PropertyDefinition } from '@nbase/contracts';
+  type CalendarSyncListResponse, type CalendarSyncSource } from '@nbase/contracts';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { Pool, PoolClient } from 'pg';
 import type { AuthRepository } from '../auth/repository.js';
@@ -17,13 +18,20 @@ import { calendarRead, readCalendarRanges, resolveZone } from '../databases/quer
 import { isUuid, PageError, type PgPageRepository } from '../pages/repository.js';
 import { sendError } from '../pages/routes.js';
 import { sealCredentials, type CredentialKey } from '../secrets/credentials.js';
-import { CalDavClient, CalDavError, caldavServerUrl, guardedDavTransport, hrefKey, type DavTransport } from './caldav/client.js';
+import { CalDavClient, CalDavError, caldavServerUrl, guardedDavTransport, type DavTransport } from './caldav/client.js';
 import { listConflicts, resolveConflict } from './caldav/sync.js';
 import { CalendarFetchError, subscriptionUrl, type CalendarFetcher } from './fetch.js';
 import { IcsError, parseIcs } from './ics.js';
+import { registerOAuthRoutes } from './oauth/routes.js';
+import { oauthTokens, type OAuthTokens } from './oauth/tokens.js';
+import { providerTransport } from './oauth/transport.js';
+import type { HttpTransport } from './remote.js';
 import { CalendarScheduler } from './scheduler.js';
-import { attendeeRowIds, CalendarRouteError, claimSource, createSyncDatabase, finishSource, insertSource, readOnlyPropertyIds, sourceColumns,
-  sourceForDatabase, staleClaim, toSyncSource, withWorkspaceLock, type CaldavConfig, type SourceRow } from './sources.js';
+import { caldavPushDelaySeconds } from './locks.js';
+import { dateProperties, listCalendarDatabases, loadEffectiveSettings } from './settings.js';
+import { attendeeRowIds, calendarKey, CalendarRouteError, chosenCalendars, claimSource, createSyncDatabase, finishSource, insertSource,
+  readOnlyPropertyIds, sourceColumns, sourceForDatabase, sourceMutationId, staleClaim, toSyncSource, withWorkspaceLock, type CaldavConfig,
+  type SourceRow } from './sources.js';
 import { applyEvents, SyncFailure } from './sync.js';
 
 interface WorkspaceParams { workspaceId: string }
@@ -41,31 +49,22 @@ export interface CalendarOptions {
   caldavPrivate?: boolean;
   /** Replaces the guarded CalDAV transport; for tests. */
   caldavTransport?: DavTransport;
+  /** Replaces the transport of Google and Microsoft requests; for tests. */
+  oauthTransport?: HttpTransport;
+  /** Access tokens of OAuth sources; defaults to the process-wide cache. */
+  oauthTokens?: OAuthTokens;
 }
 
 /** Calendar collection addresses compare equal however the server encodes them, with or without the final slash. */
 function sameCalendar(a: string, b: string): boolean {
-  return hrefKey(a).replace(/\/+$/, '') === hrefKey(b).replace(/\/+$/, '');
+  return calendarKey(a) === calendarKey(b);
 }
 
-const sourceListLimit = 200;
 const reminderItemLimit = 500;
 /** Rows a reminder scan reads at most; the window is two days, so this is far above any real calendar. */
 const reminderRowLimit = 5000;
 
 function requestError(): never { throw new WorkspaceRouteError(400, 'INVALID_REQUEST'); }
-
-async function loadSettings(db: Pick<Pool, 'query'>, workspaceId: string, userId: string): Promise<CalendarSettings> {
-  const result = await db.query<{ settings_json: unknown }>('SELECT settings_json FROM calendar_settings WHERE workspace_id = $1 AND user_id = $2',
-    [workspaceId, userId]);
-  const stored = result.rows[0]?.settings_json;
-  return isCalendarSettings(stored) ? stored : defaultCalendarSettings;
-}
-
-function dateProperties(properties: PropertyDefinition[]): CalendarDateProperty[] {
-  return activeProperties(properties).filter(isCalendarProperty)
-    .map(p => ({ id: p.id, name: p.name, type: p.type as CalendarDateProperty['type'] }));
-}
 
 async function releaseSource(pool: Pool, sourceId: string): Promise<void> {
   await pool.query(`UPDATE calendar_sync_sources SET status = CASE WHEN last_error IS NULL THEN 'idle' ELSE 'error' END,
@@ -78,8 +77,10 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
   const credentialKey = options.credentialKey ?? null;
   const caldavPrivate = options.caldavPrivate ?? false;
   const view = { keyId: credentialKey?.id ?? null };
+  const tokens = options.oauthTokens ?? oauthTokens;
   const scheduler = new CalendarScheduler(pool, pages, { fetchEnabled: options.fetchEnabled, ...(options.fetcher ? { fetcher: options.fetcher } : {}),
     credentialKey, caldavPrivate, ...(options.caldavTransport ? { caldavTransport: options.caldavTransport } : {}),
+    ...(options.oauthTransport ? { oauthTransport: options.oauthTransport } : {}), oauthTokens: tokens,
     log: (message, details) => app.log.warn(details, message) }, error => app.log.error({ err: error }, 'calendar scheduler failed'));
   const autoRun = options.scheduler ?? true;
   if (autoRun) scheduler.start();
@@ -113,18 +114,13 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
     try {
       const { workspaceId } = request.params;
       await authorize(request, workspaceId, false);
-      const databases = await pool.query<{ page_id: string; title: string; icon: string | null; properties_json: PropertyDefinition[] }>(`
-        SELECT d.page_id, p.title, p.icon, d.properties_json FROM databases d
-        JOIN pages p ON p.workspace_id = d.workspace_id AND p.id = d.page_id AND p.deleted_at IS NULL AND p.kind = 'database'
-        WHERE d.workspace_id = $1 AND EXISTS (SELECT 1 FROM jsonb_array_elements(d.properties_json) e
-          WHERE e->>'type' IN ('date', 'created_time', 'updated_time') AND COALESCE(e->>'deletedAt', '') = '')
-        ORDER BY p.title COLLATE nbase_zh, p.id LIMIT $2`, [workspaceId, sourceListLimit]);
+      const databases = await listCalendarDatabases(pool, workspaceId);
       const sources = await pool.query<SourceRow>(`SELECT ${sourceColumns} FROM calendar_sync_sources s
-        WHERE s.workspace_id = $1 AND s.database_id = ANY($2::uuid[])`, [workspaceId, databases.rows.map(row => row.page_id)]);
+        WHERE s.workspace_id = $1 AND s.database_id = ANY($2::uuid[])`, [workspaceId, databases.map(row => row.page_id)]);
       const byDatabase = new Map(sources.rows.map(row => [row.database_id, toSyncSource(row, view)]));
-      const body: CalendarSourcesResponse = { databases: databases.rows.map((row): CalendarDatabaseOption => ({
+      const body: CalendarSourcesResponse = { databases: databases.map((row): CalendarDatabaseOption => ({
         databaseId: row.page_id, title: row.title, icon: row.icon ?? null, dateProperties: dateProperties(row.properties_json),
-        sync: byDatabase.get(row.page_id) ?? null })) };
+        sync: byDatabase.get(row.page_id) ?? null, hidden: row.calendar_hidden })) };
       return reply.send(body);
     } catch (error) { return fail(request, reply, error); }
   });
@@ -134,7 +130,7 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
     try {
       const { workspaceId } = request.params;
       const actorId = await authorize(request, workspaceId, false);
-      return reply.send(await loadSettings(pool, workspaceId, actorId));
+      return reply.send(await loadEffectiveSettings(pool, workspaceId, actorId));
     } catch (error) { return fail(request, reply, error); }
   });
 
@@ -151,12 +147,17 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
           color: source.color, visible: source.visible })),
         showDailyNotes: body.showDailyNotes,
         defaultDatabaseId: body.defaultDatabaseId?.toLowerCase() ?? null,
+        ...(body.autoAdd !== undefined ? { autoAdd: body.autoAdd } : {}),
       };
       if (!isCalendarSettings(settings)) requestError();
       await pool.query(`INSERT INTO calendar_settings (workspace_id, user_id, settings_json) VALUES ($1, $2, $3::jsonb)
         ON CONFLICT (workspace_id, user_id) DO UPDATE SET settings_json = EXCLUDED.settings_json, updated_at = now()`,
       [workspaceId, actorId, JSON.stringify(settings)]);
-      return reply.send(settings);
+      // The aggregate calendar follows its user's toggles: a database switched off leaves the external calendar soon.
+      await pool.query(`UPDATE calendar_sync_sources SET next_run_at = LEAST(COALESCE(next_run_at, now() + $3 * interval '1 second'),
+          now() + $3 * interval '1 second')
+        WHERE workspace_id = $1 AND aggregate_user_id = $2`, [workspaceId, actorId, caldavPushDelaySeconds]);
+      return reply.send(await loadEffectiveSettings(pool, workspaceId, actorId));
     } catch (error) { return fail(request, reply, error); }
   });
 
@@ -167,7 +168,7 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
       const actorId = await authorize(request, workspaceId, 'post-read');
       const body = request.body;
       if (!isCalendarEventsRequest(body)) requestError();
-      const settings = await loadSettings(pool, workspaceId, actorId);
+      const settings = await loadEffectiveSettings(pool, workspaceId, actorId);
       const visible = settings.sources.filter(source => source.visible)
         .map(source => ({ databaseId: source.databaseId, propertyId: source.propertyId }));
       const read = await calendarRead(pool, async client => {
@@ -381,7 +382,10 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
           [workspaceId, id]);
         const current = found.rows[0];
         if (!current) throw new PageError(404, 'NOT_FOUND');
-        if (current.kind !== 'caldav' || !current.caldav_json) throw new CalendarRouteError(422, 'SYNC_KIND_INVALID');
+        // OAuth sources are authorized again instead (POST /calendar/oauth/start with sourceId).
+        if (current.kind !== 'caldav' || !current.caldav_json || (current.caldav_json.provider ?? 'caldav') !== 'caldav') {
+          throw new CalendarRouteError(422, 'SYNC_KIND_INVALID');
+        }
         const key = requireKey();
         const { calendars } = await discover(current.caldav_json.serverUrl, body.credentials);
         const chosen = calendars.find(calendar => sameCalendar(calendar.url, current.caldav_json!.calendarUrl));
@@ -395,7 +399,23 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
         if (!row) throw new PageError(404, 'NOT_FOUND');
         if (url !== null && row.kind !== 'ics-url') throw new CalendarRouteError(422, 'SYNC_KIND_INVALID');
         if (body.intervalMinutes !== undefined && row.kind === 'ics-file') throw new CalendarRouteError(422, 'SYNC_KIND_INVALID');
-        if (sealed && row.kind !== 'caldav') throw new CalendarRouteError(422, 'SYNC_KIND_INVALID');
+        if (sealed && (row.kind !== 'caldav' || (row.caldav_json?.provider ?? 'caldav') !== 'caldav')) {
+          throw new CalendarRouteError(422, 'SYNC_KIND_INVALID');
+        }
+        const aggregateChanged = body.aggregate !== undefined && body.aggregate !== (row.aggregate_user_id !== null);
+        if (body.aggregate !== undefined && (row.kind !== 'caldav' || (body.aggregate && !row.caldav_json?.writable))) {
+          throw new CalendarRouteError(422, 'SYNC_KIND_INVALID');
+        }
+        if (body.aggregate !== undefined) {
+          // The previous aggregate calendar runs right away too, to delete the events it no longer holds.
+          if (body.aggregate) {
+            await client.query(`UPDATE calendar_sync_sources SET aggregate_user_id = NULL, next_run_at = now(), updated_at = now()
+              WHERE workspace_id = $1 AND aggregate_user_id IS NOT NULL AND id <> $2`, [workspaceId, id]);
+          }
+          await client.query(`UPDATE calendar_sync_sources SET aggregate_user_id = $3,
+              next_run_at = CASE WHEN $4::boolean THEN now() ELSE next_run_at END, updated_at = now()
+            WHERE workspace_id = $1 AND id = $2`, [workspaceId, id, body.aggregate ? actorId : null, aggregateChanged]);
+        }
         const updated = await client.query<SourceRow>(`UPDATE calendar_sync_sources s SET name = COALESCE($3, s.name),
             interval_minutes = COALESCE($4, s.interval_minutes), url = COALESCE($5, s.url),
             http_etag = CASE WHEN $5::text IS DISTINCT FROM s.url AND $5::text IS NOT NULL THEN NULL ELSE s.http_etag END,
@@ -411,7 +431,7 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
           WHERE s.workspace_id = $1 AND s.id = $2 RETURNING ${sourceColumns}`,
         [workspaceId, id, body.name?.trim() ?? null, body.intervalMinutes ?? null, url, sealed?.cipher ?? null, sealed?.keyId ?? null,
           sealed?.writable ?? null]);
-        return { row: updated.rows[0]!, moved: (url !== null && url !== row.url) || sealed !== null };
+        return { row: updated.rows[0]!, moved: (url !== null && url !== row.url) || sealed !== null || aggregateChanged };
       });
       if (result.moved) nudge();
       return reply.send(toSyncSource(result.row, view));
@@ -448,6 +468,24 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
         const deleted = await client.query('DELETE FROM calendar_sync_sources WHERE workspace_id = $1 AND id = $2 RETURNING id', [workspaceId, id]);
         if (!deleted.rows[0]) throw new PageError(404, 'NOT_FOUND');
       });
+      tokens.invalidate(id);
+      return reply.code(204).send();
+    } catch (error) { return fail(request, reply, error); }
+  });
+
+  /** A database a calendar source made joins the page tree, search and link pickers like any other. */
+  app.post<{ Params: WorkspaceParams & { databaseId: string } }>(`${base}/databases/:databaseId/reveal`, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId } = request.params;
+      const actorId = await authorize(request, workspaceId, true);
+      const databaseId = sourceId(request.params.databaseId);
+      await withWorkspaceLock(pool, workspaceId, actorId, async client => {
+        const revealed = await client.query(`UPDATE databases d SET calendar_hidden = false FROM pages p
+          WHERE d.workspace_id = $1 AND d.page_id = $2 AND p.workspace_id = d.workspace_id AND p.id = d.page_id AND p.deleted_at IS NULL
+          RETURNING d.page_id`, [workspaceId, databaseId]);
+        if (!revealed.rows[0]) throw new PageError(404, 'NOT_FOUND');
+      });
       return reply.code(204).send();
     } catch (error) { return fail(request, reply, error); }
   });
@@ -476,9 +514,9 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
       const key = requireKey();
       // The receipt keeps a digest of the request; the password stays out of it.
       const { password: _password, ...receiptBody } = body;
-      const create = (action: (client: PoolClient) => Promise<{ statusCode: number; body: CalendarSyncSource }>) =>
-        pages.mutate<CalendarSyncSource>(workspaceId, actorId, body.clientMutationId, 'calendar-caldav', null, receiptBody, action,
-          response => response.databaseId);
+      const create = (action: (client: PoolClient) => Promise<{ statusCode: number; body: CreateCalendarSourcesResponse }>) =>
+        pages.mutate<CreateCalendarSourcesResponse>(workspaceId, actorId, body.clientMutationId, 'calendar-caldav', null, receiptBody, action,
+          response => response.sources[0]?.databaseId ?? null);
       const prior = await pool.query('SELECT 1 FROM page_mutation_receipts WHERE workspace_id = $1 AND actor_user_id = $2 AND client_mutation_id = $3',
         [workspaceId, actorId, body.clientMutationId]);
       if (prior.rows[0]) {
@@ -486,20 +524,24 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
         return reply.code(replay.statusCode).send(replay.body);
       }
       const { server, calendars } = await discover(body.serverUrl, { username: body.username, password: body.password });
-      const chosen = calendars.find(calendar => sameCalendar(calendar.url, body.calendarUrl));
-      if (!chosen) throw new CalendarRouteError(422, 'CALENDAR_NOT_FOUND');
-      const id = randomUUID();
-      const config: CaldavConfig = { serverUrl: server.toString(), calendarUrl: chosen.url, calendarName: chosen.name, writable: chosen.writable,
-        color: chosen.color };
-      const cipher = sealCredentials(key, id, { username: body.username, password: body.password });
+      const planned = chosenCalendars(calendars, body.calendars).map((chosen, index) => {
+        const id = randomUUID();
+        const config: CaldavConfig = { serverUrl: server.toString(), calendarUrl: chosen.url, calendarName: chosen.name,
+          writable: chosen.writable, color: chosen.color };
+        return { id, name: body.calendars[index]!.name.trim(), config,
+          cipher: sealCredentials(key, id, { username: body.username, password: body.password }) };
+      });
       const result = await create(async client => {
-        const name = body.name.trim();
-        const database = await createSyncDatabase(client, pages, workspaceId, actorId, body.parentId?.toLowerCase() ?? null, name,
-          body.clientMutationId);
-        const source = await insertSource(client, { id, workspaceId, databaseId: database.databaseId, kind: 'caldav', name, url: null,
-          intervalMinutes: body.intervalMinutes, fields: database.fields, actorId, clientMutationId: body.clientMutationId,
-          caldav: { config, cipher, keyId: key.id } });
-        return { statusCode: 201, body: toSyncSource(source, view) };
+        const sources: CalendarSyncSource[] = [];
+        for (const [index, { id, name, config, cipher }] of planned.entries()) {
+          const mutationId = sourceMutationId(body.clientMutationId, index);
+          const database = await createSyncDatabase(client, pages, workspaceId, actorId, body.parentId?.toLowerCase() ?? null, name, mutationId);
+          const source = await insertSource(client, { id, workspaceId, databaseId: database.databaseId, kind: 'caldav', name, url: null,
+            intervalMinutes: body.intervalMinutes, fields: database.fields, actorId, clientMutationId: mutationId,
+            caldav: { config, cipher, keyId: key.id } });
+          sources.push(toSyncSource(source, view));
+        }
+        return { statusCode: 201, body: { sources } };
       });
       nudge();
       return reply.code(result.statusCode).send(result.body);
@@ -549,6 +591,10 @@ export function registerCalendarRoutes(app: FastifyInstance, pool: Pool, pages: 
       return reply.send(response);
     } catch (error) { return fail(request, reply, error); }
   });
+
+  registerOAuthRoutes(app, { pool, pages, origin, secure, credentialKey, fetchEnabled: options.fetchEnabled,
+    transport: options.oauthTransport ?? providerTransport(), tokens, view, authorize, fail, requireKey, nudge,
+    log: (message, details) => app.log.warn(details, message) });
 
   return scheduler;
 }

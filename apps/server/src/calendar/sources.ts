@@ -1,18 +1,27 @@
-import { randomUUID } from 'node:crypto';
-import type { CalendarImportWarning, CalendarSyncCounts, CalendarSyncError, CalendarSyncFields, CalendarSyncKind,
+import { createHash, randomUUID } from 'node:crypto';
+import type { CalendarAccountProvider, CalendarImportWarning, CalendarSyncCounts, CalendarSyncError, CalendarSyncFields, CalendarSyncKind,
   CalendarSyncSource, DatabaseView, PropertyDefinition } from '@nbase/contracts';
 import type { Pool, PoolClient } from 'pg';
+import { WorkspaceRouteError } from '../auth/workspace.js';
 import { PageError, type PgPageRepository } from '../pages/repository.js';
+import { hrefKey } from './caldav/client.js';
 import { keptPropertyIds } from './locks.js';
 
 /** Errors of calendar routes that are not page errors; sent as `{ error: code }`. */
 export class CalendarRouteError extends Error {
   constructor(public readonly statusCode: number, public readonly code: CalendarSyncError | 'NOT_FOUND' | 'SYNC_RUNNING'
-    | 'SYNC_KIND_INVALID' | 'IMPORT_TARGET_INVALID' | 'CONFLICT_CHOICE_INVALID') { super(code); }
+    | 'SYNC_KIND_INVALID' | 'IMPORT_TARGET_INVALID' | 'CONFLICT_CHOICE_INVALID' | 'OAUTH_APP_IN_USE' | 'FLOW_NOT_READY'
+    | 'OAUTH_FAILED') { super(code); }
 }
 
-/** What a CalDAV source keeps in caldav_json; none of it is secret. */
+/**
+ * What a two-way source keeps in caldav_json; none of it is secret. Rows from before OAuth have no `provider`
+ * (meaning `caldav`). OAuth sources add the account e-mail and the provider's stable account id (`subject`).
+ */
 export interface CaldavConfig {
+  provider?: CalendarAccountProvider;
+  account?: string | null;
+  subject?: string;
   serverUrl: string;
   calendarUrl: string;
   calendarName: string;
@@ -43,12 +52,13 @@ export interface SourceRow {
   credential_key_id: string | null;
   sync_token: string | null;
   ctag: string | null;
+  aggregate_user_id: string | null;
   conflict_count: number;
 }
 
 export const sourceColumns = `s.id, s.workspace_id, s.database_id, s.kind, s.name, s.url, s.interval_minutes, s.fields_json, s.status,
   s.last_synced_at, s.last_error, s.last_counts_json, s.warnings_json, s.event_count, s.next_run_at, s.http_etag,
-  s.http_last_modified, s.created_by, s.caldav_json, s.credential_key_id, s.sync_token, s.ctag,
+  s.http_last_modified, s.created_by, s.caldav_json, s.credential_key_id, s.sync_token, s.ctag, s.aggregate_user_id,
   (SELECT count(*)::int FROM calendar_sync_conflicts c WHERE c.source_id = s.id) AS conflict_count`;
 
 /** A claim older than this belongs to a process that died; the source may be taken again. */
@@ -73,8 +83,10 @@ export interface SourceView {
 
 export function toSyncSource(row: SourceRow, view: SourceView = { keyId: null }): CalendarSyncSource {
   const caldav = row.kind === 'caldav' && row.caldav_json ? {
+    provider: row.caldav_json.provider ?? 'caldav', account: row.caldav_json.account ?? null,
     serverHost: urlHost(row.caldav_json.serverUrl) ?? '', calendarName: row.caldav_json.calendarName, writable: row.caldav_json.writable,
     credentialsOk: view.keyId !== null && row.credential_key_id === view.keyId, conflictCount: row.conflict_count ?? 0,
+    aggregate: (row.aggregate_user_id ?? null) !== null,
   } : null;
   return {
     id: row.id, databaseId: row.database_id, kind: row.kind, name: row.name, urlHost: urlHost(row.url),
@@ -135,7 +147,8 @@ export async function createSyncDatabase(client: PoolClient, pages: PgPageReposi
   const created = await pages.createInTransaction(client, workspaceId, actorId,
     { clientMutationId, parentId, title: name, content: emptyContent }, 'database');
   const schema = syncDatabaseSchema();
-  await client.query(`INSERT INTO databases (workspace_id, page_id, properties_json, views_json) VALUES ($1, $2, $3::jsonb, $4::jsonb)`,
+  await client.query(`INSERT INTO databases (workspace_id, page_id, properties_json, views_json, calendar_hidden)
+    VALUES ($1, $2, $3::jsonb, $4::jsonb, true)`,
     [workspaceId, created.body.id, JSON.stringify(schema.properties), JSON.stringify(schema.views)]);
   return { databaseId: created.body.id, fields: schema.fields };
 }
@@ -151,6 +164,35 @@ export async function insertSource(client: PoolClient, values: { workspaceId: st
     JSON.stringify(values.fields), values.actorId, values.clientMutationId, values.caldav ? JSON.stringify(values.caldav.config) : null,
     values.caldav?.cipher ?? null, values.caldav?.keyId ?? null]);
   return result.rows[0]!;
+}
+
+/** Calendar collection addresses compare equal however the server encodes them, with or without the final slash. */
+export const calendarKey = (url: string) => hrefKey(url).replace(/\/+$/, '');
+
+/**
+ * The listed calendar of each choice, in order: 422 CALENDAR_NOT_FOUND when one is not listed, 400 INVALID_REQUEST
+ * when two choices name the same calendar.
+ */
+export function chosenCalendars<T extends { url: string }>(listed: readonly T[], choices: readonly { calendarUrl: string }[]): T[] {
+  const seen = new Set<string>();
+  return choices.map(choice => {
+    const key = calendarKey(choice.calendarUrl);
+    const found = listed.find(calendar => calendarKey(calendar.url) === key);
+    if (!found) throw new CalendarRouteError(422, 'CALENDAR_NOT_FOUND');
+    if (seen.has(key)) throw new WorkspaceRouteError(400, 'INVALID_REQUEST');
+    seen.add(key);
+    return found;
+  });
+}
+
+/**
+ * The mutation id stored on the `index`-th source one request creates: calendar_sync_sources keeps one per creator,
+ * so the later sources get ids derived from the request's.
+ */
+export function sourceMutationId(mutationId: string, index: number): string {
+  if (index === 0) return mutationId;
+  const hex = createHash('sha256').update(`${mutationId.toLowerCase()}:${index}`).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 /** One short transaction under the workspace lock, for editors and owners. */

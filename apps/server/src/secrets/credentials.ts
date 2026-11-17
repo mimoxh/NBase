@@ -4,7 +4,7 @@ import type { CalDavAccount } from '@nbase/contracts';
 import { readSecretFile } from '../config.js';
 
 /**
- * Encryption of stored account credentials (CalDAV). The key lives in a secret file outside the database
+ * Encryption of stored secrets: CalDAV passwords, OAuth tokens and client secrets. The key lives in a secret file outside the database
  * and outside backups; records carry the key's fingerprint, so a record sealed with another key is
  * recognised instead of failing to decrypt.
  *
@@ -48,27 +48,36 @@ export async function loadCredentialKey(env: NodeJS.ProcessEnv = process.env): P
   return credentialKeyFromText(text);
 }
 
-export function sealCredentials(key: CredentialKey, ownerId: string, account: CalDavAccount): Buffer {
+/** Seals any JSON value. `aad` names the record owner: a source id, a flow id or `oauth-app:<workspace>:<provider>`. */
+export function sealJson(key: CredentialKey, aad: string, value: unknown): Buffer {
   const iv = randomBytes(ivLength);
   const cipher = createCipheriv('aes-256-gcm', key.key, iv, { authTagLength: tagLength });
-  cipher.setAAD(Buffer.from(ownerId, 'utf8'));
-  const plain = Buffer.from(JSON.stringify({ username: account.username, password: account.password }), 'utf8');
-  const sealed = Buffer.concat([cipher.update(plain), cipher.final()]);
+  cipher.setAAD(Buffer.from(aad, 'utf8'));
+  const sealed = Buffer.concat([cipher.update(Buffer.from(JSON.stringify(value), 'utf8')), cipher.final()]);
   return Buffer.concat([Buffer.from([version]), iv, sealed, cipher.getAuthTag()]);
 }
 
 /** Null when the record was sealed with another key, for another owner, or is damaged. */
-export function openCredentials(key: CredentialKey, ownerId: string, record: Buffer, keyId: string | null): CalDavAccount | null {
+export function openJson(key: CredentialKey, aad: string, record: Buffer, keyId: string | null): unknown {
   if (keyId !== null && keyId !== key.id) return null;
   if (record.length < 1 + ivLength + tagLength + 1 || record[0] !== version) return null;
   try {
     const decipher = createDecipheriv('aes-256-gcm', key.key, record.subarray(1, 1 + ivLength), { authTagLength: tagLength });
-    decipher.setAAD(Buffer.from(ownerId, 'utf8'));
+    decipher.setAAD(Buffer.from(aad, 'utf8'));
     decipher.setAuthTag(record.subarray(record.length - tagLength));
     const plain = Buffer.concat([decipher.update(record.subarray(1 + ivLength, record.length - tagLength)), decipher.final()]);
-    const value: unknown = JSON.parse(plain.toString('utf8'));
-    if (typeof value !== 'object' || value === null) return null;
-    const { username, password } = value as Record<string, unknown>;
-    return typeof username === 'string' && typeof password === 'string' ? { username, password } : null;
+    return JSON.parse(plain.toString('utf8')) as unknown;
   } catch { return null; }
+}
+
+export function sealCredentials(key: CredentialKey, ownerId: string, account: CalDavAccount): Buffer {
+  return sealJson(key, ownerId, { username: account.username, password: account.password });
+}
+
+/** Null when the record was sealed with another key, for another owner, or is damaged. */
+export function openCredentials(key: CredentialKey, ownerId: string, record: Buffer, keyId: string | null): CalDavAccount | null {
+  const value = openJson(key, ownerId, record, keyId);
+  if (typeof value !== 'object' || value === null) return null;
+  const { username, password } = value as Record<string, unknown>;
+  return typeof username === 'string' && typeof password === 'string' ? { username, password } : null;
 }

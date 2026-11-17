@@ -250,6 +250,7 @@
 .nb-app .modal-wide { width: min(880px, calc(100vw - 32px)); }
 .nb-app .modal-large { width: min(90vw, 1180px); height: min(86dvh, 860px); display: flex; flex-direction: column; overflow: hidden; }
 .nb-app .modal-large > .nb-hist, .nb-app .modal-large > .nb-trash-grid { flex: 1; min-height: 0; }
+.nb-app .modal-large > .modal-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .nb-app .modal-large > .modal-heading, .nb-app .modal-large > .nb-trash-head, .nb-app .modal-large > .nb-trash-filter, .nb-app .modal-large > .dialog-actions { flex: 0 0 auto; }
 .nb-app .modal-large > .dialog-actions { border-top: 1px solid var(--nb-line); padding-top: 12px; padding-bottom: 14px; }
 .nb-app .modal-palette { width: min(640px, calc(100vw - 24px)); margin-top: 12dvh; margin-bottom: auto; }

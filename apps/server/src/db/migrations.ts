@@ -569,4 +569,87 @@ CREATE TABLE calendar_sync_conflicts (
 CREATE INDEX calendar_sync_conflicts_copy_idx ON calendar_sync_conflicts (source_id, copy_row_id) WHERE copy_row_id IS NOT NULL;
 `,
   },
+  {
+    version: 23,
+    name: 'calendar_oauth',
+    sql: `
+-- OAuth apps a workspace registered with Google or Microsoft (docs/architecture/calendar.md). The Google client
+-- secret is sealed like CalDAV credentials; a Microsoft public client has none.
+CREATE TABLE calendar_oauth_apps (
+  workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+  provider text NOT NULL CHECK (provider IN ('google', 'microsoft')),
+  client_id text NOT NULL CHECK (char_length(client_id) BETWEEN 1 AND 256),
+  secret_cipher bytea CHECK (secret_cipher IS NULL OR octet_length(secret_cipher) BETWEEN 30 AND 4096),
+  tenant text CHECK (tenant IS NULL OR char_length(tenant) BETWEEN 1 AND 253),
+  key_id text CHECK (key_id IS NULL OR key_id ~ '^[0-9a-f]{16}$'),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, provider),
+  CONSTRAINT calendar_oauth_apps_google CHECK (provider <> 'google' OR (secret_cipher IS NOT NULL AND key_id IS NOT NULL)),
+  CONSTRAINT calendar_oauth_apps_microsoft CHECK (provider <> 'microsoft' OR tenant IS NOT NULL)
+);
+
+-- One authorization in progress. Only digests of the Google state and of the browser binding cookie are kept;
+-- the PKCE verifier or device code (secret_cipher) and the tokens obtained (token_cipher) are sealed with the flow id.
+CREATE TABLE calendar_oauth_flows (
+  id uuid PRIMARY KEY,
+  workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+  user_id uuid NOT NULL,
+  provider text NOT NULL CHECK (provider IN ('google', 'microsoft')),
+  source_id uuid,
+  state_hash bytea UNIQUE CHECK (state_hash IS NULL OR octet_length(state_hash) = 32),
+  binding_hash bytea CHECK (binding_hash IS NULL OR octet_length(binding_hash) = 32),
+  secret_cipher bytea NOT NULL CHECK (octet_length(secret_cipher) BETWEEN 30 AND 8192),
+  token_cipher bytea CHECK (token_cipher IS NULL OR octet_length(token_cipher) BETWEEN 30 AND 16384),
+  key_id text NOT NULL CHECK (key_id ~ '^[0-9a-f]{16}$'),
+  status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'ready', 'failed', 'used')),
+  error text CHECK (error IS NULL OR error IN ('OAUTH_DENIED', 'OAUTH_EXPIRED', 'OAUTH_FAILED', 'ACCOUNT_MISMATCH', 'FETCH_FAILED',
+    'API_DISABLED')),
+  account_json jsonb CHECK (account_json IS NULL OR jsonb_typeof(account_json) = 'object'),
+  calendars_json jsonb CHECK (calendars_json IS NULL OR jsonb_typeof(calendars_json) = 'array'),
+  expires_at timestamptz NOT NULL,
+  next_poll_at timestamptz,
+  poll_interval integer CHECK (poll_interval IS NULL OR poll_interval BETWEEN 1 AND 3600),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (workspace_id, user_id) REFERENCES workspace_memberships (workspace_id, user_id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, source_id) REFERENCES calendar_sync_sources (workspace_id, id) ON DELETE CASCADE,
+  CONSTRAINT calendar_oauth_flows_failed CHECK ((status = 'failed') = (error IS NOT NULL)),
+  CONSTRAINT calendar_oauth_flows_google CHECK (provider <> 'google' OR (state_hash IS NOT NULL AND binding_hash IS NOT NULL))
+);
+CREATE INDEX calendar_oauth_flows_expires_idx ON calendar_oauth_flows (expires_at);
+CREATE INDEX calendar_oauth_flows_workspace_idx ON calendar_oauth_flows (workspace_id, provider);
+CREATE INDEX calendar_oauth_flows_source_idx ON calendar_oauth_flows (workspace_id, source_id) WHERE source_id IS NOT NULL;
+CREATE INDEX calendar_oauth_flows_user_idx ON calendar_oauth_flows (workspace_id, user_id);
+`,
+  },
+  {
+    version: 24,
+    name: 'calendar_aggregate',
+    sql: `
+-- Databases a calendar source made stay out of navigation after syncing stops, until revealed by hand.
+ALTER TABLE databases ADD COLUMN calendar_hidden boolean NOT NULL DEFAULT false;
+UPDATE databases d SET calendar_hidden = true
+  WHERE EXISTS (SELECT 1 FROM calendar_sync_sources s WHERE s.workspace_id = d.workspace_id AND s.database_id = d.page_id)
+    -- Sources stopped before this version left no record; their databases still have the exact fields a source creates,
+    -- with 外部 ID hidden in every view.
+    OR ((SELECT jsonb_agg(jsonb_build_array(e->>'name', e->>'type', e->>'deletedAt') ORDER BY o)
+          FROM jsonb_array_elements(d.properties_json) WITH ORDINALITY AS x(e, o))
+        = '[["名称", "title", null], ["时间", "date", null], ["地点", "text", null], ["说明", "text", null], ["外部 ID", "text", null]]'::jsonb
+      AND jsonb_array_length(d.views_json) > 0
+      AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(d.views_json) v
+        WHERE NOT COALESCE(v->'hiddenPropertyIds', '[]'::jsonb) ? (d.properties_json->4->>'id')));
+
+-- The workspace's aggregate calendar: ordinary databases on the workspace calendar of aggregate_user_id sync to it.
+ALTER TABLE calendar_sync_sources
+  ADD COLUMN aggregate_user_id uuid REFERENCES users (id) ON DELETE SET NULL,
+  ADD CONSTRAINT calendar_sync_sources_aggregate CHECK (aggregate_user_id IS NULL OR kind = 'caldav');
+CREATE UNIQUE INDEX calendar_sync_sources_aggregate_idx ON calendar_sync_sources (workspace_id) WHERE aggregate_user_id IS NOT NULL;
+
+-- Events of the aggregate calendar: the row is in database_id and its time in property_id. NULL for the source's own database.
+ALTER TABLE calendar_sync_items
+  ADD COLUMN database_id uuid,
+  ADD COLUMN property_id text CHECK (property_id IS NULL OR char_length(property_id) BETWEEN 1 AND 100),
+  ADD CONSTRAINT calendar_sync_items_aggregate CHECK ((database_id IS NULL) = (property_id IS NULL));
+`,
+  },
 ];

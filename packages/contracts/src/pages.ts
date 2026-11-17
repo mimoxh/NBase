@@ -23,8 +23,9 @@ export interface PageSummary {
   /** Omitted by older servers and stored receipts; treat as 'document'. */
   kind?: PageKind;
   /**
-   * Database pages kept up to date by a calendar import, subscription or CalDAV source. Clients keep
-   * them and their rows out of navigation and pickers; the calendar opens them. Omitted when false.
+   * Database pages made by a calendar import or sync source, also after syncing stopped, until they are
+   * revealed (POST /calendar/databases/:id/reveal). Clients keep them and their rows out of navigation and
+   * pickers; the calendar opens them. Omitted when false.
    */
   calendarSync?: true;
   revision: string;

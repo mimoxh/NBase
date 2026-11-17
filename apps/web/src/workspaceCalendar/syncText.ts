@@ -1,9 +1,35 @@
-import type { CalendarImportWarningCode, CalendarSyncCounts, CalendarSyncError, CalendarSyncKind, CalendarSyncSource } from '@nbase/contracts';
+import type { CalendarAccountProvider, CalendarImportWarningCode, CalendarSyncCounts, CalendarSyncError, CalendarSyncKind, CalendarSyncSource,
+  OAuthFlowError, OAuthProvider } from '@nbase/contracts';
 import { ApiError } from '../persistence/client';
 
 export const syncKindLabels: Record<CalendarSyncKind, string> = { 'ics-file': '导入文件', 'ics-url': '订阅', caldav: 'CalDAV' };
 
-export const credentialsUnavailableText = '服务端未配置凭据密钥，暂时不能连接 CalDAV。Docker 部署请在服务器上执行 node -- scripts/setup-docker.mjs --add-credential-key，再重新执行 docker compose up -d。';
+export const providerLabels: Record<CalendarAccountProvider, string> = { caldav: 'CalDAV', google: 'Google', microsoft: 'Microsoft' };
+
+type SourceInfo = Pick<CalendarSyncSource, 'kind' | 'caldav'>;
+
+/** The account provider of a two-way source; null for imports and subscriptions. */
+export const sourceProvider = (source: SourceInfo): CalendarAccountProvider | null =>
+  source.kind === 'caldav' ? source.caldav?.provider ?? 'caldav' : null;
+
+export const oauthProviderOf = (source: SourceInfo): OAuthProvider | null => {
+  const provider = sourceProvider(source);
+  return provider === 'google' || provider === 'microsoft' ? provider : null;
+};
+
+/** Kind label of a source; two-way sources are named after their provider. */
+export const syncSourceLabel = (source: SourceInfo): string => {
+  const provider = sourceProvider(source);
+  return provider ? providerLabels[provider] : syncKindLabels[source.kind];
+};
+
+/** Status after connecting calendars; every new source starts its first sync in the background. */
+export function connectedText(sources: readonly Pick<CalendarSyncSource, 'name'>[]): string {
+  const names = sources.map(source => `「${source.name}」`).join('');
+  return sources.length > 1 ? `已连接 ${sources.length} 个日历：${names}，首次同步在后台进行。` : `已连接${names}，首次同步在后台进行。`;
+}
+
+export const credentialsUnavailableText = '服务端未配置凭据密钥，暂时不能连接 CalDAV、Google 或 Microsoft 账号。Docker 部署请在服务器上执行 node -- scripts/setup-docker.mjs --add-credential-key，再重新执行 docker compose up -d。';
 
 const syncErrorText: Record<CalendarSyncError, string> = {
   URL_INVALID: '网址无效',
@@ -18,11 +44,14 @@ const syncErrorText: Record<CalendarSyncError, string> = {
   CREDENTIALS_UNAVAILABLE: '服务端未配置凭据密钥，无法同步',
   CALENDAR_NOT_FOUND: '外部日历已不存在',
   NOT_CALDAV: '这个地址不是 CalDAV 服务器',
+  OAUTH_APP_MISSING: '这个服务商的 OAuth 应用已移除，请重新配置后再授权',
+  API_DISABLED: 'Google 项目没有启用 CalDAV API 或 Google Calendar API',
 };
 
 /** The last sync error of a source, worded for its kind. */
-export function sourceErrorText(source: Pick<CalendarSyncSource, 'kind' | 'lastError'>): string {
+export function sourceErrorText(source: Pick<CalendarSyncSource, 'kind' | 'lastError'> & Partial<Pick<CalendarSyncSource, 'caldav'>>): string {
   if (!source.lastError) return '';
+  if (oauthProviderOf({ kind: source.kind, caldav: source.caldav ?? null }) && source.lastError === 'AUTH_FAILED') return '授权已失效，请重新授权';
   if (source.kind === 'caldav' && source.lastError === 'URL_BLOCKED') return '服务器地址不允许访问；本机或内网的服务器需要管理员在服务端开启';
   if (source.kind === 'caldav' && source.lastError === 'FETCH_FAILED') return '无法连接服务器，请稍后再试';
   return syncErrorText[source.lastError];
@@ -56,9 +85,25 @@ export const timeText = (iso: string | null, timeZone?: string) => {
 export const statusText = (source: CalendarSyncSource) =>
   source.status === 'running' ? '同步中…' : source.status === 'error' ? '上次同步失败' : source.lastSyncedAt ? '正常' : '待首次同步';
 
-/** Whether the source needs its account name and password entered again. */
+/** Whether a password source needs its account name and password entered again. */
 export const needsCredentials = (source: CalendarSyncSource) =>
-  source.kind === 'caldav' && (source.lastError === 'AUTH_FAILED' || source.caldav?.credentialsOk === false);
+  sourceProvider(source) === 'caldav' && (source.lastError === 'AUTH_FAILED' || source.caldav?.credentialsOk === false);
+
+/** Whether an OAuth source has to be authorized again. */
+export const needsReauthorization = (source: CalendarSyncSource) =>
+  oauthProviderOf(source) !== null && (source.lastError === 'AUTH_FAILED' || source.lastError === 'OAUTH_APP_MISSING'
+    || source.caldav?.credentialsOk === false);
+
+export const oauthFlowErrorText: Record<OAuthFlowError, string> = {
+  OAUTH_DENIED: '你拒绝了授权，或没有勾选日历权限。',
+  OAUTH_EXPIRED: '授权超时，请重新连接。',
+  OAUTH_FAILED: '服务商拒绝了这个应用：检查客户端 ID、密钥、回调地址，Microsoft 需允许公共客户端流。',
+  ACCOUNT_MISMATCH: '登录的不是这个来源原来的账号。',
+  FETCH_FAILED: '无法连接服务商，请稍后再试。',
+  API_DISABLED: '项目没有启用 CalDAV API 或 Google Calendar API。已经启用的话，确认上传的客户端属于同一个项目；刚启用要等几分钟。授权页上写有 Google 报告的项目编号。',
+};
+
+export const flowGoneText = '流程已过期，请重新连接。';
 
 /** Text for a failed request; `lost` replaces the default for a response that may not have arrived. */
 export function requestErrorText(error: unknown, lost = '网络不可用或服务器响应超时，请重试。'): string {
@@ -75,6 +120,12 @@ export function requestErrorText(error: unknown, lost = '网络不可用或服�
       case 'SYNC_RUNNING': return '正在同步，请稍后再试。';
       case 'SYNC_KIND_INVALID': return '这个来源不支持这项操作。';
       case 'CONFLICT_CHOICE_INVALID': return '这个冲突不能两份都保留。';
+      case 'OAUTH_APP_MISSING': return '还没有配置这个服务商的 OAuth 应用，或保存的客户端密钥已无法读取，请先填写应用信息。';
+      case 'OAUTH_APP_IN_USE': return '还有同步来源在使用这个应用，先停止这些来源的同步。';
+      case 'FLOW_NOT_READY': return '授权未完成或已用过，请重新连接。';
+      case 'OAUTH_FAILED': return oauthFlowErrorText.OAUTH_FAILED;
+      case 'API_DISABLED': return oauthFlowErrorText.API_DISABLED;
+      case 'DISABLED': return '服务端已关闭日历抓取，无法连接外部日历。';
       default: break;
     }
     if (error.status === 401) return '登录已失效，请重新登录。';

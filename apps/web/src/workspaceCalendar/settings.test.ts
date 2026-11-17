@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { CalendarDatabaseOption, CalendarSettings } from '@nbase/contracts';
-import { creationTarget, defaultColorFor, defaultSettingsFor, defaultsForDatabase, setDefaultDatabase,
+import { withAutoAddedSources, type CalendarDatabaseOption, type CalendarSettings } from '@nbase/contracts';
+import { creationTarget, defaultColorFor, defaultsForDatabase, setAutoAdd, setDefaultDatabase,
   setShowDailyNotes, upsertSource } from './settings';
 
 const db = (id: string, types: ('date' | 'created_time' | 'updated_time')[], readOnly: string[] = []): CalendarDatabaseOption => ({
@@ -14,6 +14,7 @@ const db = (id: string, types: ('date' | 'created_time' | 'updated_time')[], rea
     fields: { titleId: 't', dateId: `${id}-p0`, locationId: 'l', descriptionId: 'd', uidId: 'u' }, readOnlyPropertyIds: readOnly,
     caldav: null,
   } : null,
+  hidden: false,
 });
 
 const empty: CalendarSettings = { sources: [], showDailyNotes: true, defaultDatabaseId: null };
@@ -64,17 +65,22 @@ describe('creationTarget', () => {
   });
 });
 
-describe('defaultSettingsFor', () => {
-  it('makes every database visible and picks a creation target', () => {
-    const settings = defaultSettingsFor([db('a', ['created_time']), db('b', ['date'])]);
-    expect(settings.sources).toHaveLength(2);
-    expect(settings.sources.every(s => s.visible)).toBe(true);
-    expect(settings.defaultDatabaseId).toBe('b');
-    expect(settings.showDailyNotes).toBe(true);
+describe('withAutoAddedSources', () => {
+  it('adds databases the settings do not mention, colored by their position, and keeps switched-off ones off', () => {
+    const settings = withAutoAddedSources(upsertSource(empty, db('b', ['date']), 1, { visible: false }),
+      [db('a', ['created_time', 'date']), db('b', ['date']), db('c', [])]);
+    expect(settings.sources).toEqual([
+      { databaseId: 'b', propertyId: 'b-p0', color: defaultColorFor(1), visible: false },
+      { databaseId: 'a', propertyId: 'a-p1', color: defaultColorFor(0), visible: true },
+    ]);
+    expect(creationTarget([db('a', ['created_time', 'date'])], settings)).toEqual({ databaseId: 'a', propertyId: 'a-p1' });
   });
 
-  it('has no creation target without writable date fields', () => {
-    expect(defaultSettingsFor([db('a', ['created_time'])]).defaultDatabaseId).toBeNull();
+  it('adds nothing with autoAdd off and returns the same object when nothing is new', () => {
+    const off = setAutoAdd(empty, false);
+    expect(withAutoAddedSources(off, [db('a', ['date'])])).toBe(off);
+    const known = upsertSource(empty, db('a', ['date']), 0, {});
+    expect(withAutoAddedSources(known, [db('a', ['date'])])).toBe(known);
   });
 });
 

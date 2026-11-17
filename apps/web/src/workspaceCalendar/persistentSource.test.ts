@@ -104,14 +104,22 @@ describe('persistent calendar source requests', () => {
     queue.push(() => Promise.resolve(respond({ sources: [] })));
     queue.push(() => Promise.resolve(respond({ id: 's1' })));
     queue.push(() => Promise.resolve(respond(undefined, 204)));
+    queue.push(() => Promise.resolve(respond({ id: 's1' })));
+    queue.push(() => Promise.resolve(respond(undefined, 204)));
     await source.sync!.list();
     await source.sync!.run('s1');
     await source.sync!.remove('s1');
+    await source.sync!.update('s1', { aggregate: true });
+    await source.sync!.reveal('db 1');
     expect(calls.map(call => [call.method, call.url])).toEqual([
       ['GET', '/api/workspaces/w1/calendar/sync'],
       ['POST', '/api/workspaces/w1/calendar/sync/s1/run'],
       ['DELETE', '/api/workspaces/w1/calendar/sync/s1'],
+      ['PATCH', '/api/workspaces/w1/calendar/sync/s1'],
+      ['POST', '/api/workspaces/w1/calendar/databases/db%201/reveal'],
     ]);
+    expect(calls[3]!.body).toEqual({ aggregate: true });
+    expect(calls[4]!.headers['x-csrf-token']).toBe('csrf-token');
   });
 });
 
@@ -134,11 +142,12 @@ describe('CalDAV requests', () => {
   it('creates a CalDAV source and answers a lost response from the receipt of the same mutation', async () => {
     const { calls, queue, source } = makeSource();
     queue.push(() => Promise.reject(new TypeError('fetch failed')));
-    queue.push(() => Promise.resolve(respond({ statusCode: 201, response: { id: 's-caldav', kind: 'caldav' } })));
+    queue.push(() => Promise.resolve(respond({ statusCode: 201, response: { sources: [{ id: 's-caldav', kind: 'caldav' }, { id: 's-work' }] } })));
     const body = { clientMutationId: '77777777-7777-4777-8777-777777777777', serverUrl: 'https://caldav.icloud.com', username: 'u',
-      password: 'p', calendarUrl: 'https://caldav.icloud.com/1/calendars/home/', name: '家庭', parentId: null, intervalMinutes: 30 };
+      password: 'p', calendars: [{ calendarUrl: 'https://caldav.icloud.com/1/calendars/home/', name: '家庭' },
+        { calendarUrl: 'https://caldav.icloud.com/1/calendars/work/', name: '工作' }], parentId: null, intervalMinutes: 30 };
     const created = await source.sync!.createCaldav(body);
-    expect(created).toMatchObject({ id: 's-caldav' });
+    expect(created.sources.map(item => item.id)).toEqual(['s-caldav', 's-work']);
     expect(calls[0]).toMatchObject({ url: '/api/workspaces/w1/calendar/caldav', method: 'POST', body });
     expect(calls[0]!.headers['content-type']).toBe('application/json');
     expect(calls[1]!.url).toBe(`/api/workspaces/w1/mutations/${body.clientMutationId}`);
@@ -191,5 +200,60 @@ describe('CalDAV requests', () => {
     expect(created.body).toMatchObject({ parentId: 'db-1', title: '周会' });
     expect((created.body as { properties: Record<string, unknown> }).properties).toEqual({
       [ids.date]: '2026-11-23', [ids.location]: '三楼', [ids.description]: '议程', [ids.note]: '自己的' });
+  });
+});
+
+describe('OAuth requests', () => {
+  it('builds the app, start and flow endpoints with their payloads', async () => {
+    const { calls, queue, source } = makeSource();
+    const apps = { googleRedirectUri: 'https://nbase.example.com/api/calendar/oauth/google/callback', google: null, microsoft: null };
+    queue.push(() => Promise.resolve(respond(apps)));
+    queue.push(() => Promise.resolve(respond({ ...apps, google: { clientId: 'abc.apps.googleusercontent.com' } })));
+    queue.push(() => Promise.resolve(respond({ ...apps, microsoft: { clientId: '11111111-2222-4333-8444-555555555555', tenant: 'common' } })));
+    queue.push(() => Promise.resolve(respond(undefined, 204)));
+    queue.push(() => Promise.resolve(respond({ flowId: 'f1', provider: 'google', authorizeUrl: 'https://accounts.google.com/x', expiresAt: '2099-01-01T00:00:00Z' })));
+    queue.push(() => Promise.resolve(respond({ status: 'pending', error: null, account: null, calendars: [], source: null })));
+    expect(await source.sync!.oauthApps()).toEqual(apps);
+    expect((await source.sync!.putGoogleApp({ clientId: 'abc.apps.googleusercontent.com', clientSecret: 's' })).google)
+      .toEqual({ clientId: 'abc.apps.googleusercontent.com' });
+    await source.sync!.putMicrosoftApp({ clientId: '11111111-2222-4333-8444-555555555555', tenant: 'common' });
+    await source.sync!.deleteOAuthApp('microsoft');
+    expect((await source.sync!.startOAuth({ provider: 'google', sourceId: 's1' })).flowId).toBe('f1');
+    expect((await source.sync!.oauthFlow('f 1')).status).toBe('pending');
+    expect(calls.map(call => [call.method, call.url, call.body])).toEqual([
+      ['GET', '/api/workspaces/w1/calendar/oauth/apps', undefined],
+      ['PUT', '/api/workspaces/w1/calendar/oauth/apps/google', { clientId: 'abc.apps.googleusercontent.com', clientSecret: 's' }],
+      ['PUT', '/api/workspaces/w1/calendar/oauth/apps/microsoft', { clientId: '11111111-2222-4333-8444-555555555555', tenant: 'common' }],
+      ['DELETE', '/api/workspaces/w1/calendar/oauth/apps/microsoft', {}],
+      ['POST', '/api/workspaces/w1/calendar/oauth/start', { provider: 'google', sourceId: 's1' }],
+      ['GET', '/api/workspaces/w1/calendar/oauth/flows/f%201', undefined],
+    ]);
+    for (const index of [1, 2, 3, 4]) expect(calls[index]!.headers['x-csrf-token']).toBe('csrf-token');
+  });
+
+  it('creates an OAuth source and answers a lost response from the receipt of the same mutation', async () => {
+    const { calls, queue, source } = makeSource();
+    queue.push(() => Promise.reject(new TypeError('fetch failed')));
+    queue.push(() => Promise.resolve(respond({ statusCode: 201, response: { sources: [{ id: 's-google', kind: 'caldav' }] } })));
+    const body = { clientMutationId: '77777777-7777-4777-8777-777777777777', flowId: '88888888-8888-4888-8888-888888888888',
+      calendars: [{ calendarUrl: 'https://apidata.googleusercontent.com/caldav/v2/me%40gmail.com/events/', name: '我的日历' }], intervalMinutes: 30 };
+    expect(await source.sync!.createOAuthSource(body)).toMatchObject({ sources: [{ id: 's-google' }] });
+    expect(calls[0]).toMatchObject({ url: '/api/workspaces/w1/calendar/oauth/sources', method: 'POST', body });
+    expect(calls[0]!.headers['x-csrf-token']).toBe('csrf-token');
+    expect(calls[1]!.url).toBe(`/api/workspaces/w1/mutations/${body.clientMutationId}`);
+  });
+
+  it('turns OAuth route errors into codes', async () => {
+    const { queue, source } = makeSource();
+    queue.push(() => Promise.resolve(respond({ error: 'OAUTH_APP_IN_USE' }, 409)));
+    queue.push(() => Promise.resolve(respond({ error: 'OAUTH_APP_MISSING' }, 422)));
+    queue.push(() => Promise.resolve(respond({ error: 'NOT_FOUND' }, 404)));
+    queue.push(() => Promise.resolve(respond({ error: 'FLOW_NOT_READY' }, 422)));
+    await expect(source.sync!.deleteOAuthApp('google')).rejects.toMatchObject({ status: 409, code: 'OAUTH_APP_IN_USE' });
+    await expect(source.sync!.startOAuth({ provider: 'microsoft' })).rejects.toMatchObject({ status: 422, code: 'OAUTH_APP_MISSING' });
+    await expect(source.sync!.oauthFlow('f1')).rejects.toMatchObject({ status: 404 });
+    await expect(source.sync!.createOAuthSource({ clientMutationId: 'm', flowId: 'f1', calendars: [{ calendarUrl: 'https://x/', name: 'n' }],
+      intervalMinutes: 30 }))
+      .rejects.toMatchObject({ status: 422, code: 'FLOW_NOT_READY' });
   });
 });

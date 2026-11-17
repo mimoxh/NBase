@@ -19,7 +19,7 @@ docker compose --env-file .env.docker up -d --wait nbase
 
 其他端口/隔离实例：`node -- scripts/setup-docker.mjs --project nbase-trial --port 4325 --env-file .env.trial`，后续所有 Compose 命令均使用 `--env-file .env.trial`。`node --` 明确结束 Node 自身的命令行选项。
 
-**日历二期之前建立的配置：** 不改配置也能照常启动。没有 `NBASE_CREDENTIAL_KEY_SOURCE` 时，Compose 挂载仓库里的空文件 `deploy/no-credential-key`，应用把空密钥文件当作未配置：CalDAV 不可用（界面说明原因，启动日志有一条警告），其他功能不受影响。要用 CalDAV 时执行 `node -- scripts/setup-docker.mjs --add-credential-key`（其他项目加同样的 `--project` / `--env-file`），它只新建密钥文件并在 env 文件末尾加这一行，其余配置不动，已配置时不做任何修改；然后重新执行 `docker compose --env-file .env.docker up -d --wait nbase`，让应用容器挂载新密钥。
+**日历二期之前建立的配置：** 不改配置也能照常启动。没有 `NBASE_CREDENTIAL_KEY_SOURCE` 时，Compose 挂载仓库里的空文件 `deploy/no-credential-key`，应用把空密钥文件当作未配置：CalDAV、Google、Microsoft 同步不可用（界面说明原因，启动日志有一条警告），其他功能不受影响。要用这些同步时执行 `node -- scripts/setup-docker.mjs --add-credential-key`（其他项目加同样的 `--project` / `--env-file`），它只新建密钥文件并在 env 文件末尾加这一行，其余配置不动，已配置时不做任何修改；然后重新执行 `docker compose --env-file .env.docker up -d --wait nbase`，让应用容器挂载新密钥。
 
 `admin` 是 maintenance profile 的一次性服务，默认只执行初始化 CLI，不监听网络。已初始化实例再次执行会失败，不能接管原账号。常驻应用不挂载 owner 密码文件。生成密码后应保存到个人密码管理器；秘密文件不会自动删除或轮换。
 
@@ -29,16 +29,18 @@ docker compose --env-file .env.docker up -d --wait nbase
 | --- | --- |
 | `NBASE_COMPOSE_PROJECT` | Compose 项目名，同时决定卷/网络名称。建立数据后保持不变；改名会看到另一组空卷 |
 | `NBASE_IMAGE_TAG` | 本地应用镜像标签；基础 Node 与 PostgreSQL 镜像固定版本和摘要 |
-| `NBASE_PORT` / `NBASE_PUBLIC_ORIGIN` | 发布端口与浏览器精确 origin 必须一致。origin 不带尾斜杠；HTTP 只允许回环地址 |
+| `NBASE_PORT` / `NBASE_PUBLIC_ORIGIN` | 发布端口与浏览器精确 origin 必须一致。origin 不带尾斜杠；HTTP 只允许回环地址。Google 日历的授权回调地址是 origin 加 `/api/calendar/oauth/google/callback`，要在 Google 客户端里原样登记；Google 只接受 https 的域名地址（顶级域须是公共后缀）或 `localhost` / `127.0.0.1`，不接受 IP 地址，所以只用局域网 IP 访问的实例连不了 Google（Microsoft 用设备码，没有这个限制） |
 | `NBASE_DB_PASSWORD_SOURCE` | 宿主数据库密码文件；Compose 只传文件路径，应用通过 secret 挂载读取，无需 URL 转义 |
 | `NBASE_OWNER_PASSWORD_SOURCE` | 初始化/重置时读取的 owner 密码文件；修改此文件本身不会修改数据库密码或 owner 密码 |
 | `NBASE_OWNER_LOGIN` | 初始化账号名，也用于维护时核对现有 instance owner；不用于创建任意新账号 |
 | `NBASE_LINK_PREVIEW` | 设为 `off` 时关闭网页书签的服务端抓取，书签只显示网址。默认开启：只抓取 http/https 默认端口的公网地址，解析后拒绝回环、私有、链路本地等地址并固定连接到已检查的地址，每次重定向重新检查，6 秒超时、最多读 512 KB、只解析标题/简介/站点名，不下载图片；每个账号每分钟 30 次 |
-| `NBASE_CREDENTIAL_KEY_SOURCE` | 宿主凭据密钥文件（一行 base64，解码后 32 字节），以 secret `credential_key` 挂载，应用经 `NBASE_CREDENTIAL_KEY_FILE` 读取，用 AES-256-GCM 加密保存的 CalDAV 账号密码。可选：不设时挂载空占位文件，CalDAV 关闭。文件为空视为未配置；读不到或内容格式不对时启动失败。密钥不在备份里，须另行保管；丢失后只能逐个重新输入 CalDAV 密码 |
+| `NBASE_CREDENTIAL_KEY_SOURCE` | 宿主凭据密钥文件（一行 base64，解码后 32 字节），以 secret `credential_key` 挂载，应用经 `NBASE_CREDENTIAL_KEY_FILE` 读取，用 AES-256-GCM 加密保存的 CalDAV 账号密码，以及 Google / Microsoft 账号的 OAuth 客户端密钥和刷新令牌。可选：不设时挂载空占位文件，CalDAV、Google、Microsoft 同步都关闭。文件为空视为未配置；读不到或内容格式不对时启动失败。密钥不在备份里，须另行保管；丢失后只能逐个重新输入 CalDAV 密码、重新填写 Google 应用并重新授权各个 OAuth 来源 |
 | `NBASE_CALDAV_PRIVATE` | 默认 `deny`：CalDAV 只连公网地址和默认端口。设为 `allow` 时 CalDAV（只有 CalDAV）可以连本机、内网地址和任意端口，并允许对这些地址用 http，用于 NAS 上的 Nextcloud、Radicale 等。其他值启动失败 |
-| `NBASE_CALENDAR_FETCH` | 设为 `off` 时关闭日历订阅抓取和 CalDAV 同步 |
+| `NBASE_CALENDAR_FETCH` | 设为 `off` 时关闭日历订阅抓取、CalDAV 同步和 Google / Microsoft 同步 |
 | `<project>_postgres_data` | PostgreSQL 18 的命名卷，挂到 `/var/lib/postgresql`；容器内 PGDATA 为版本目录 |
 | `<project>_attachments` | 应用附件命名卷，挂到 `/data/attachments`；空卷复制镜像目录的 node 用户权限 |
+
+Google 和 Microsoft 同步只连固定的几个域名（`oauth2.googleapis.com`、`www.googleapis.com`、`apidata.googleusercontent.com`、`login.microsoftonline.com`、`graph.microsoft.com`），只用 https 443，不受 `NBASE_CALDAV_PRIVATE` 影响。服务端直接连接，不读 `HTTPS_PROXY` 等代理变量；所在网络访问不到 Google 时，需要宿主或容器网络层面的代理。OAuth 应用由每个工作区在“导入与同步”里自己登记，部署时不用配置。
 
 数据库只连接 Compose 内部网络，不发布宿主端口。应用以非 root `node` 用户运行，根文件系统只读，附件卷和临时目录可写。宿主 bind mount 替换命名卷时，必须自行建立目录并授予容器 UID/GID 1000 访问权限；启动探针会拒绝缺失或不可写目录，不自动扩大权限。
 

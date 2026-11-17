@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import pg from 'pg';
 import type { CalDavDiscoverResponse, CalendarEventsResponse, CalendarSyncConflictsResponse, CalendarSyncListResponse, CalendarSyncSource,
-  DatabaseDocument, ResolveCalendarConflictResponse } from '@nbase/contracts';
+  CreateCalendarSourcesResponse, DatabaseDocument, ResolveCalendarConflictResponse } from '@nbase/contracts';
 import { buildApp } from '../src/app.js';
 import { initializeOwner } from '../src/auth/initialize-owner.js';
 import { hashPassword } from '../src/auth/password.js';
@@ -111,20 +111,29 @@ test('CalDAV sources: discovery, two-way sync, conflicts, attendee and read-only
     const calendars = (discovered.json() as CalDavDiscoverResponse).calendars;
     assert.deepEqual(calendars.map(c => [c.name, c.writable, c.color]), [['工作', true, '#3366ff'], ['节假日', false, null]]);
 
-    // Creating a source checks the calendar against the account; retries replay the first answer.
-    assert.equal((await call('POST', '/calendar/caldav', { ...account, clientMutationId: randomUUID(), calendarUrl: mock.url('/dav/calendars/alice/none/'),
-      name: 'x', parentId: null, intervalMinutes: 15 })).json().error, 'CALENDAR_NOT_FOUND');
-    const createBody = { ...account, clientMutationId: randomUUID(), calendarUrl: calendars[0]!.url, name: '工作日历', parentId: null, intervalMinutes: 15 };
+    // Creating sources checks every calendar against the account and makes all or none; retries replay the first answer.
+    const sourceCount = async () => (await db.query<{ n: number }>('SELECT count(*)::int AS n FROM calendar_sync_sources')).rows[0]!.n;
+    const workChoice = { calendarUrl: calendars[0]!.url, name: '工作日历' };
+    assert.equal((await call('POST', '/calendar/caldav', { ...account, clientMutationId: randomUUID(), parentId: null, intervalMinutes: 15,
+      calendars: [workChoice, { calendarUrl: mock.url('/dav/calendars/alice/none/'), name: 'x' }] })).json().error, 'CALENDAR_NOT_FOUND');
+    assert.equal((await call('POST', '/calendar/caldav', { ...account, clientMutationId: randomUUID(), parentId: null, intervalMinutes: 15,
+      calendars: [workChoice, { ...workChoice, name: '又一个' }] })).statusCode, 400);
+    assert.equal((await call('POST', '/calendar/caldav', { ...account, clientMutationId: randomUUID(), parentId: null, intervalMinutes: 15,
+      calendarUrl: workChoice.calendarUrl, name: workChoice.name })).statusCode, 400);
+    assert.equal(await sourceCount(), 0);
+    const createBody = { ...account, clientMutationId: randomUUID(), calendars: [workChoice], parentId: null, intervalMinutes: 15 };
     const createdSource = await call('POST', '/calendar/caldav', createBody);
     assert.equal(createdSource.statusCode, 201, createdSource.body);
     assert.ok(!createdSource.body.includes(mock.password) && !createdSource.body.includes(mock.username));
-    const caldav = createdSource.json() as CalendarSyncSource;
+    const createdSources = (createdSource.json() as CreateCalendarSourcesResponse).sources;
+    assert.equal(createdSources.length, 1);
+    const caldav = createdSources[0]!;
     assert.equal(caldav.kind, 'caldav');
-    assert.deepEqual(caldav.caldav, { serverHost: '127.0.0.1', calendarName: '工作', writable: true, credentialsOk: true, conflictCount: 0 });
+    assert.deepEqual(caldav.caldav, { provider: 'caldav', account: null, serverHost: '127.0.0.1', calendarName: '工作', writable: true, credentialsOk: true, conflictCount: 0, aggregate: false });
     assert.deepEqual(caldav.readOnlyPropertyIds, [caldav.fields.uidId]);
     const replay = await call('POST', '/calendar/caldav', createBody);
     assert.equal(replay.statusCode, 201);
-    assert.deepEqual(replay.json(), caldav);
+    assert.deepEqual(replay.json(), { sources: [caldav] });
     const stored = await db.query<{ credential_cipher: Buffer; credential_key_id: string }>(
       'SELECT credential_cipher, credential_key_id FROM calendar_sync_sources WHERE id = $1', [caldav.id]);
     assert.equal(stored.rows[0]!.credential_key_id, key.id);
@@ -315,10 +324,10 @@ test('CalDAV sources: discovery, two-way sync, conflicts, attendee and read-only
     assert.equal(mock.body(work, 'weekly.ics'), undefined);
 
     // A read-only calendar behaves like a subscription.
-    const readOnly = await call('POST', '/calendar/caldav', { ...account, clientMutationId: randomUUID(), calendarUrl: calendars[1]!.url,
-      name: '节假日', parentId: null, intervalMinutes: 60 });
+    const readOnly = await call('POST', '/calendar/caldav', { ...account, clientMutationId: randomUUID(),
+      calendars: [{ calendarUrl: calendars[1]!.url, name: '节假日' }], parentId: null, intervalMinutes: 60 });
     assert.equal(readOnly.statusCode, 201, readOnly.body);
-    const holidaySource = readOnly.json() as CalendarSyncSource;
+    const holidaySource = (readOnly.json() as CreateCalendarSourcesResponse).sources[0]!;
     assert.equal(holidaySource.caldav?.writable, false);
     assert.equal(holidaySource.readOnlyPropertyIds.length, 5);
     await syncAll();

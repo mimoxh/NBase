@@ -80,35 +80,37 @@ export function ConflictDialog({ api, source, timeZone, onOpenRow, onResolved, o
   };
 
   return <Modal title={`处理冲突：${source.name}`} variant="large" onClose={onClose}>
-    <p className="dialog-description">这些日程在 NBase 和外部日历两边都有变化。处理之前，它们不会写回外部日历。</p>
-    {loadError && <p className="dialog-description" role="alert">{loadError}
-      <button className="nb-btn nb-btn-quiet" onClick={() => void load()}>重试</button></p>}
-    {!conflicts && !loadError && <p className="dialog-description" role="status">正在读取…</p>}
-    {conflicts && !conflicts.length && <p className="dialog-description" role="status">没有待处理的冲突。</p>}
-    {status && <p className="dialog-description" role="status">{status}</p>}
-    {error && <p className="dialog-description" role="alert">{error}</p>}
-    {(conflicts ?? []).map(conflict => <article key={conflict.rowId} className="nb-wcal-conflict"
-      aria-label={conflict.local?.title || conflict.remote?.title || '未命名日程'}>
-      <div className="nb-wcal-sync-head">
-        <strong>{conflict.local?.title || conflict.remote?.title || '未命名日程'}</strong>
-        <span className="nb-wcal-sync-badge">{kindText[conflict.kind]}</span>
-        <span className="nb-wcal-sync-host">发现于 {timeText(conflict.detectedAt, timeZone)}</span>
-      </div>
-      <div className="nb-wcal-conflict-sides">
-        <Side label="NBase 版本" snapshot={conflict.local} other={conflict.remote} missing="NBase 中已删除" timeZone={timeZone} />
-        <Side label="外部版本" snapshot={conflict.remote} other={conflict.local} missing="外部已删除" timeZone={timeZone} />
-      </div>
-      {kindHint[conflict.kind] && <p className="dialog-description">{kindHint[conflict.kind]}</p>}
-      <div className="nb-wcal-sync-actions">
-        {onOpenRow && conflict.kind !== 'local-deleted' && <button className="nb-btn nb-btn-quiet" onClick={() => onOpenRow(conflict.rowId)}>打开这一行</button>}
-        {onOpenRow && conflict.copyRowId && <button className="nb-btn nb-btn-quiet" onClick={() => onOpenRow(conflict.copyRowId!)}>打开外部版本副本</button>}
-        <span className="nb-wcal-conflict-spacer" />
-        <button className="nb-btn" disabled={!!busy} onClick={() => void resolve(conflict, 'local')}>保留 NBase 版本</button>
-        <button className="nb-btn" disabled={!!busy} onClick={() => void resolve(conflict, 'remote')}>保留外部版本</button>
-        {conflict.kind === 'both-changed' && <button className="nb-btn" disabled={!!busy}
-          onClick={() => void resolve(conflict, 'both')}>两份都保留</button>}
-      </div>
-    </article>)}
+    <div className="modal-scroll">
+      <p className="dialog-description">这些日程在 NBase 和外部日历两边都有变化。处理之前，它们不会写回外部日历。</p>
+      {loadError && <p className="dialog-description" role="alert">{loadError}
+        <button className="nb-btn nb-btn-quiet" onClick={() => void load()}>重试</button></p>}
+      {!conflicts && !loadError && <p className="dialog-description" role="status">正在读取…</p>}
+      {conflicts && !conflicts.length && <p className="dialog-description" role="status">没有待处理的冲突。</p>}
+      {status && <p className="dialog-description" role="status">{status}</p>}
+      {error && <p className="dialog-description" role="alert">{error}</p>}
+      {(conflicts ?? []).map(conflict => <article key={conflict.rowId} className="nb-wcal-conflict"
+        aria-label={conflict.local?.title || conflict.remote?.title || '未命名日程'}>
+        <div className="nb-wcal-sync-head">
+          <strong>{conflict.local?.title || conflict.remote?.title || '未命名日程'}</strong>
+          <span className="nb-wcal-sync-badge">{kindText[conflict.kind]}</span>
+          <span className="nb-wcal-sync-host">发现于 {timeText(conflict.detectedAt, timeZone)}</span>
+        </div>
+        <div className="nb-wcal-conflict-sides">
+          <Side label="NBase 版本" snapshot={conflict.local} other={conflict.remote} missing="NBase 中已删除" timeZone={timeZone} />
+          <Side label="外部版本" snapshot={conflict.remote} other={conflict.local} missing="外部已删除" timeZone={timeZone} />
+        </div>
+        {kindHint[conflict.kind] && <p className="dialog-description">{kindHint[conflict.kind]}</p>}
+        <div className="nb-wcal-sync-actions">
+          {onOpenRow && conflict.kind !== 'local-deleted' && <button className="nb-btn nb-btn-quiet" onClick={() => onOpenRow(conflict.rowId)}>打开这一行</button>}
+          {onOpenRow && conflict.copyRowId && <button className="nb-btn nb-btn-quiet" onClick={() => onOpenRow(conflict.copyRowId!)}>打开外部版本副本</button>}
+          <span className="nb-wcal-conflict-spacer" />
+          <button className="nb-btn" disabled={!!busy} onClick={() => void resolve(conflict, 'local')}>保留 NBase 版本</button>
+          <button className="nb-btn" disabled={!!busy} onClick={() => void resolve(conflict, 'remote')}>保留外部版本</button>
+          {conflict.kind === 'both-changed' && <button className="nb-btn" disabled={!!busy}
+            onClick={() => void resolve(conflict, 'both')}>两份都保留</button>}
+        </div>
+      </article>)}
+    </div>
     <div className="dialog-actions"><button className="nb-btn" onClick={onClose}>关闭</button></div>
   </Modal>;
 }

@@ -1,8 +1,9 @@
 import { useRef, useState } from 'react';
 import { calendarSyncIntervals, caldavPresets, isCalDavServerUrl, type CalDavCalendarOption, type CalendarSyncSource } from '@nbase/contracts';
 import { ApiError } from '../persistence/client';
+import { CalendarChoiceList, startText, useCalendarChoices } from './CalendarChoices';
 import type { CalendarSyncApi } from './source';
-import { credentialsUnavailableText, intervalText, requestErrorText } from './syncText';
+import { connectedText, credentialsUnavailableText, intervalText, requestErrorText } from './syncText';
 
 type PresetId = typeof caldavPresets[number]['id'] | 'custom';
 
@@ -14,26 +15,22 @@ export const caldavPresetHints: Record<PresetId, string> = {
   custom: '填写 CalDAV 服务器地址；只写主机名时按 https 连接。',
 };
 
-const colorOf = (color: string | null) => (color && /^#[0-9a-f]{6}$/i.test(color) ? color : undefined);
-
 const isUnavailable = (error: unknown) => error instanceof ApiError && error.code === 'CREDENTIALS_UNAVAILABLE';
 
 /**
- * Connects a CalDAV account: pick a server, sign in, choose one calendar, then create the synced database.
+ * Connects a CalDAV account: pick a server, sign in, choose calendars, then create a synced database for each.
  * The password stays in this component's state only and is cleared after success; closing the dialog drops it.
  */
 export function CaldavSection({ api, onCreated }: {
   api: CalendarSyncApi;
-  onCreated: (source: CalendarSyncSource) => void;
+  onCreated: (sources: CalendarSyncSource[]) => void;
 }) {
   const [preset, setPreset] = useState<PresetId>('icloud');
   const [customUrl, setCustomUrl] = useState('');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [calendars, setCalendars] = useState<CalDavCalendarOption[] | null>(null);
-  const [selected, setSelected] = useState('');
-  const [name, setName] = useState('');
-  const [nameTouched, setNameTouched] = useState(false);
+  const choices = useCalendarChoices('CalDAV 日历');
   const [interval, setIntervalMinutes] = useState<number>(30);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -41,14 +38,14 @@ export function CaldavSection({ api, onCreated }: {
   const [unavailable, setUnavailable] = useState(false);
   const [lost, setLost] = useState(false);
   const busyRef = useRef(false);
-  /** One id per intended source: a retry after a lost response reuses it, so the server answers from its receipt. */
+  /** One id per intended request: a retry after a lost response reuses it, so the server answers from its receipt. */
   const mutation = useRef<{ id: string; key: string } | null>(null);
 
   const serverUrl = preset === 'custom' ? customUrl.trim() : caldavPresets.find(item => item.id === preset)!.serverUrl;
-  const chosen = calendars?.find(item => item.url === selected) ?? null;
   const disabled = busy || unavailable;
+  const ready = choices.chosen.length > 0 && !choices.tooMany;
 
-  const resetDiscovery = () => { setCalendars(null); setSelected(''); setLost(false); mutation.current = null; };
+  const resetDiscovery = () => { setCalendars(null); choices.reset([]); setLost(false); mutation.current = null; };
   const fail = (failure: unknown) => {
     if (isUnavailable(failure)) setUnavailable(true);
     setError(requestErrorText(failure));
@@ -63,36 +60,27 @@ export function CaldavSection({ api, onCreated }: {
     try {
       const response = await api.discoverCaldav({ serverUrl, username: username.trim(), password });
       setCalendars(response.calendars);
-      const first = response.calendars[0];
-      setSelected(first?.url ?? '');
-      if (!nameTouched) setName(first?.name ?? '');
+      choices.reset(response.calendars);
       mutation.current = null;
     } catch (failure) { resetDiscovery(); fail(failure); }
     finally { busyRef.current = false; setBusy(false); }
   };
 
-  const choose = (option: CalDavCalendarOption) => {
-    setSelected(option.url);
-    if (!nameTouched) setName(option.name);
-  };
-
   const create = async () => {
-    if (busyRef.current || !chosen) return;
-    const finalName = name.trim() || chosen.name.trim() || 'CalDAV 日历';
-    const body = { serverUrl, username: username.trim(), password, calendarUrl: chosen.url, name: finalName.slice(0, 100),
-      parentId: null, intervalMinutes: interval };
+    if (busyRef.current || !ready) return;
+    const body = { serverUrl, username: username.trim(), password, calendars: choices.choices, parentId: null, intervalMinutes: interval };
     const key = JSON.stringify({ ...body, password: undefined });
     const attempt = mutation.current?.key === key ? mutation.current : { id: crypto.randomUUID(), key };
     mutation.current = attempt;
     setError(''); setDone('');
     busyRef.current = true; setBusy(true);
     try {
-      const source = await api.createCaldav({ clientMutationId: attempt.id, ...body });
+      const { sources } = await api.createCaldav({ clientMutationId: attempt.id, ...body });
       mutation.current = null;
       setLost(false);
-      setPassword(''); setUsername(''); setCalendars(null); setSelected(''); setName(''); setNameTouched(false);
-      setDone(`已连接「${source.name}」，首次同步在后台进行。`);
-      onCreated(source);
+      setPassword(''); setUsername(''); setCalendars(null); choices.reset([]);
+      setDone(connectedText(sources));
+      onCreated(sources);
     } catch (failure) {
       const network = failure instanceof ApiError && failure.status === 0;
       setLost(network);
@@ -129,27 +117,14 @@ export function CaldavSection({ api, onCreated }: {
     </div>
     {calendars && !calendars.length && <p className="dialog-description" role="status">这个账号没有可同步的日历。</p>}
     {calendars && calendars.length > 0 && <>
-      <fieldset className="nb-wcal-caldav-list" disabled={disabled}>
-        <legend className="field-label">选择日历</legend>
-        {calendars.map(option => <label key={option.url} className="nb-wcal-caldav-option">
-          <input type="radio" name="nb-wcal-caldav-calendar" value={option.url} checked={selected === option.url}
-            onChange={() => choose(option)} />
-          <span className="nb-wcal-swatch" aria-hidden="true" style={{ background: colorOf(option.color) }} />
-          <span className="nb-wcal-source-title">{option.name || '未命名日历'}</span>
-          {!option.writable && <span className="nb-wcal-sync-badge">只读</span>}
-        </label>)}
-      </fieldset>
-      {chosen && !chosen.writable && <p className="dialog-description">这个日历只读：只会把外部的变化同步到 NBase，NBase 中不能修改同步来的内容。</p>}
-      <label className="field-label" htmlFor="nb-wcal-caldav-name">数据库名称</label>
-      <input id="nb-wcal-caldav-name" type="text" value={name} disabled={disabled} maxLength={100}
-        onChange={event => { setName(event.target.value); setNameTouched(true); }} />
+      <CalendarChoiceList choices={choices} disabled={disabled} />
       <div className="nb-wcal-sub-row">
         <select aria-label="同步间隔" className="select-field" value={interval} disabled={disabled}
           onChange={event => setIntervalMinutes(Number(event.target.value))}>
           {calendarSyncIntervals.map(minutes => <option key={minutes} value={minutes}>{intervalText(minutes)}</option>)}
         </select>
-        <button className="nb-btn nb-btn-primary" disabled={disabled || !chosen} onClick={() => void create()}>
-          {busy ? '正在创建…' : lost ? '重试' : '开始同步'}</button>
+        <button className="nb-btn nb-btn-primary" disabled={disabled || !ready} onClick={() => void create()}>
+          {busy ? '正在创建…' : lost ? '重试' : startText(choices.chosen.length)}</button>
       </div>
     </>}
     {error && <p className="dialog-description" role="alert">{error}</p>}

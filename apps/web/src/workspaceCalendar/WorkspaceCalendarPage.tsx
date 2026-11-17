@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CalendarDatabaseOption, CalendarEventsResponse, CalendarSettings, OptionColor, RecurrenceEditScope } from '@nbase/contracts';
+import { withAutoAddedSources, type CalendarDatabaseOption, type CalendarEventsResponse, type CalendarSettings, type OptionColor,
+  type RecurrenceEditScope } from '@nbase/contracts';
 import { Calendar } from '../calendar/Calendar';
 import { applyEventChange, newEventValue, type EventSpan, type EventWrite } from '../calendar/editing';
 import type { WeekStart } from '../calendar/layout';
@@ -8,7 +9,7 @@ import { RecurrenceScopeDialog } from '../calendar/RecurrenceScopeDialog';
 import { Popover } from '../components/Popover';
 import { useCalendarNav } from '../database/views/calendarNav';
 import { reminderPermission, requestReminderPermission } from '../reminders/runner';
-import { creationTarget, dailyNotesSourceId, defaultSettingsFor, upsertSource } from './settings';
+import { creationTarget, dailyNotesSourceId, upsertSource } from './settings';
 import type { WorkspaceCalendarSource } from './source';
 import { SourcesPanel } from './SourcesPanel';
 import { SyncDialog } from './SyncDialog';
@@ -43,15 +44,11 @@ export function WorkspaceCalendarPage({ source, timeZone, weekStart, onDatabases
 
   useEffect(() => {
     let alive = true;
-    void Promise.all([source.listDatabases(), source.loadSettings()]).then(([listed, stored]) => {
+    // The settings come with new databases already added (`autoAdd`), so there is nothing to save here.
+    void Promise.all([source.listDatabases(), source.loadSettings()]).then(([listed, loaded]) => {
       if (!alive) return;
-      let next = stored;
-      if (stored.sources.length === 0 && listed.databases.length > 0) {
-        next = defaultSettingsFor(listed.databases);
-        void source.saveSettings(next).catch(() => setSaveProblem(true));
-      }
       setDatabases(listed.databases);
-      setSettings(next);
+      setSettings(loaded);
     }).catch(() => { if (alive) setLoadError('暂时无法读取日历来源。'); });
     return () => { alive = false; };
   }, [source, attempt]);
@@ -86,16 +83,19 @@ export function WorkspaceCalendarPage({ source, timeZone, weekStart, onDatabases
     void source.saveSettings(current).then(() => { setSaveProblem(false); void refreshRef.current(); }).catch(() => setSaveProblem(true));
   };
 
-  /** After an import or subscription change: new databases join the settings, then everything reloads. */
+  /**
+   * After an import, a sync change or a reveal: new databases join the settings as the server would add them,
+   * and a calendar connected here joins even with `autoAdd` off. Then everything reloads.
+   */
   const reloadSources = useCallback(async () => {
     const listed = await source.listDatabases().catch(() => null);
     if (listed) {
       setDatabases(listed.databases);
       const current = settingsRef.current;
       if (current) {
-        let next = current;
+        let next = withAutoAddedSources(current, listed.databases);
         listed.databases.forEach((db, index) => {
-          if (!next.sources.some(s => s.databaseId === db.databaseId)) next = upsertSource(next, db, index, {});
+          if (db.sync && !next.sources.some(s => s.databaseId === db.databaseId)) next = upsertSource(next, db, index, {});
         });
         if (next !== current) {
           setSettings(next);
@@ -105,6 +105,13 @@ export function WorkspaceCalendarPage({ source, timeZone, weekStart, onDatabases
     }
     void refreshRef.current();
   }, [source]);
+
+  const reveal = source.sync ? async (databaseId: string) => {
+    try { await source.sync!.reveal(databaseId); }
+    catch { source.notice('未能显示到页面树，请重试。'); return; }
+    onDatabasesChanged?.();
+    await reloadSources();
+  } : undefined;
 
   const propertyTypes = useMemo(() => {
     const map = new Map<string, CalendarDatabaseOption['dateProperties'][number]['type']>();
@@ -191,7 +198,8 @@ export function WorkspaceCalendarPage({ source, timeZone, weekStart, onDatabases
       <button className="nb-btn nb-btn-quiet" onClick={() => setPanel(item => item === 'sources' ? null : 'sources')}>来源</button>
       {panel === 'sources' && settings && databases && <Popover label="日历来源设置" className="nb-wcal-pop" portal width={300}
         onClose={() => setPanel(null)}>
-        <SourcesPanel databases={databases} settings={settings} canWrite={source.canWrite} onChange={updateSettings} />
+        <SourcesPanel databases={databases} settings={settings} canWrite={source.canWrite} onChange={updateSettings}
+          {...(reveal ? { onReveal: reveal } : {})} />
       </Popover>}
     </span>
     <button className="nb-btn nb-btn-quiet" onClick={() => setPanel('sync')}>导入与同步</button>

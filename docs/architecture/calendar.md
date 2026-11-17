@@ -1,6 +1,6 @@
 # 日历
 
-需求见 [日历](../product/calendar.md)。本文记录一期和二期的契约与实现边界，验证结果见文末。
+需求见 [日历](../product/calendar.md)。本文记录三期的契约与实现边界，验证结果见文末。
 
 ## 日期值
 
@@ -156,7 +156,7 @@
 | 接口 | 说明 |
 | --- | --- |
 | `POST /caldav/discover` | 用服务器地址、账号和密码登录，列出可同步的日历，不保存任何内容 |
-| `POST /caldav` | 新建 CalDAV 来源和数据库，加密保存凭据，后台首次同步 |
+| `POST /caldav` | 按 `calendars`（1 到 20 个，各带数据库名称）每个日历新建一个 CalDAV 来源和数据库，全部建成或都不建；加密保存凭据，后台首次同步，返回 `{ sources }` |
 | `PATCH /sync/:id` | CalDAV 来源可改名称、间隔和 `credentials`（先验证再保存）；不能改服务器和日历 |
 | `POST /sync/:id/run` | CalDAV 来源也可立即同步 |
 | `DELETE /sync/:id` | 停止同步，删除凭据；数据库保留，外部日历不动 |
@@ -166,7 +166,7 @@
 
 ### 界面
 
-- 同步对话框新增“CalDAV 账号”：选预设或自定义服务器，显示获取专用密码的位置提示；填账号和密码后“连接”，列出日历（标出只读）；选一个，填数据库名称和间隔后开始同步。没有持久化或服务端没有密钥时说明原因并禁用。
+- 同步对话框新增“CalDAV 账号”：选预设或自定义服务器，显示获取专用密码的位置提示；填账号和密码后“连接”，列出日历（标出只读）；勾选一个或多个（默认勾第一个），每个勾选的日历右侧是它的数据库名称（默认日历名），选间隔后开始同步。没有持久化或服务端没有密钥时说明原因并禁用。
 - 来源列表显示 CalDAV 来源的服务器、日历名、双向或只读、上次同步、错误和冲突数；“更新密码”用于 `AUTH_FAILED` 或凭据不可用；“处理冲突”打开冲突列表，并排显示 NBase 和外部的标题、时间、地点、说明，按钮为保留 NBase 版本、保留外部版本、两份都保留。
 - 数据库日历视图和全局日历对只读行不允许拖动和编辑同步字段。
 
@@ -178,11 +178,11 @@
 
 2026-11-17 用户确认：同步日历数据库（文件导入、订阅、CalDAV 都算）默认不显示在页面里，也不作为链接目标。
 
-- `PageSummary.calendarSync: true` 标记这类数据库，由服务端按 `calendar_sync_sources` 是否有记录计算。
+- `PageSummary.calendarSync: true` 标记这类数据库。迁移 v24 起由 `databases.calendar_hidden` 决定（见“汇总同步与日历库显示”），不再按是否有来源记录计算。
 - 服务端：搜索不返回这类数据库及其行；关系图不含这类数据库。
 - 网页：页面树、最近、收藏、首页、数据库嵌入的选择、复制/移动/导入/每日笔记的目标位置、双链候选和按标题匹配、白板的页面选择、关联字段的目标库都排除它们。已有的链接仍按 ID 解析，可以打开。
 - 入口只有全局日历“同步来源”里每个来源的“打开数据库”。新建来源不再选位置，数据库建在工作区顶层。
-- 停止同步（文件导入也可以停止）后，数据库成为普通数据库，重新出现在页面树中。
+- ~~停止同步后，数据库成为普通数据库，重新出现在页面树中。~~ 2026-11-17 改为停止同步后仍隐藏，由全局日历“来源”的“显示到页面树”放回。
 
 ### 实现与上文的差异
 
@@ -190,6 +190,123 @@
 - `NBASE_CALENDAR_FETCH=off` 同时关闭 CalDAV：发现、新建、改凭据返回 422 `DISABLED`，定时运行记同样的错误。接口先检查密钥，没有密钥时仍是 503 `CREDENTIALS_UNAVAILABLE`。
 - `NBASE_CALDAV_PRIVATE` 只接受 `allow`、`deny` 或空；其他值，以及配置了却读不到或格式不对的密钥文件，都是启动错误。
 - `net/guardedFetch.ts` 固定 DNS 的 lookup 在 `options.all` 时必须返回地址数组（Node 20 起 `autoSelectFamily` 默认开启）。修复前所有按主机名的受防护请求（CalDAV、订阅、网页书签）都会失败，回归测试在 `caldav.test.ts`。
+## 三期：Google 与 Microsoft（OAuth）
+
+2026-11-17 用户确认：Google 和 Microsoft 都做；每个工作区自己在服务商后台注册 OAuth 应用，在界面里填写；实测只有 Google 账号，Microsoft 只用模拟服务器测试。契约在 `packages/contracts/src/calendar.ts` 的 OAuth 部分。
+
+开工前核实的官方文档（2026-11-17）：
+
+- Google 的设备码授权只开放 `email`、`openid`、`profile` 和 Drive、YouTube 的少数权限，不含日历，所以 Google 只能用浏览器回调。回调地址必须与登记的完全一致；https 之外只允许本机地址（`localhost`、`127.0.0.1`）。应用处于“测试”状态时，刷新令牌 7 天过期；“发布”后不用审核也能用，授权页显示“未经验证的应用”，最多 100 个用户。刷新令牌 6 个月不用会失效。
+- Google 提供 CalDAV 接口：`https://apidata.googleusercontent.com/caldav/v2/<日历 ID>/events`，只接受 OAuth（Basic 返回 401），支持 sync-collection，条件请求只支持 `If-Match`（不支持 `If-None-Match`）。需要在 Google Cloud 启用 CalDAV API；列日历用 Calendar API 的 `calendarList`，也要启用。
+- Microsoft 的设备码授权支持个人账号（`/common`、`/consumers`），应用要允许公共客户端流，不需要密钥。刷新令牌 90 天，每次刷新得到新的令牌。注册应用需要 Azure 账户（可免费申请）。
+- Graph 正式版（v1.0）的事件增量查询只能按固定时间窗口，并且返回展开后的单次；不限时间的增量只在 beta。重复系列用 `recurrence`（patternedRecurrence）表示，被改的单次在 `exceptionOccurrences`，被取消的单次在 `cancelledOccurrences`。
+
+### 来源与提供方
+
+- 来源类型仍是 `caldav`（双向同步），`CalendarCaldavInfo.provider` 区分 `caldav`（账号密码）、`google`、`microsoft`，`account` 是 OAuth 账号的邮箱。冲突、只读规则、本地改动 30 秒后写回、同步库不进入导航，都与二期相同。
+- **Google**：沿用二期的 CalDAV 同步引擎，认证换成 `Authorization: Bearer`。日历地址为 `https://apidata.googleusercontent.com/caldav/v2/<encodeURIComponent(日历 ID)>/events/`；`calendarList` 的 `accessRole` 为 `owner` 或 `writer` 时可写。新建事件不带 `If-None-Match`（地址用新 UUID，不会撞上已有资源）。
+- **Microsoft**：`calendar/graph/` 把 Graph 翻译成引擎使用的 `RemoteCalendar` 接口（`calendar/remote.ts`），引擎的拉取、比较、冲突和写回逻辑不变：
+  - 一个系列（或单个事件）是一个资源，地址为 `https://graph.microsoft.com/v1.0/me/events/<id>`；资源原文是由 Graph 数据合成的 iCalendar：系列 VEVENT（UID 用 `iCalUId`，RRULE 由 patternedRecurrence 转换，EXDATE 来自 `cancelledOccurrences`），每个被改的单次一个带 RECURRENCE-ID 的 VEVENT，参会人写成 ATTENDEE（所以带参会人的事件只读）。
+  - 资源的 ETag 由系列和各被改单次的 `changeKey` 合成。没有增量接口：每次运行列出日历里全部事件（系列和单个事件），与记录比对 ETag。
+  - 写回：引擎给出的新原文与 Graph 当前内容比较，只发有变化的字段（PATCH 系列或单次，取消单次用 DELETE 该单次）；新建用 POST，Graph 给出的事件地址和 `iCalUId` 由 `RemoteWriteResult.href`、`uid` 带回，引擎改用它们。条件写入用 `If-Match`（`@odata.etag`），412 按二期的流程重读再判断。
+  - 时间：请求带 `Prefer: outlook.timezone="UTC"` 和 `outlook.body-content-type="text"`；`originalStartTimeZone` 是 Windows 时区名时按一期的对照表换成 IANA。写回时 `timeZone` 用对应的 Windows 名称，没有对应时用 UTC。全天事件 `isAllDay`，结束日不含。重复规则只支持 patternedRecurrence 能表达的 RRULE（每天、每周若干天、每月第几天、每月第几个星期几、每年同上；结束为日期、次数或不结束）；其他规则的行不写回，计入警告 `WRITE_REJECTED`。
+  - 说明（正文）以纯文本写回；地点写 `location.displayName`。
+
+### OAuth 应用与授权
+
+- **应用**：存在 `calendar_oauth_apps`（每个工作区每个提供方一行）。Google 存客户端 ID 和加密后的客户端密钥（界面可直接上传 Google 下载的 JSON，取 `web` 或 `installed` 里的 `client_id`、`client_secret`）；Microsoft 存客户端 ID 和租户（默认 `common`）。需要凭据密钥，没有时 503 `CREDENTIALS_UNAVAILABLE`。有来源在用时不能删除（409 `OAUTH_APP_IN_USE`）；改客户端 ID 后，旧来源刷新失败会显示需要重新授权。
+- **Google 授权**：`POST /oauth/start` 生成 `state`（32 字节随机数，库里只存摘要）和 PKCE（S256），返回授权地址：`https://accounts.google.com/o/oauth2/v2/auth`，`scope=openid email https://www.googleapis.com/auth/calendar`，`access_type=offline`，`prompt=consent`，`redirect_uri = NBASE_PUBLIC_ORIGIN + /api/calendar/oauth/google/callback`。网页在新标签页打开它，原页面每 2 秒查一次流程状态。会话 Cookie 是 `SameSite=Strict`，从 Google 跳回时浏览器不会带上，所以回调不依赖会话：`POST /oauth/start` 同时设置一个 `SameSite=Lax`、HttpOnly、15 分钟的浏览器绑定 Cookie（同一浏览器已有就沿用，库里只存摘要）。回调按 `state` 找到未过期的流程，并要求绑定 Cookie 与发起时相同，防止别人诱导用户完成他发起的授权；然后用授权码换令牌，从 `id_token` 取邮箱和 `sub`，列出日历后把流程标为完成。回调页只显示“可以关闭此页”或失败原因，不带脚本。
+- **Microsoft 授权**：`POST /oauth/start` 向 `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/devicecode` 申请设备码，`scope=offline_access openid profile email https://graph.microsoft.com/Calendars.ReadWrite`，返回用户码和网址。网页显示用户码（可复制）和链接，按 `interval` 查询流程；查询时服务端最多每个间隔问一次令牌端点（`authorization_pending` 继续等，`slow_down` 加 5 秒，`authorization_declined` 为 `OAUTH_DENIED`，`expired_token` 为 `OAUTH_EXPIRED`）。账号取 `id_token` 的 `preferred_username` 或 `email`，以及 `oid`/`sub`。
+- **流程**：存在 `calendar_oauth_flows`，15 分钟过期，只有发起的用户能读。PKCE 校验串、设备码和拿到的令牌都加密保存。新来源流程完成后返回日历列表，`POST /oauth/sources` 用掉流程，为选中的每个日历建库和来源；这些来源各存一份加密的令牌、各自刷新，授权失效时逐个重新授权。重新授权（带 `sourceId`）完成时，账号（`sub`）必须与来源相同，否则为 `ACCOUNT_MISMATCH`；相同则替换来源的令牌并立即同步。
+- **令牌**：来源的 `credential_cipher` 存加密后的 `{ refreshToken, subject }`，附加数据仍是来源 ID。访问令牌只在内存里缓存到过期前 60 秒。刷新时服务商若返回新的刷新令牌，立即替换保存。`invalid_grant` 等表示授权失效，记为 `AUTH_FAILED`，界面提示重新授权。
+
+### 网络
+
+服务商地址是固定的，不来自用户输入，所以不做二期那样的私有地址检查（本机开了代理时，这些域名可能解析成 198.18.0.0/15 的地址）。改为固定主机名白名单：`accounts.google.com` 只在浏览器里打开；服务端只访问 `oauth2.googleapis.com`、`www.googleapis.com`、`apidata.googleusercontent.com`、`login.microsoftonline.com`、`graph.microsoft.com`，只用 https 默认端口，跳转只跟随到白名单内的主机，限时 30 秒、单次响应最多 10 MB。用户填写的 CalDAV 地址和订阅地址仍走二期的防护。`NBASE_CALENDAR_FETCH=off` 同样关闭 OAuth 来源。
+
+### 存储（迁移 v23）
+
+- `calendar_oauth_apps`：`workspace_id`、`provider`、`client_id`、`secret_cipher`（Google）、`tenant`（Microsoft）、`key_id`、时间。
+- `calendar_oauth_flows`：`id`、`workspace_id`、`user_id`、`provider`、`source_id`、`state_hash`、`binding_hash`、`secret_cipher`（PKCE 校验串或设备码）、`token_cipher`、`status`、`error`、`account_json`、`calendars_json`、`expires_at`、`next_poll_at`、`poll_interval`。过期的流程在访问时清理。
+- `calendar_sync_sources.caldav_json` 增加 `provider`、`account`、`subject`（OAuth 来源）。
+- 两张新表纳入备份引擎的表清单；恢复后密文仍需原凭据密钥。
+
+### 接口（新增）
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /oauth/apps` | 两个提供方的应用（不含密钥）与 Google 回调地址 |
+| `PUT /oauth/apps/google`、`PUT /oauth/apps/microsoft`、`DELETE /oauth/apps/:provider` | 保存或删除应用 |
+| `POST /oauth/start` | 开始授权；带 `sourceId` 为重新授权 |
+| `GET /oauth/flows/:flowId` | 流程状态；完成时带账号和日历列表（或更新后的来源） |
+| `POST /oauth/sources` | 用完成的流程为 `calendars` 里每个日历新建来源和数据库，与 `POST /caldav` 相同 |
+| `GET /api/calendar/oauth/google/callback` | Google 回调，不在工作区路径下 |
+
+错误：没有应用 422 `OAUTH_APP_MISSING`；Google 项目没有启用 CalDAV API 或 Calendar API 时，流程失败为 `API_DISABLED`，已有来源同步时记同样的错误（授权完成时先试读一次 CalDAV，尽早发现）；流程不存在、已过期被清理或不是本人 404；流程未完成或已用掉 422 `FLOW_NOT_READY`；有一个日历不在流程的日历里 422 `CALENDAR_NOT_FOUND`（都不建）；`sourceId` 不是同一提供方的 OAuth 来源 422 `SYNC_KIND_INVALID`；OAuth 来源用 PATCH `credentials` 也是 422 `SYNC_KIND_INVALID`；应用在用时删除 409 `OAUTH_APP_IN_USE`；没有密钥 503 `CREDENTIALS_UNAVAILABLE`；抓取关闭 422 `DISABLED`。
+
+### 界面
+
+- 同步对话框新增“Google 日历”和“Microsoft 日历”两块。没有配置应用时，显示分步说明（创建项目、启用 API、配置同意屏幕并发布、创建客户端；Microsoft 为注册应用、允许公共客户端流、添加 Calendars.ReadWrite），Google 的回调地址带复制按钮，并提供上传 JSON 或手填。配置后显示“连接 Google 账号”或“连接 Microsoft 账号”。
+- Google：点击后在新标签页打开授权页，本页显示等待和“重新打开授权页”；Microsoft：显示用户码、复制按钮和微软登录链接。完成后列出日历（标出只读），与 CalDAV 一样勾选多个、逐个填名称，选间隔后开始同步。
+- 来源列表显示提供方、账号邮箱和日历名；授权失效、凭据不可用或应用缺失时显示“重新授权”。其他与 CalDAV 来源相同。
+
+### 不做
+
+服务商推送通知（webhook，需要外网可达的地址）、Graph beta 接口、Google 的 Calendar API 事件接口（事件走 CalDAV）、共享给我的 Microsoft 日历（`Calendars.ReadWrite.Shared`）、内置的共用 OAuth 应用。
+
+### 实现说明（与上文不同或上文没写的）
+
+应用与密钥：
+
+- `GET /oauth/apps` 也要求凭据密钥，没有时 503 `CREDENTIALS_UNAVAILABLE`，网页只显示密钥说明，不显示填写表单。删除应用不需要密钥；提供方不是 `google` 或 `microsoft` 时 404；没有配置时删除也回 204。两个 PUT 是同一个 `PUT /oauth/apps/:provider` 路由，按提供方检查请求体。
+- 更换凭据密钥后，旧密钥加密的 Google 客户端密钥解不开：`GET /oauth/apps` 的 `google` 带 `secretUnavailable: true`，界面要求重新上传 JSON 或填写密钥（不能取消）；这时开始授权返回 422 `OAUTH_APP_MISSING`。已有来源的令牌也解不开，同步记 `CREDENTIALS_UNAVAILABLE`，重新保存应用后逐个“重新授权”。Microsoft 应用没有密钥，直接重新授权。
+
+授权流程：
+
+- 一次建多个来源（`POST /caldav` 与 `POST /oauth/sources`）：所有库和来源在同一个事务里，回执只有一份，用同一个 `clientMutationId` 重试返回同样的 `{ sources }`。`calendar_sync_sources` 每个创建者的 `client_mutation_id` 唯一，所以第一个来源存请求的 ID，后面的存由它和序号派生的 UUID（`sourceMutationId`）。两个选择指向同一个日历（地址编码或末尾斜杠不同也算）为 400 `INVALID_REQUEST`。
+- 15 分钟过期只限制等待中的流程。已完成的流程在清理前（过期 1 小时后）都能用来建来源；用掉的流程读取时仍是 `ready`，再用于建来源为 422 `FLOW_NOT_READY`。不存在或别人的流程在 `POST /oauth/sources` 里也是 404。
+- Google 回调：同一流程正在换令牌时再次回调，返回 409 页面；没有密钥或抓取已关闭时流程失败为 `FETCH_FAILED`；`access_denied` 和授权页上没有勾选日历权限都是 `OAUTH_DENIED`。授权完成时试读 CalDAV，只有 `API_DISABLED` 让流程失败，其他错误留给首次同步。
+- Microsoft：查询令牌时网络失败，流程失败为 `FETCH_FAILED`。刷新令牌时 `invalid_grant`、`interaction_required` 等需要用户重新登录的错误记 `AUTH_FAILED`。
+- 重新授权完成时，流程返回更新后的来源和空的日历列表，新的访问令牌直接放进缓存，紧接着的同步不再刷新。访问令牌缓存在进程内存里，按单进程部署设计。
+
+Graph 适配（`calendar/graph/`）：
+
+- 每次运行分页列出日历里的事件，系列再按 ID 读一遍（`$batch` 每批最多 20 个，批量失败时逐个读），才能拿到被改和被取消的单次。资源 ETag 是系列 `changeKey`、各被改单次的 (id, changeKey) 和被取消单次列表的 sha256。`calendarState` 读 `canEdit`；401 时换一次令牌，再 401 为 `AUTH_FAILED`。
+- 新建全天事件用工作区时区（调度器传入），时区没有 Windows 名称（如 `Asia/Chongqing`）时写 UTC。
+- patternedRecurrence 表达不了的规则（多个或负数的 BYMONTHDAY、第五个星期几、多个月份、BYSETPOS、带 BYDAY 的隔天重复、按小时等）：读取时原文写 `RRULE:X-NBASE-UNSUPPORTED=1`，行上警告 `RULE_UNSUPPORTED`；写回时 422，不发任何请求。带参会人的事件写回也是 422。
+- 取消一个单次：用 `/instances` 在该时刻前后 2 天内找到它，再 DELETE。Graph 的 409 和 412 都按 412 处理。
+- 在 NBase 里给系列新增一个“被改的单次”不会在 Outlook 创建；去掉一个 exdate 不会恢复已取消的单次。这两种改动目前被忽略，不报错。
+
+## 汇总同步与日历库显示（迁移 v24）
+
+需求见产品文档第 5、6 节。
+
+### 日历库的显示
+
+- `databases.calendar_hidden`（默认 false）：建同步库时设为 true；迁移时有来源记录的库补为 true。v24 之前停止的来源没有留下记录，迁移再按表结构认：字段正好是同步建库的“名称（标题）、时间（日期）、地点、说明、外部 ID（文本）”，没有已删除的字段，且每个视图都隐藏“外部 ID”，这样的库也补为 true；用户改过字段的库认不出，保持显示。停止同步只删来源记录，这个标记不变。
+- 页面树、搜索、关系图、链接候选的排除条件都改为看这个标记（`PageSummary.calendarSync` 名字不变）。
+- `POST /calendar/databases/:databaseId/reveal`（编辑者）：把标记设为 false，204。数据库不存在 404。
+- `CalendarDatabaseOption.hidden`：来源面板据此显示“显示到页面树”。
+
+### 新库自动加入
+
+- `CalendarSettings.autoAdd`（可省略，省略即 true）。服务端用“有效设置”：存下的 `sources` 之外、带日期字段的库，在 `autoAdd` 为 true 时按默认值补上（第一个 `date` 字段，没有时第一个日期类字段；颜色按库在列表中的位置取调色板）。用户关掉的库保留 `visible: false` 的记录，不会被补回。
+- `GET /settings` 返回有效设置；`POST /events` 和汇总同步都用有效设置。调色板移到契约（`calendarPalette`），网页和服务端共用。
+- 每个库只有一个来源记录：库里新加第二个日期字段不会自动多一项。
+
+### 汇总同步
+
+- `calendar_sync_sources.aggregate_user_id`：非空表示这个来源是汇总日历，值为打开汇总的用户；同一工作区最多一个（部分唯一索引）。只允许 `caldav` 类型且外部日历可写。用户被删除时置空。
+- `PATCH /sync/:id` 增加 `aggregate: boolean`：true 时把工作区里其他来源的汇总关掉，再设到这个来源；false 时清空。改完立即排一次同步。`CalendarCaldavInfo.aggregate` 返回当前状态。
+- **范围**：打开汇总的用户的有效设置里 `visible` 的 (库, 日期字段)，且库未删除、没有来源记录、`calendar_hidden` 为 false，字段是有效的 `date` 类型。创建时间、更新时间不推送。
+- **对应关系**：沿用 `calendar_sync_items`，加 `database_id`、`property_id`（同时为空或同时非空）。为空的是来源自己的库；非空的是汇总项，对应那个库里的行和那个日期字段。普通库没有地点、说明、外部 ID 字段，汇总项的同步字段只有标题和日期。
+- **同步过程**：同一个来源的一次运行里一起处理。拉取时每个事件按 UID 找到项，按项所在的库和字段比较、写行、建冲突副本；外部新出现的事件仍进来源自己的库，只有汇总系列被改的单次（`UID#RECURRENCE-ID`）进系列所在的库。推送时汇总项按自己的字段比较；写回外部时地点和说明保留外部原值。不在范围内的汇总项、日期被清空的汇总项，在拉取之后、推送之前删除外部事件（不带条件，404 也算完成）并删掉项。最后把范围内还没有项、日期有值的行作为新事件推送。
+- **触发**：行变化时，除了行所在库的来源，工作区的汇总来源也在 30 秒后运行；汇总用户保存来源设置时同样提前。
+- 冲突列表与处理按冲突行所在的库取字段；带参会人的汇总事件不在 NBase 里锁定，但不写回。
+- 来源的事件数、行数上限（每个来源最多 `calendarEventLimit` 项）包含汇总项。停止同步（删除来源）时汇总项随来源删除，外部事件保留，与其他来源一致。
+- 备份：只加列，备份引擎的表清单不变。
+- 网页：有效设置的补全规则在契约 `withAutoAddedSources`，服务端、演示工作台和网页刷新来源时共用；来源面板有“新数据库自动显示”开关和“显示到页面树”（只对隐藏、已无来源的库，编辑者可见）；同步对话框对可写 CalDAV 来源提供“设为汇总日历 / 取消汇总”，都先确认。验证见 `docs/validation.md`（2026-11-17：日历库显示与汇总同步）。
+
 ## 一期验证结果（2026-11-17）
 
 - 自动检查：`npm run check` 通过（服务端单元测试 102、前端 Vitest 77 文件 639 项、备份测试，构建通过）；`npm run test:db` 在便携 PostgreSQL 18.6（127.0.0.1:54329，见 [本机隔离 PostgreSQL](local-postgres.md)）上 22/22 通过，含日历迁移、JS 与 SQL 的范围/重复/时区一致性。

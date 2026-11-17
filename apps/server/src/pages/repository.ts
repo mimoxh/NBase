@@ -12,7 +12,7 @@ import { contentMatchesKind, isWhiteboardContent } from '../whiteboards/content.
 import { extractDocumentIndex, type IndexedPageReference } from './search-text.js';
 import { searchPages } from '../search/search.js';
 import { refreshPagePinyin } from '../search/write.js';
-import { changesKeptField, nudgeCaldav, syncLock } from '../calendar/locks.js';
+import { changesKeptField, nudgeAggregate, nudgeCaldav, syncLock } from '../calendar/locks.js';
 
 const maxRevision = 9223372036854775807n;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -149,10 +149,10 @@ const sortPositionGap = 1024;
 
 const pageColumns = `id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, kind, row_properties,
   revision::text AS revision, created_at, updated_at,
-  EXISTS (SELECT 1 FROM calendar_sync_sources cs WHERE cs.workspace_id = pages.workspace_id AND cs.database_id = pages.id) AS calendar_sync`;
+  EXISTS (SELECT 1 FROM databases cd WHERE cd.workspace_id = pages.workspace_id AND cd.page_id = pages.id AND cd.calendar_hidden) AS calendar_sync`;
 const joinedPageColumns = `p.id, p.workspace_id, p.parent_id, p.title, p.icon, p.cover, p.content_json, p.content_schema_version,
   p.kind, p.row_properties, p.revision::text AS revision, p.created_at, p.updated_at,
-  EXISTS (SELECT 1 FROM calendar_sync_sources cs WHERE cs.workspace_id = p.workspace_id AND cs.database_id = p.id) AS calendar_sync,
+  EXISTS (SELECT 1 FROM databases cd WHERE cd.workspace_id = p.workspace_id AND cd.page_id = p.id AND cd.calendar_hidden) AS calendar_sync,
   ARRAY(SELECT pt.tag_id FROM page_tags pt WHERE pt.workspace_id = p.workspace_id AND pt.page_id = p.id ORDER BY pt.tag_id) AS tag_ids`;
 
 export class PgPageRepository {
@@ -681,6 +681,7 @@ export class PgPageRepository {
         await this.rowChanged(client, workspaceId, root.rows[0].parent_id, [pageId]);
         await nudgeCaldav(client, workspaceId, root.rows[0].parent_id);
       }
+      if (deleted.rows.some(item => item.kind === 'database')) await nudgeAggregate(client, workspaceId);
       return { statusCode: 200, body: pageFromRow({ ...root.rows[0], tag_ids: row.tag_ids ?? [] }) };
     });
   }
@@ -729,6 +730,7 @@ export class PgPageRepository {
         await this.rowChanged(client, workspaceId, root.rows[0].parent_id, [pageId]);
         await nudgeCaldav(client, workspaceId, root.rows[0].parent_id);
       }
+      if (restored.rows.some(item => item.kind === 'database')) await nudgeAggregate(client, workspaceId);
       return { statusCode: 200, body: pageFromRow({ ...root.rows[0], tag_ids: row.tag_ids ?? [] }) };
     });
   }

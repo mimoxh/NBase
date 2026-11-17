@@ -4,8 +4,14 @@ import type { PgPageRepository } from '../pages/repository.js';
 import { openCredentials, type CredentialKey } from '../secrets/credentials.js';
 import { CalDavClient, CalDavError, guardedDavTransport, type DavTransport } from './caldav/client.js';
 import { syncCaldav } from './caldav/sync.js';
+import { createGraphCalendar } from './graph/adapter.js';
+import { googleCalDavClient } from './oauth/google.js';
+import { loadOAuthApp, oauthTokens, openTokens, type OAuthTokens } from './oauth/tokens.js';
+import { providerTransport } from './oauth/transport.js';
+import type { HttpTransport, RemoteCalendar } from './remote.js';
 import { fetchCalendar, fetchErrorCode, guardedCalendarFetcher, type CalendarFetcher } from './fetch.js';
 import { IcsError, parseIcs } from './ics.js';
+import { aggregateScopes } from './settings.js';
 import { finishSource, sourceColumns, staleClaim, urlHost, type SourceRow } from './sources.js';
 import { applyEvents, SyncFailure } from './sync.js';
 
@@ -24,6 +30,10 @@ export interface CalendarSyncOptions {
   caldavTransport?: DavTransport;
   /** NBASE_CALDAV_PRIVATE=allow: CalDAV may reach loopback and private addresses on any port. */
   caldavPrivate?: boolean;
+  /** Replaces the provider transport of Google and Microsoft requests (oauth/transport.ts); for tests. */
+  oauthTransport?: HttpTransport;
+  /** Access tokens of OAuth sources; defaults to the process-wide cache. */
+  oauthTokens?: OAuthTokens;
   log?: (message: string, details: Record<string, unknown>) => void;
 }
 
@@ -59,7 +69,32 @@ export async function runSubscription(pool: Pool, pages: PgPageRepository, sourc
   }
 }
 
-/** Syncs one claimed CalDAV source and records the outcome. Never throws for server or credential problems. */
+/**
+ * The remote calendar of a two-way source: CalDAV with the stored password, Google's CalDAV API or Microsoft Graph
+ * with the source's OAuth tokens. Null when the stored credentials cannot be opened.
+ */
+async function remoteCalendar(pool: Pool, source: SourceRow, options: CalendarSyncOptions, timeZone: string): Promise<RemoteCalendar | null> {
+  const key = options.credentialKey ?? null;
+  const stored = await pool.query<{ credential_cipher: Buffer | null; credential_key_id: string | null }>(
+    'SELECT credential_cipher, credential_key_id FROM calendar_sync_sources WHERE id = $1', [source.id]);
+  const cipher = stored.rows[0]?.credential_cipher;
+  if (!key || !cipher || !source.caldav_json) return null;
+  const provider = source.caldav_json.provider ?? 'caldav';
+  if (provider === 'caldav') {
+    const account = openCredentials(key, source.id, cipher, stored.rows[0]!.credential_key_id);
+    if (!account) return null;
+    const allowPrivate = options.caldavPrivate ?? false;
+    return new CalDavClient(options.caldavTransport ?? guardedDavTransport(allowPrivate), account, allowPrivate);
+  }
+  // Checked on every run, also with a cached access token, so a removed app stops the source.
+  if (!await loadOAuthApp(pool, key, source.workspace_id, provider)) throw new CalDavError('OAUTH_APP_MISSING');
+  if (!openTokens(key, source.id, cipher, stored.rows[0]!.credential_key_id)) return null;
+  const transport = options.oauthTransport ?? providerTransport();
+  const auth = (options.oauthTokens ?? oauthTokens).auth(pool, key, transport, { id: source.id, workspaceId: source.workspace_id, provider });
+  return provider === 'google' ? googleCalDavClient(transport, auth) : createGraphCalendar({ transport, auth, timeZone });
+}
+
+/** Syncs one claimed two-way source and records the outcome. Never throws for server or credential problems. */
 export async function runCaldav(pool: Pool, pages: PgPageRepository, source: SourceRow, options: CalendarSyncOptions): Promise<SourceRow | null> {
   if (!options.fetchEnabled) return finishSource(pool, source.id, { error: 'DISABLED' });
   const host = urlHost(source.caldav_json?.serverUrl ?? null);
@@ -67,14 +102,11 @@ export async function runCaldav(pool: Pool, pages: PgPageRepository, source: Sou
     const alive = await pool.query(`SELECT 1 FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL`,
       [source.workspace_id, source.database_id]);
     if (!alive.rows[0]) return finishSource(pool, source.id, {});
-    const key = options.credentialKey ?? null;
-    const stored = await pool.query<{ credential_cipher: Buffer | null }>('SELECT credential_cipher FROM calendar_sync_sources WHERE id = $1', [source.id]);
-    const cipher = stored.rows[0]?.credential_cipher;
-    const account = key && cipher ? openCredentials(key, source.id, cipher, source.credential_key_id) : null;
-    if (!account || !source.caldav_json) return finishSource(pool, source.id, { error: 'CREDENTIALS_UNAVAILABLE' });
-    const allowPrivate = options.caldavPrivate ?? false;
-    const client = new CalDavClient(options.caldavTransport ?? guardedDavTransport(allowPrivate), account, allowPrivate);
-    const result = await syncCaldav(pool, pages.snapshot.bind(pages), source, client, { timeZone: await workspaceZone(pool, source.workspace_id) });
+    const timeZone = await workspaceZone(pool, source.workspace_id);
+    const client = await remoteCalendar(pool, source, options, timeZone);
+    if (!client) return finishSource(pool, source.id, { error: 'CREDENTIALS_UNAVAILABLE' });
+    const aggregate = await aggregateScopes(pool, source.workspace_id, source.aggregate_user_id);
+    const result = await syncCaldav(pool, pages.snapshot.bind(pages), source, client, { timeZone, aggregate });
     return finishSource(pool, source.id, { counts: result.counts, warnings: result.warnings,
       caldav: { syncToken: result.syncToken, ctag: result.ctag, writable: result.writable } });
   } catch (error) {

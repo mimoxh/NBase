@@ -83,10 +83,21 @@ export async function managedPropertyIds(client: Db, workspaceId: string, databa
 /** Seconds after a local change to a CalDAV database before it is written back. */
 export const caldavPushDelaySeconds = 30;
 
-/** Brings the next run of a CalDAV source forward after its rows changed, so local edits reach the server soon. */
+/**
+ * Brings the next run of a CalDAV source forward after rows of its database changed, so local edits reach the server
+ * soon. Rows of any database may belong to the workspace's aggregate calendar, so that source is brought forward too.
+ */
 export async function nudgeCaldav(client: Db, workspaceId: string, databaseId: string | null): Promise<void> {
   if (!databaseId) return;
   await client.query(`UPDATE calendar_sync_sources SET next_run_at = LEAST(COALESCE(next_run_at, now() + $3 * interval '1 second'),
       now() + $3 * interval '1 second')
-    WHERE workspace_id = $1 AND database_id = $2 AND kind = 'caldav'`, [workspaceId, databaseId, caldavPushDelaySeconds]);
+    WHERE workspace_id = $1 AND kind = 'caldav' AND (database_id = $2 OR (aggregate_user_id IS NOT NULL
+      AND EXISTS (SELECT 1 FROM databases d WHERE d.workspace_id = $1 AND d.page_id = $2)))`, [workspaceId, databaseId, caldavPushDelaySeconds]);
+}
+
+/** After whole databases went to the trash or came back: the aggregate calendar follows soon. */
+export async function nudgeAggregate(client: Db, workspaceId: string): Promise<void> {
+  await client.query(`UPDATE calendar_sync_sources SET next_run_at = LEAST(COALESCE(next_run_at, now() + $2 * interval '1 second'),
+      now() + $2 * interval '1 second')
+    WHERE workspace_id = $1 AND aggregate_user_id IS NOT NULL`, [workspaceId, caldavPushDelaySeconds]);
 }

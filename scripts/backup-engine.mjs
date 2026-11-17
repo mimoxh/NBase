@@ -29,6 +29,7 @@ function tablesForSchema(version) {
     ...(version >= 17 ? { database_computed: 'workspace_id, row_id', database_computed_dirty: 'workspace_id, row_id' } : {}),
     ...(version >= 21 ? { calendar_settings: 'workspace_id, user_id', calendar_sync_sources: 'id', calendar_sync_items: 'source_id, uid' } : {}),
     ...(version >= 22 ? { calendar_sync_resources: 'source_id, href', calendar_sync_conflicts: 'source_id, uid' } : {}),
+    ...(version >= 23 ? { calendar_oauth_apps: 'workspace_id, provider', calendar_oauth_flows: 'id' } : {}),
   };
 }
 const backupLock = '2026110301';

@@ -62,6 +62,19 @@ describe('demo calendar source', () => {
     expect(events.events.map(item => item.rowId)).toEqual(['r3']);
   });
 
+  it('adds databases created later unless new databases are kept out', async () => {
+    const { state, source } = host([dbA, ...rows]);
+    expect((await source.loadSettings()).sources.map(s => s.databaseId)).toEqual(['db-a']);
+    state.current = { ...state.current, pages: [...state.current.pages, dbB] };
+    expect((await source.loadSettings()).sources.map(s => s.databaseId)).toEqual(['db-a', 'db-b']);
+    const dbC = page({ id: 'db-c', title: '日程', parentId: null, kind: 'database', database: { ...dbA.database!,
+      properties: [{ id: 'pc-date', name: '日期', type: 'date' }] } });
+    await source.saveSettings({ ...(await source.loadSettings()), autoAdd: false });
+    state.current = { ...state.current, pages: [...state.current.pages, dbC] };
+    expect((await source.loadSettings()).sources.map(s => s.databaseId)).toEqual(['db-a', 'db-b']);
+    expect((await source.listDatabases()).databases.every(db => !db.hidden)).toBe(true);
+  });
+
   it('writes a date value with the expected revision and rejects a stale one', async () => {
     const { state, source } = host();
     expect(await source.writeRowDate({ rowId: 'r1', propertyId: 'pa-date', value: '2026-11-17', expectedRevision: '2' })).toBe(false);

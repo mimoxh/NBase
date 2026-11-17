@@ -40,8 +40,15 @@ export class MockCalDav {
   private counter = 0;
   origin = '';
 
-  readonly home = '/dav/calendars/alice/';
+  readonly home: string = '/dav/calendars/alice/';
   readonly principal = '/dav/principals/alice/';
+  /** Replaces the HTTP Basic check, for servers that take bearer tokens. */
+  authorize: ((authorization: string | undefined) => boolean) | null = null;
+
+  /** `home` moves the calendars, e.g. to Google's `/caldav/v2/`. */
+  constructor(options: { home?: string } = {}) {
+    if (options.home) this.home = options.home;
+  }
 
   addCalendar(id: string, options: { name: string; writable: boolean; color?: string | null; components?: string[] }): string {
     this.calendars.set(`${this.home}${id}/`, { name: options.name, color: options.color ?? null, writable: options.writable,
@@ -91,7 +98,7 @@ export class MockCalDav {
       response.end(text);
     };
     const expected = `Basic ${Buffer.from(`${this.username}:${this.password}`).toString('base64')}`;
-    if (header('authorization') !== expected) return send(401, 'no', { 'www-authenticate': 'Basic realm="mock"' });
+    if (this.authorize ? !this.authorize(header('authorization')) : header('authorization') !== expected) return send(401, 'no', { 'www-authenticate': 'Basic realm="mock"' });
     const method = request.method ?? 'GET';
     const depth = header('depth') ?? '0';
 

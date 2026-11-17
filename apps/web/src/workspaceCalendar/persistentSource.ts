@@ -1,7 +1,9 @@
 import { defaultCalendarSettings, type CalDavDiscoverResponse, type CalendarEventsRequest, type CalendarEventsResponse,
   type CalendarImportRequest, type CalendarImportResponse, type CalendarReaderContext, type CalendarSettings, type CalendarSourcesResponse,
-  type CalendarSyncConflictsResponse, type CalendarSyncListResponse, type CalendarSyncSource, type CreateCalendarSubscriptionRequest,
-  type ResolveCalendarConflictRequest, type ResolveCalendarConflictResponse, type UpdateCalendarSyncRequest } from '@nbase/contracts';
+  type CalendarSyncConflictsResponse, type CalendarSyncListResponse, type CalendarSyncSource, type CreateCalendarSourcesResponse,
+  type CreateCalendarSubscriptionRequest,
+  type OAuthAppsResponse, type OAuthFlowResponse, type ResolveCalendarConflictRequest, type ResolveCalendarConflictResponse,
+  type StartOAuthResponse, type UpdateCalendarSyncRequest } from '@nbase/contracts';
 import { ApiError, pageClient, request, workspacePath } from '../persistence/client';
 import { databaseClient, rowFromPage } from '../database/persistentSource';
 import { copiedProperties, detachedSkip } from '../database/views/CalendarView';
@@ -54,7 +56,7 @@ export function createPersistentCalendarSource(options: PersistentCalendarOption
     remove: id => request<void>(path(`/sync/${encodeURIComponent(id)}`), 'DELETE', {}, csrfToken),
     discoverCaldav: body => request<CalDavDiscoverResponse>(path('/caldav/discover'), 'POST', body, csrfToken, undefined, caldavTimeoutMs),
     createCaldav: body => withReceipt(workspaceId, body.clientMutationId, () =>
-      request<CalendarSyncSource>(path('/caldav'), 'POST', body, csrfToken, undefined, caldavTimeoutMs)),
+      request<CreateCalendarSourcesResponse>(path('/caldav'), 'POST', body, csrfToken, undefined, caldavTimeoutMs)),
     updateCredentials: (id, credentials) => {
       const body: UpdateCalendarSyncRequest = { credentials };
       return request<CalendarSyncSource>(path(`/sync/${encodeURIComponent(id)}`), 'PATCH', body, csrfToken, undefined, caldavTimeoutMs);
@@ -64,6 +66,17 @@ export function createPersistentCalendarSource(options: PersistentCalendarOption
       const body: ResolveCalendarConflictRequest = { choice };
       return request<ResolveCalendarConflictResponse>(path(`/sync/${encodeURIComponent(id)}/conflicts/${encodeURIComponent(rowId)}`), 'POST', body, csrfToken);
     },
+    oauthApps: signal => request<OAuthAppsResponse>(path('/oauth/apps'), 'GET', undefined, undefined, signal),
+    putGoogleApp: body => request<OAuthAppsResponse>(path('/oauth/apps/google'), 'PUT', body, csrfToken),
+    putMicrosoftApp: body => request<OAuthAppsResponse>(path('/oauth/apps/microsoft'), 'PUT', body, csrfToken),
+    deleteOAuthApp: provider => request<void>(path(`/oauth/apps/${encodeURIComponent(provider)}`), 'DELETE', {}, csrfToken),
+    // Microsoft's start asks the provider for a device code.
+    startOAuth: body => request<StartOAuthResponse>(path('/oauth/start'), 'POST', body, csrfToken, undefined, caldavTimeoutMs),
+    oauthFlow: (flowId, signal) => request<OAuthFlowResponse>(path(`/oauth/flows/${encodeURIComponent(flowId)}`), 'GET', undefined, undefined,
+      signal, caldavTimeoutMs),
+    createOAuthSource: body => withReceipt(workspaceId, body.clientMutationId, () =>
+      request<CreateCalendarSourcesResponse>(path('/oauth/sources'), 'POST', body, csrfToken, undefined, caldavTimeoutMs)),
+    reveal: databaseId => request<void>(path(`/databases/${encodeURIComponent(databaseId)}/reveal`), 'POST', {}, csrfToken),
   };
 
   return {

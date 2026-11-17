@@ -257,7 +257,19 @@ test('calendar import, subscription sync, read-only fields and calendar reads', 
     // Removing the subscription unlocks the fields; the database and rows stay.
     assert.equal((await call('DELETE', `/calendar/sync/${subscription.id}`)).statusCode, 204);
     assert.equal((await call('DELETE', `/calendar/sync/${subscription.id}`)).statusCode, 404);
-    // ...and the database becomes an ordinary one again, at the top level where the sync created it.
+    // ...but the database stays out of navigation until it is revealed by hand.
+    listed = await tree();
+    assert.equal(listed.get(subDb)?.calendarSync, true);
+    assert.deepEqual(await search('推迟'), []);
+    assert.ok(!(await graphIds()).includes(subDb));
+    type SourceOption = { databaseId: string; hidden: boolean; sync: unknown };
+    const options = async () => new Map(((await call('GET', '/calendar/sources')).json() as { databases: SourceOption[] }).databases
+      .map(option => [option.databaseId, option]));
+    assert.deepEqual([(await options()).get(subDb)?.hidden, (await options()).get(subDb)?.sync], [true, null]);
+    assert.equal((await call('POST', `/calendar/databases/${randomUUID()}/reveal`)).statusCode, 404);
+    assert.equal((await call('POST', `/calendar/databases/${subDb}/reveal`)).statusCode, 204);
+    assert.equal((await options()).get(subDb)?.hidden, false);
+    // Revealed, it is an ordinary database at the top level where the sync created it.
     listed = await tree();
     assert.ok(listed.has(subDb) && !('calendarSync' in listed.get(subDb)!));
     assert.equal(listed.get(fileDb)?.calendarSync, true);

@@ -1,8 +1,7 @@
-import { activeProperties, calendarSourceRowCap, isCalendarProperty, rowValueProblem, type CalendarDatabaseOption,
-  type CalendarEventItem, type CalendarEventsResponse, type CalendarSettings, type RowProperties } from '@nbase/contracts';
+import { activeProperties, calendarSourceRowCap, defaultCalendarSettings, isCalendarProperty, rowValueProblem, withAutoAddedSources,
+  type CalendarDatabaseOption, type CalendarEventItem, type CalendarEventsResponse, type CalendarSettings, type RowProperties } from '@nbase/contracts';
 import { workspaceReducer, type Action, type Page, type Workspace } from '../workspace/model';
 import { copiedProperties } from '../database/views/CalendarView';
-import { defaultSettingsFor } from './settings';
 import type { WorkspaceCalendarSource } from './source';
 
 const isRowPage = (page: Page) => page.kind === 'row' && !page.deleted;
@@ -18,7 +17,9 @@ export function createDemoCalendarSource(options: {
   openPage: (id: string) => void;
   notice: (text: string) => void;
 }): WorkspaceCalendarSource {
-  let settings: CalendarSettings | null = null;
+  let stored: CalendarSettings = defaultCalendarSettings;
+  /** Like the server: databases the settings do not mention join while `autoAdd` is on. */
+  const effective = () => withAutoAddedSources(stored, databases());
   const dailyNotes = new Map<string, string>();
 
   const apply = (action: Action) => {
@@ -34,6 +35,7 @@ export function createDemoCalendarSource(options: {
       dateProperties: activeProperties(page.database!.properties).filter(isCalendarProperty)
         .map(def => ({ id: def.id, name: def.name, type: def.type as 'date' | 'created_time' | 'updated_time' })),
       sync: null,
+      hidden: false,
     }))
     .filter(db => db.dateProperties.length > 0);
   const databasePage = (id: string) => {
@@ -63,13 +65,10 @@ export function createDemoCalendarSource(options: {
     persistent: false,
     canWrite: true,
     listDatabases: async () => ({ databases: databases() }),
-    loadSettings: async () => {
-      if (!settings) settings = defaultSettingsFor(databases());
-      return structuredClone(settings);
-    },
-    saveSettings: async next => { settings = structuredClone(next); },
+    loadSettings: async () => structuredClone(effective()),
+    saveSettings: async next => { stored = structuredClone(next); },
     loadEvents: async (from, to) => {
-      if (!settings) settings = defaultSettingsFor(databases());
+      const settings = effective();
       const events: CalendarEventItem[] = [];
       const truncated: string[] = [];
       for (const source of settings.sources) {
