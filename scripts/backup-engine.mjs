@@ -18,7 +18,7 @@ const baseTables = {
   page_favorites: 'workspace_id, user_id, page_id',
 };
 
-function tablesForSchema(version) {
+export function tablesForSchema(version) {
   return {
     ...baseTables,
     ...(version >= 7 ? { workspace_tags: 'workspace_id, id', page_tags: 'workspace_id, page_id, tag_id' } : {}),
@@ -30,6 +30,11 @@ function tablesForSchema(version) {
     ...(version >= 21 ? { calendar_settings: 'workspace_id, user_id', calendar_sync_sources: 'id', calendar_sync_items: 'source_id, uid' } : {}),
     ...(version >= 22 ? { calendar_sync_resources: 'source_id, href', calendar_sync_conflicts: 'source_id, uid' } : {}),
     ...(version >= 23 ? { calendar_oauth_apps: 'workspace_id, provider', calendar_oauth_flows: 'id' } : {}),
+    ...(version >= 26 ? { workspace_invitations: 'id' } : {}),
+    ...(version >= 27 ? { database_schema_versions: 'workspace_id, database_id, revision' } : {}),
+    ...(version >= 28 ? { page_comment_threads: 'id', page_comments: 'id', page_share_links: 'id' } : {}),
+    // v29 adds page_versions.search_text; rows are exported whole, so the table set does not change.
+    ...(version >= 30 ? { page_collab_rooms: 'workspace_id, page_id', page_collab_updates: 'workspace_id, page_id, epoch, seq' } : {}),
   };
 }
 const backupLock = '2026110301';
@@ -325,6 +330,15 @@ async function restore(root, attachments) {
       requireValue(JSON.stringify(await attachmentMetadata(db.client)) === JSON.stringify(manifest.attachmentMetadata), 'Restored attachment metadata differs');
       await db.client.query('DELETE FROM sessions');
       await db.client.query('UPDATE users SET auth_epoch = auth_epoch + 1');
+      // A link revoked after this backup was taken must not come back to life with the restore.
+      if (tables.workspace_invitations) {
+        await db.client.query('UPDATE workspace_invitations SET revoked_at = now() WHERE accepted_at IS NULL AND revoked_at IS NULL');
+      }
+      if (tables.page_share_links) {
+        await db.client.query('UPDATE page_share_links SET revoked_at = now() WHERE revoked_at IS NULL AND expires_at > now()');
+      }
+      // Rooms are rebuilt from revisions; restored Yjs state would let clients from after the backup merge into it.
+      if (tables.page_collab_rooms) await db.client.query('DELETE FROM page_collab_rooms');
     });
   } finally { db.client.release(); await db.pool.end(); }
 }

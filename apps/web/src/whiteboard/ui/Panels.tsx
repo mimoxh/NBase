@@ -44,15 +44,24 @@ export function ContextMenu({ x, y, items, bounds, onClose }: { x: number; y: nu
 
 export interface PickablePage { id: string; title: string; icon: string | null; kind?: string | undefined; calendarSync?: boolean | undefined }
 
-export function PagePicker({ pages, onPick, onClose, label = '插入页面卡片', placeholder = '搜索要引用的页面' }: {
+export function PagePicker({ pages, onPick, onClose, onCreate, createLabel = '新建页面', emptyLabel = '没有匹配的页面',
+  label = '插入页面卡片', placeholder = '搜索要引用的页面' }: {
   pages: readonly PickablePage[]; onPick: (page: PickablePage) => void; onClose: () => void; label?: string; placeholder?: string;
+  /** Offered when nothing matches; receives the typed text as the new title. */
+  onCreate?: ((title: string) => Promise<void>) | undefined; createLabel?: string; emptyLabel?: string;
 }) {
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
+  const [creating, setCreating] = useState(false);
   const matches = useMemo(() => {
     const q = query.trim().toLowerCase();
     return pages.filter(page => !q || (page.title || '未命名页面').toLowerCase().includes(q)).slice(0, 80);
   }, [pages, query]);
+  const create = () => {
+    if (!onCreate || creating) return;
+    setCreating(true);
+    void onCreate(query.trim()).finally(() => setCreating(false));
+  };
   return <div className="wb-modal-scrim" role="presentation" onPointerDown={event => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="wb-modal" role="dialog" aria-modal="true" aria-label={label}>
       <div className="nb-pal-input"><BoardIcon name="search" size={16} />
@@ -64,25 +73,32 @@ export function PagePicker({ pages, onPick, onClose, label = '插入页面卡片
             if (event.key === 'ArrowDown') { event.preventDefault(); setActive(Math.min(active + 1, matches.length - 1)); }
             if (event.key === 'ArrowUp') { event.preventDefault(); setActive(Math.max(active - 1, 0)); }
             if (event.key === 'Enter' && matches[active]) { event.preventDefault(); onPick(matches[active]!); }
+            else if (event.key === 'Enter' && !matches.length && onCreate) { event.preventDefault(); create(); }
           }} /></div>
       <div className="nb-pal-list" role="listbox" aria-label="页面">
         {matches.length ? matches.map((page, i) => <button key={page.id} type="button" role="option" aria-selected={i === active}
           className={`nb-pal-item ${i === active ? 'sel' : ''}`} onMouseEnter={() => setActive(i)} onClick={() => onPick(page)}>
           <span className="nb-page-icon" aria-hidden="true">{page.icon ?? (page.kind === 'database' ? '🗃️' : page.kind === 'whiteboard' ? '🧭' : '📄')}</span>
           <span className="nb-pal-main"><span className="nb-pal-title">{page.title || '未命名页面'}</span></span>
-        </button>) : <div className="nb-pal-msg">没有匹配的页面</div>}
+        </button>) : <>
+          <div className="nb-pal-msg">{emptyLabel}</div>
+          {onCreate && <button type="button" className="nb-pal-item sel wb-picker-create" disabled={creating} onClick={create}>
+            <span className="nb-page-icon" aria-hidden="true"><BoardIcon name="plus" size={16} /></span>
+            <span className="nb-pal-main"><span className="nb-pal-title">{creating ? '正在创建…' : query.trim() ? `${createLabel}「${query.trim()}」` : createLabel}</span></span>
+          </button>}
+        </>}
       </div>
     </div>
   </div>;
 }
 
 export function ZoomBar({ store, onFit }: { store: BoardStore; onFit: () => void }) {
-  useBoard(store);
+  useBoard(store, s => `${Math.round(s.view.zoom * 100)}|${s.canUndo}|${s.canRedo}|${s.minimap}|${s.background}|${s.readOnly}`);
   const backgrounds = { dots: '点阵背景', grid: '网格背景', none: '无背景' } as const;
   return <div className="wb-zoombar" role="toolbar" aria-label="视图">
     {!store.readOnly && <>
-      <button type="button" className="wb-pbtn" title="撤销 (Ctrl+Z)" aria-label="撤销" disabled={!store.history.canUndo} onClick={() => store.undo()}><BoardIcon name="undo" size={16} /></button>
-      <button type="button" className="wb-pbtn" title="重做 (Ctrl+Shift+Z)" aria-label="重做" disabled={!store.history.canRedo} onClick={() => store.redo()}><BoardIcon name="redo" size={16} /></button>
+      <button type="button" className="wb-pbtn" title="撤销 (Ctrl+Z)" aria-label="撤销" disabled={!store.canUndo} onClick={() => store.undo()}><BoardIcon name="undo" size={16} /></button>
+      <button type="button" className="wb-pbtn" title="重做 (Ctrl+Shift+Z)" aria-label="重做" disabled={!store.canRedo} onClick={() => store.redo()}><BoardIcon name="redo" size={16} /></button>
       <span className="wb-sep" />
     </>}
     <button type="button" className="wb-pbtn" title="缩小 (Ctrl+-)" aria-label="缩小" onClick={() => store.zoomBy(0.8)}><BoardIcon name="zoomOut" size={16} /></button>
@@ -98,7 +114,7 @@ export function ZoomBar({ store, onFit }: { store: BoardStore; onFit: () => void
 
 /** Overview of the board; click or drag to move the viewport. */
 export function Minimap({ store, dark }: { store: BoardStore; dark: boolean }) {
-  useBoard(store);
+  useBoard(store, s => s.minimap ? s.version : 'off');
   const ref = useRef<HTMLCanvasElement>(null);
   const width = 200, height = 132;
   const world = store.minimap ? unionRects([boardBounds(visibleElements(store.elements), store.index) ?? { x: 0, y: 0, w: 1, h: 1 },

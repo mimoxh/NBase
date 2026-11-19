@@ -278,10 +278,15 @@ export function registerTemplateRoutes(app: FastifyInstance, pool: Pool, pages: 
         // Copying a database or a row would need its schema and values; not supported yet.
         if (source.kind !== 'document') throw new PageError(422, 'PAGE_KIND_INVALID');
         const defaultTitle = (source.title.trim() || '未命名页面').slice(0, 251).replace(/[\ud800-\udbff]$/u, '') + '（副本）';
+        // A copy placed in a database becomes a row, which has the database's fields instead of its own.
+        const parent = body.parentId === null ? null : await client.query<{ kind: string }>(
+          'SELECT kind FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL', [workspaceId, body.parentId]);
+        const keepProperties = parent?.rows[0]?.kind !== 'database' && !!source.pageProperties?.length;
         return pages.createInTransaction(client, workspaceId, actorId, {
           clientMutationId: body.clientMutationId, parentId: body.parentId, title: body.title || defaultTitle,
           content: validateDocumentContent(source.content), icon: source.icon, cover: source.cover,
           ...(source.tagIds ? { tagIds: source.tagIds } : {}),
+          ...(keepProperties ? { pageProperties: source.pageProperties } : {}),
         });
       });
       return reply.code(result.statusCode).send(result.body);

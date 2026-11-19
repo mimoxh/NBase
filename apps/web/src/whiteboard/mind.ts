@@ -2,20 +2,24 @@ import type { WhiteboardShape } from '@nbase/contracts';
 import { expandRect, pointInRect, unionRects, type Box, type Point } from './geometry';
 import { createShape, fitText, indexElements, mindDescendants, mindRootOf, mindVisibility, palette, textPadding, type El, type Elements,
   type Index } from './model';
-import { textBlockSize, type Measure } from './text';
+import { layoutText, type Measure } from './text';
 
 /**
  * Mind maps are ordinary shapes linked by `mindParentId`; edges are drawn from that link rather
  * than stored. Branches grow to the right of the root, or to its left when the first-level node
- * says so, and the tree is laid out again after every change. Sibling order is array order.
+ * says so; a root with `mindLayout: 'down'` instead grows an organisation chart downwards. The
+ * tree is laid out again after every change. Sibling order is array order.
  */
 export const horizontalGap = 56;
 const verticalGap = 14;
+/** Organisation charts: space between levels, and between neighbouring branches. */
+const levelGap = 48;
+const branchGap = 20;
 /** Dragging a node this far outside its map makes it a map of its own. */
 const detachDistance = 140;
 
-export type MindSide = 'left' | 'right';
-export type MindLayout = 'right' | 'left' | 'both';
+export type MindSide = 'left' | 'right' | 'down';
+export type MindLayout = 'right' | 'left' | 'both' | 'down';
 
 export const isMindNode = (el: El | undefined): el is WhiteboardShape => el?.type === 'shape' && el.mindParentId !== undefined;
 
@@ -38,20 +42,23 @@ export function mindSideOf(node: WhiteboardShape, index: Index): MindSide {
   for (let steps = 0; cursor.mindParentId && steps < 10_000; steps += 1) {
     const parent = index.get(cursor.mindParentId);
     if (!isMindNode(parent)) break;
-    if (parent.mindParentId === null) return cursor.mindSide === 'left' ? 'left' : 'right';
+    if (parent.mindParentId === null) return parent.mindLayout === 'down' ? 'down' : cursor.mindSide === 'left' ? 'left' : 'right';
     cursor = parent;
   }
   return 'right';
 }
 
 export function mindLayoutOf(elements: Elements, rootId: string): MindLayout {
+  const root = elements.find(el => el.id === rootId);
+  if (isMindNode(root) && root.mindLayout === 'down') return 'down';
   const kids = mindChildren(elements, rootId);
   const left = kids.filter(kid => kid.mindSide === 'left').length;
   return !left ? 'right' : left === kids.length ? 'left' : 'both';
 }
 
 /** Where an edge leaves the parent and enters the child; decided by their positions so it also holds mid-drag. */
-export function mindEdgeEnds(parent: Box, child: Box): { from: Point; to: Point } {
+export function mindEdgeEnds(parent: Box, child: Box, side: MindSide = 'right'): { from: Point; to: Point } {
+  if (side === 'down') return { from: { x: parent.x + parent.w / 2, y: parent.y + parent.h }, to: { x: child.x + child.w / 2, y: child.y } };
   const left = child.x + child.w / 2 < parent.x + parent.w / 2;
   return { from: { x: left ? parent.x : parent.x + parent.w, y: parent.y + parent.h / 2 },
     to: { x: left ? child.x + child.w : child.x, y: child.y + child.h / 2 } };
@@ -63,6 +70,20 @@ export function layoutMind(elements: Elements, rootId: string): El[] {
   const root = elements.find(el => el.id === rootId);
   if (!isMindNode(root)) return elements as El[];
   const kidsOf = (node: WhiteboardShape, depth: number) => depth > 200 || node.mindCollapsed ? [] : children.get(node.id) ?? [];
+  const placed = root.mindLayout === 'down' ? layoutDown(root, kidsOf) : layoutSideways(root, kidsOf);
+  let changed = false;
+  const next = elements.map(el => {
+    const position = placed.get(el.id);
+    if (!position || !isMindNode(el) || (Math.abs(el.x - position.x) < 0.01 && Math.abs(el.y - position.y) < 0.01 && el.angle === 0)) return el;
+    changed = true;
+    return { ...el, x: position.x, y: position.y, angle: 0 };
+  });
+  return changed ? next : elements as El[];
+}
+
+type KidsOf = (node: WhiteboardShape, depth: number) => WhiteboardShape[];
+
+function layoutSideways(root: WhiteboardShape, kidsOf: KidsOf): Map<string, Point> {
   const heights = new Map<string, number>();
   const span = (kids: WhiteboardShape[]) => kids.reduce((sum, kid) => sum + heights.get(kid.id)!, 0) + Math.max(0, kids.length - 1) * verticalGap;
   const measureTree = (node: WhiteboardShape, depth: number): number => {
@@ -88,14 +109,40 @@ export function layoutMind(elements: Elements, rootId: string): El[] {
   const first = kidsOf(root, 0), centerY = root.y + root.h / 2;
   placeKids(root, first.filter(kid => kid.mindSide !== 'left'), root.x, centerY, 'right', 0);
   placeKids(root, first.filter(kid => kid.mindSide === 'left'), root.x, centerY, 'left', 0);
-  let changed = false;
-  const next = elements.map(el => {
-    const position = placed.get(el.id);
-    if (!position || !isMindNode(el) || (Math.abs(el.x - position.x) < 0.01 && Math.abs(el.y - position.y) < 0.01 && el.angle === 0)) return el;
-    changed = true;
-    return { ...el, x: position.x, y: position.y, angle: 0 };
-  });
-  return changed ? next : elements as El[];
+  return placed;
+}
+
+/**
+ * Organisation chart: children in a row under their parent, centred on it, each level on one
+ * shared line so cousins line up even when their parents differ in height.
+ */
+function layoutDown(root: WhiteboardShape, kidsOf: KidsOf): Map<string, Point> {
+  const widths = new Map<string, number>();
+  const rowHeights: number[] = [];
+  const span = (kids: WhiteboardShape[]) => kids.reduce((sum, kid) => sum + widths.get(kid.id)!, 0) + Math.max(0, kids.length - 1) * branchGap;
+  const measureTree = (node: WhiteboardShape, depth: number) => {
+    const kids = kidsOf(node, depth);
+    for (const kid of kids) measureTree(kid, depth + 1);
+    rowHeights[depth] = Math.max(rowHeights[depth] ?? 0, node.h);
+    widths.set(node.id, Math.max(node.w, span(kids)));
+  };
+  measureTree(root, 0);
+  const rowTops: number[] = [root.y];
+  for (let depth = 1; depth < rowHeights.length; depth += 1) rowTops[depth] = rowTops[depth - 1]! + rowHeights[depth - 1]! + levelGap;
+  const placed = new Map<string, Point>([[root.id, { x: root.x, y: root.y }]]);
+  const placeKids = (node: WhiteboardShape, centerX: number, depth: number) => {
+    const kids = kidsOf(node, depth);
+    let cursor = centerX - span(kids) / 2;
+    for (const kid of kids) {
+      const width = widths.get(kid.id)!;
+      const middle = cursor + width / 2;
+      placed.set(kid.id, { x: middle - kid.w / 2, y: rowTops[depth + 1]! });
+      placeKids(kid, middle, depth + 1);
+      cursor += width + branchGap;
+    }
+  };
+  placeKids(root, root.x + root.w / 2, 0);
+  return placed;
 }
 
 /** Lay out every mind map that contains one of the given nodes. */
@@ -108,14 +155,14 @@ export function layoutMindsOf(elements: Elements, ids: Iterable<string>): El[] {
   return next;
 }
 
-export function mindNodeSize(text: string, fontSize: number, measure: Measure, bold = false): { w: number; h: number } {
-  const block = textBlockSize(text || '　', 240, fontSize, bold, measure);
+export function mindNodeSize(text: string, fontSize: number, measure: Measure, bold = false, runs?: WhiteboardShape['runs']): { w: number; h: number } {
+  const block = layoutText({ text: text || '　', runs: text ? runs : undefined, fontSize, bold }, 240, measure);
   return { w: Math.max(72, Math.ceil(block.width) + textPadding * 2 + 12), h: Math.max(36, block.height + textPadding * 2) };
 }
 
 /** Resize a node to its text; mind nodes hug their label instead of keeping a user-set box. */
 export function fitMindNode(node: WhiteboardShape, measure: Measure): WhiteboardShape {
-  const size = mindNodeSize(node.text, node.fontSize, measure, Boolean(node.bold));
+  const size = mindNodeSize(node.text, node.fontSize, measure, Boolean(node.bold), node.runs);
   return size.w === node.w && size.h === node.h ? node : { ...node, ...size, y: node.y + (node.h - size.h) / 2 };
 }
 
@@ -128,7 +175,7 @@ export function createMindRoot(id: string, x: number, y: number, text: string, m
   return { ...node, ...size, x: x - size.w / 2, y: y - size.h / 2 };
 }
 
-function without<K extends 'mindSide' | 'mindCollapsed'>(node: WhiteboardShape, key: K): WhiteboardShape {
+function without<K extends 'mindSide' | 'mindCollapsed' | 'mindLayout'>(node: WhiteboardShape, key: K): WhiteboardShape {
   if (node[key] === undefined) return node;
   const next = { ...node };
   delete next[key];
@@ -175,12 +222,16 @@ export function setMindCollapsed(elements: Elements, id: string, collapsed: bool
   return layoutMind(next, mindRootOf(node, index)!.id);
 }
 
-/** Send the root's branches to the right, to the left, or half to each side. */
+/** Send the root's branches to the right, to the left, half to each side, or down as an organisation chart. */
 export function setMindLayout(elements: Elements, rootId: string, layout: MindLayout): El[] {
   const kids = mindChildren(elements, rootId);
-  const leftFrom = layout === 'right' ? kids.length : layout === 'left' ? 0 : Math.ceil(kids.length / 2);
+  const leftFrom = layout === 'right' || layout === 'down' ? kids.length : layout === 'left' ? 0 : Math.ceil(kids.length / 2);
   const left = new Set(kids.slice(leftFrom).map(kid => kid.id));
   const next = elements.map(el => {
+    if (isMindNode(el) && el.id === rootId && el.mindParentId === null) {
+      if (layout === 'down') return el.mindLayout === 'down' ? el : { ...el, mindLayout: 'down' as const };
+      return without(el, 'mindLayout');
+    }
     if (!isMindNode(el) || el.mindParentId !== rootId || (el.mindSide === 'left') === left.has(el.id)) return el;
     return left.has(el.id) ? { ...el, mindSide: 'left' as const } : without(el, 'mindSide');
   });
@@ -203,10 +254,11 @@ export function moveMindNode(elements: Elements, id: string, drop: MindDrop): El
   const node = index.get(id);
   if (!isMindNode(node)) return elements as El[];
   const oldRoot = mindRootOf(node, index)!;
-  const bare = without(node, 'mindSide');
+  const bare = without(without(node, 'mindSide'), 'mindLayout');
   if (drop.parentId === null) {
     if (node.mindParentId === null) return elements as El[];
-    const detached = elements.map(el => el.id === id ? { ...bare, mindParentId: null } : el);
+    // A branch taken out of an organisation chart keeps growing downwards.
+    const detached = elements.map(el => el.id === id ? { ...bare, mindParentId: null, ...(oldRoot.mindLayout === 'down' ? { mindLayout: 'down' as const } : {}) } : el);
     return layoutMind(layoutMind(detached, oldRoot.id), id);
   }
   const parent = index.get(drop.parentId);
@@ -229,7 +281,7 @@ export function moveMindNode(elements: Elements, id: string, drop: MindDrop): El
   const placed = [...rest.slice(0, at), moved, ...rest.slice(at)];
   // Dropped back where it came from: nothing to save.
   const siblings = (list: Elements) => list.filter(el => isMindNode(el) && el.mindParentId === parent.id).map(el => el.id).join();
-  if (moved.mindParentId === node.mindParentId && moved.mindSide === node.mindSide && !parent.mindCollapsed && siblings(placed) === siblings(elements)) return elements as El[];
+  if (moved.mindParentId === node.mindParentId && moved.mindSide === node.mindSide && moved.mindLayout === node.mindLayout && !parent.mindCollapsed && siblings(placed) === siblings(elements)) return elements as El[];
   let next = layoutMind(placed, newRoot.id);
   if (oldRoot.id !== newRoot.id && oldRoot.id !== id) next = layoutMind(next, oldRoot.id);
   return next;
@@ -258,7 +310,7 @@ export function mindDropTarget(elements: Elements, index: Index, id: string, poi
   for (let i = elements.length - 1; i >= 0; i -= 1) {
     const el = elements[i]!;
     if (!isMindNode(el) || el.locked || subtree.has(el.id) || hidden.has(el.id) || !pointInRect(pointer, el, tolerance)) continue;
-    const side = el.mindParentId === null ? (pointer.x < el.x + el.w / 2 ? 'left' : 'right') : mindSideOf(el, index);
+    const side = el.mindParentId === null ? (el.mindLayout === 'down' ? 'down' : pointer.x < el.x + el.w / 2 ? 'left' : 'right') : mindSideOf(el, index);
     return { parentId: el.id, side, box: el, line: null };
   }
   const root = mindRootOf(node, index)!;
@@ -270,6 +322,17 @@ export function mindDropTarget(elements: Elements, index: Index, id: string, poi
   const area = unionRects(others);
   if (!area || !pointInRect(pointer, expandRect(area, detachDistance))) return { parentId: null, side: 'right', box: null, line: null };
   const underRoot = parent.mindParentId === null;
+  if (mindSideOf(node, index) === 'down') {
+    // In an organisation chart siblings sit in a row, so the pointer's horizontal place picks the slot.
+    const siblings = mindChildren(elements, parent.id).filter(sibling => sibling.id !== id);
+    const nextAt = siblings.findIndex(sibling => sibling.x + sibling.w / 2 > pointer.x);
+    const next = nextAt < 0 ? undefined : siblings[nextAt], previous = nextAt < 0 ? siblings.at(-1) : siblings[nextAt - 1];
+    const x = next && previous ? (previous.x + previous.w + next.x) / 2 : next ? next.x - branchGap / 2
+      : previous ? previous.x + previous.w + branchGap / 2 : parent.x + parent.w / 2;
+    const y = next?.y ?? previous?.y ?? parent.y + parent.h + levelGap;
+    return { parentId: parent.id, ...(next ? { beforeId: next.id } : previous ? { afterId: previous.id } : {}), side: 'down', box: null,
+      line: { from: { x, y }, to: { x, y: y + Math.max(next?.h ?? 0, previous?.h ?? 0, 36) } } };
+  }
   const side: MindSide = underRoot ? (pointer.x < parent.x + parent.w / 2 ? 'left' : 'right') : mindSideOf(node, index);
   const siblings = mindChildren(elements, parent.id).filter(sibling => sibling.id !== id && (!underRoot || (sibling.mindSide === 'left') === (side === 'left')));
   const nextAt = siblings.findIndex(sibling => sibling.y + sibling.h / 2 > pointer.y);
@@ -285,11 +348,13 @@ export const mindToggleRadius = 9;
 
 /** Centre of the collapse / expand button, just outside the node on the side its children grow. */
 export function mindTogglePoint(node: WhiteboardShape, side: MindSide): Point {
+  if (side === 'down') return { x: node.x + node.w / 2, y: node.y + node.h + 12 };
   return { x: side === 'left' ? node.x - 12 : node.x + node.w + 12, y: node.y + node.h / 2 };
 }
 
 /** The side a node's own children are on; a root with only left branches counts as left. */
 export function mindChildSide(node: WhiteboardShape, elements: Elements, index: Index): MindSide {
   if (node.mindParentId !== null) return mindSideOf(node, index);
+  if (node.mindLayout === 'down') return 'down';
   return mindLayoutOf(elements, node.id) === 'left' ? 'left' : 'right';
 }

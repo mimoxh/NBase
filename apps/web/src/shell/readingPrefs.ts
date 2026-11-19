@@ -7,7 +7,6 @@ export interface ReadingPrefs { focus: boolean; wide: boolean; size: EditorSize 
 
 const storageKey = 'nbase.reading';
 const defaults: ReadingPrefs = { focus: false, wide: false, size: 'normal' };
-const sizeLabels: Record<EditorSize, string> = { small: '小', normal: '标准', large: '大' };
 
 export function parseReadingPrefs(raw: string | null): ReadingPrefs {
   try {
@@ -42,12 +41,10 @@ export function useReadingPrefs(): [ReadingPrefs, (patch: Partial<ReadingPrefs>)
   return [prefs, update];
 }
 
+/** Text size lives in the settings dialog; printing is one of the export formats. */
 export function readingMenuItems(prefs: ReadingPrefs, update: (patch: Partial<ReadingPrefs>) => void): MenuItem[] {
-  const nextSize = editorSizes[(editorSizes.indexOf(prefs.size) + 1) % editorSizes.length]!;
   return [
     { key: 'focus-mode', label: prefs.focus ? '退出专注模式' : '专注模式', icon: 'focus', onSelect: () => update({ focus: !prefs.focus }) },
     { key: 'wide', label: prefs.wide ? '标准页宽' : '全宽页面', icon: 'page', onSelect: () => update({ wide: !prefs.wide }) },
-    { key: 'size', label: `正文字号：${sizeLabels[prefs.size]}`, icon: 'page', onSelect: () => update({ size: nextSize }) },
-    { key: 'print', label: '打印或存为 PDF', icon: 'download', onSelect: () => window.print() },
   ];
 }

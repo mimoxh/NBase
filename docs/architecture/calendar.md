@@ -296,7 +296,7 @@ Graph 适配（`calendar/graph/`）：
 
 ### 汇总同步
 
-- `calendar_sync_sources.aggregate_user_id`：非空表示这个来源是汇总日历，值为打开汇总的用户；同一工作区最多一个（部分唯一索引）。只允许 `caldav` 类型且外部日历可写。用户被删除时置空。
+- `calendar_sync_sources.aggregate_user_id`：非空表示这个来源是汇总日历，值为打开汇总的用户；同一工作区最多一个（部分唯一索引）。只允许 `caldav` 类型（CalDAV、Google、Microsoft 账号都是这一类型）且外部日历可写。用户被删除时置空。
 - `PATCH /sync/:id` 增加 `aggregate: boolean`：true 时把工作区里其他来源的汇总关掉，再设到这个来源；false 时清空。改完立即排一次同步。`CalendarCaldavInfo.aggregate` 返回当前状态。
 - **范围**：打开汇总的用户的有效设置里 `visible` 的 (库, 日期字段)，且库未删除、没有来源记录、`calendar_hidden` 为 false，字段是有效的 `date` 类型。创建时间、更新时间不推送。
 - **对应关系**：沿用 `calendar_sync_items`，加 `database_id`、`property_id`（同时为空或同时非空）。为空的是来源自己的库；非空的是汇总项，对应那个库里的行和那个日期字段。普通库没有地点、说明、外部 ID 字段，汇总项的同步字段只有标题和日期。
@@ -305,7 +305,16 @@ Graph 适配（`calendar/graph/`）：
 - 冲突列表与处理按冲突行所在的库取字段；带参会人的汇总事件不在 NBase 里锁定，但不写回。
 - 来源的事件数、行数上限（每个来源最多 `calendarEventLimit` 项）包含汇总项。停止同步（删除来源）时汇总项随来源删除，外部事件保留，与其他来源一致。
 - 备份：只加列，备份引擎的表清单不变。
-- 网页：有效设置的补全规则在契约 `withAutoAddedSources`，服务端、演示工作台和网页刷新来源时共用；来源面板有“新数据库自动显示”开关和“显示到页面树”（只对隐藏、已无来源的库，编辑者可见）；同步对话框对可写 CalDAV 来源提供“设为汇总日历 / 取消汇总”，都先确认。验证见 `docs/validation.md`（2026-11-17：日历库显示与汇总同步）。
+- 网页：有效设置的补全规则在契约 `withAutoAddedSources`，服务端、演示工作台和网页刷新来源时共用；来源面板有“新数据库自动显示”开关和“显示到页面树”（只对隐藏、已无来源的库，编辑者可见）；同步对话框对可写的 CalDAV、Google、Microsoft 来源提供“设为汇总日历 / 取消汇总”，都先确认。验证见 `docs/validation.md`（2026-11-17：日历库显示与汇总同步；2026-11-18：优化第 4 批）。
+
+### Google 与 Microsoft 作为汇总日历（优化第 4 批）
+
+- Google、Microsoft 账号的来源与 CalDAV 来源同为 `kind = 'caldav'`，提供方只在 `caldav_json.provider` 里区分，所以迁移 v24 的约束 `calendar_sync_sources_aggregate`（`aggregate_user_id IS NULL OR kind = 'caldav'`）本来就允许三种提供方，也拒绝文件导入和订阅。本批不需要迁移，备份引擎的结构版本不变。`PATCH /sync/:id` 的 `aggregate` 照旧只看两点：两路来源、外部日历可写；只读的 Google 日历（`accessRole` 不是 `owner` / `writer`）和 Microsoft 日历（`canEdit` 为 false）返回 422 `SYNC_KIND_INVALID`。
+- 引擎不分提供方：Google 走二期的 CalDAV 引擎，只是带 Bearer 令牌、新建不带 `If-None-Match`；Microsoft 经 Graph 适配器（见三期）。汇总项的拉取、比较、冲突、清空日期删除、外部删除进回收站、带参会人不写回，都与 CalDAV 汇总相同。Graph 写回汇总项时只 PATCH 标题和时间，Outlook 里的地点、正文保留。
+- 授权失效（`AUTH_FAILED`）、应用缺失或凭据密钥更换时，汇总来源与普通来源一样记错误、不发任何写请求，`aggregate` 保持打开；期间对汇总范围内行的修改在重新授权后的第一次同步里写出。界面也相同：来源上显示“重新授权”，同时保留“取消汇总”。取消汇总或把汇总移到别的日历时，旧日历上的汇总事件要等它下次同步成功才删除。
+- **写入后读回**：写入的回答没有 ETag 时（Graph 的新建和修改都是这样，少数 CalDAV 服务器也是），引擎随即 GET 一次这个资源。服务商会把事件改成自己的写法，例如 Graph 把每周重复补上 `BYDAY=MO`；读回的每个事件都是刚写的内容（标题、地点、说明相同，日期值展开前 500 次的起止相同），没写的事件与记录一致，就把读回的原文和 ETag 记下。下次运行 ETag 相同，不再读取比较。这样服务商的写法不会被当成外部修改写进行里（原先第一次读回会把汇总行的日期值改写成 Graph 的形式，期间本地再改就成了冲突）。读回失败、内容不符或这次写入去掉了被改的单次时，照旧留到下次运行再读。
+- 网页：同步对话框点“立即同步”后 30 秒内每 3 秒刷新来源列表（另外，有来源在运行时照旧每 3 秒刷新）。这次运行在调度器认领前不是 `running`，很快的运行又可能在两次刷新之间做完，只看状态会漏掉结果（例如授权失效）。
+- 未在真实账号上验证：只用模拟的 Google CalDAV 与 Graph（`calendar-aggregate-oauth-db.test.ts`）。Graph 表达不了的重复规则照旧不写回（`WRITE_REJECTED`）；在 NBase 里给汇总系列新增“被改的单次”不会在 Outlook 创建（与三期相同）。
 
 ## 一期验证结果（2026-11-17）
 

@@ -23,6 +23,7 @@ import './database.css';
 
 const BoardView = lazy(() => import('./views/BoardView'));
 const CalendarView = lazy(() => import('./views/CalendarView'));
+const SchemaHistoryDialog = lazy(() => import('./SchemaHistoryDialog'));
 
 const readerContext = { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', weekStart: 1 } satisfies Pick<QueryContext, 'timeZone' | 'weekStart'>;
 
@@ -184,6 +185,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
           onOpen={() => setPanel({ kind: 'props' })} onClose={closePanel} onUpdate={patch => void updateView(patch)}
           onRestore={id => void save(properties.map(p => p.id === id ? { id: p.id, name: p.name, type: p.type,
             ...(p.options ? { options: p.options } : {}), ...(p.relation ? { relation: p.relation } : {}) } : p))} />
+        {!compact && source.schemaHistory && <button className="nb-db-tool" onClick={() => setPanel({ kind: 'history' })}><Icon name="history" size={14} />历史</button>}
         {!compact && <DataMenu source={source} state={state} store={store} doc={doc} view={view} databaseId={databaseId} canWrite={canWrite}
           open={panel?.kind === 'data'} onOpen={openData} onClose={closePanel} />}
         {canWrite && <button className="nb-btn nb-btn-primary nb-db-new" onClick={() => void addRow()}><Icon name="plus" size={14} />新建</button>}
@@ -195,7 +197,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
     {store.error && <div className="nb-db-status" role="alert">{store.error}
       <button className="nb-btn nb-btn-quiet" onClick={() => void store.refresh()}>重试</button></div>}
     {view.type === 'board' && (groupDef ? <Suspense fallback={null}><BoardView source={source} store={store} doc={doc} view={view} group={groupDef} canWrite={canWrite} /></Suspense>
-      : <p className="nb-db-empty-note">请先选择用于分组的单选或复选框字段。</p>)}
+      : <p className="nb-db-empty-note">请先选择用于分组的单选、多选或复选框字段。</p>)}
     {view.type === 'calendar' && (dateDef ? <Suspense fallback={null}><CalendarView source={source} store={store} doc={doc} dateField={dateDef} canWrite={canWrite}
       nav={calendarNav} timeZone={readerContext.timeZone} weekStart={readerContext.weekStart} defaults={defaultsFromFilters(view, properties)} /></Suspense>
       : <p className="nb-db-empty-note">请先选择日期字段。</p>)}
@@ -203,6 +205,7 @@ export function DatabaseView({ source, databaseId, viewId = null, compact = fals
       rowCount={compact ? Math.min(limit, store.total) : store.total} windowed={!compact} canAddProperty={active.length < databasePropertyLimit}
       panel={panel} setPanel={setPanel} selected={selectedRows} onSelect={setSelectedRows} onUpdateView={patch => void updateView(patch)}
       onSave={(next, views) => void save(next, views)} onAddProperty={addProperty} onCell={setCell} onCreateOption={createOption} />}
+    {panel?.kind === 'history' && <Suspense fallback={null}><SchemaHistoryDialog source={source} state={state} databaseId={databaseId} onClose={closePanel} /></Suspense>}
     {panel?.kind === 'add-relation' && <AddRelationDialog source={source} doc={doc} onClose={closePanel} onCreated={other => {
       closePanel();
       void state.reload().then(() => { void store.refresh(); });

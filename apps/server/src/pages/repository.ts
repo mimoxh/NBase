@@ -1,18 +1,22 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { databaseRowLimit, pageBacklinkLimit, type PageBacklinksResponse, type PageKind, type RowProperties } from '@nbase/contracts';
+import { databaseRowLimit, pageBacklinkLimit, type PageBacklinksResponse, type PageKind, type PageProperty,
+  type RowProperties } from '@nbase/contracts';
 import { markRowsChanged } from '../databases/computed.js';
 import { loadDatabaseSchema, mergeRowProperties, rowIndexText, syncRelationLinks } from '../databases/schema.js';
 import type { CreatePageRequest, FavoriteListResponse, PageCoverId, PageDocument, PageHistoryResponse, PageListResponse, PageStateRequest,
   PageSummary, PageTreeResponse, PageVersion, PageVersionOperation, PageVersionSummary, RestorePageVersionRequest,
-  SearchResponse, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest } from '@nbase/contracts';
+  PageHistorySearchResponse, SearchResponse, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest,
+  WorkspaceHistorySearchResponse } from '@nbase/contracts';
 import type { Pool, PoolClient, QueryResult } from 'pg';
 import { attachmentReferences, validateDocumentContent } from './validate.js';
 import { replacePageLinks } from './page-links.js';
 import { contentMatchesKind, isWhiteboardContent } from '../whiteboards/content.js';
-import { extractDocumentIndex, type IndexedPageReference } from './search-text.js';
+import { documentIndexText, extractDocumentIndex, type IndexedPageReference } from './search-text.js';
+import { searchPageHistory, searchWorkspaceHistory } from '../search/history.js';
 import { searchPages } from '../search/search.js';
 import { refreshPagePinyin } from '../search/write.js';
 import { changesKeptField, nudgeAggregate, nudgeCaldav, syncLock } from '../calendar/locks.js';
+import { checkCollabWrite, CollabWriteError, parseCollabWrite, recordCollabWrite } from '../live/rooms.js';
 
 const maxRevision = 9223372036854775807n;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -36,14 +40,17 @@ export class PageError extends Error {
     public readonly code: 'NOT_FOUND' | 'FORBIDDEN' | 'REVISION_CONFLICT' | 'MUTATION_CONFLICT'
       | 'PAGE_TREE_INVALID' | 'PAGE_TREE_CHANGED' | 'CONTENT_VERSION_UNSUPPORTED' | 'ATTACHMENT_INVALID'
       | 'FAVORITE_LIMIT' | 'PAGE_POSITION_INVALID' | 'TAG_INVALID' | 'TAG_NAME_CONFLICT' | 'PAGE_REFERENCE_INVALID'
-      | 'PAGE_KIND_INVALID' | 'PROPERTY_INVALID' | 'DATABASE_ROW_LIMIT' | 'DATABASE_SCHEMA_INVALID' | 'DATABASE_UNAVAILABLE',
+      | 'PAGE_KIND_INVALID' | 'PROPERTY_INVALID' | 'DATABASE_ROW_LIMIT' | 'DATABASE_SCHEMA_INVALID' | 'DATABASE_UNAVAILABLE'
+      | 'DATABASE_FORMULA_CYCLE' | 'DATABASE_FORMULA_DEPTH' | 'COLLAB_EPOCH' | 'COLLAB_STALE' | 'INVALID_REQUEST',
     public readonly currentRevision?: string,
     /** Finer cause sent along with the code, such as 'property-synced' for a field kept by a calendar subscription. */
     public readonly reason?: string,
+    /** Further fields of the response body, such as the `path` of a formula cycle. */
+    public readonly details?: Record<string, unknown>,
   ) { super(code); }
 
-  response(): { error: PageError['code']; currentRevision?: string; reason?: string } {
-    return { error: this.code, ...(this.currentRevision ? { currentRevision: this.currentRevision } : {}),
+  response(): { error: PageError['code']; currentRevision?: string; reason?: string } & Record<string, unknown> {
+    return { ...(this.details ?? {}), error: this.code, ...(this.currentRevision ? { currentRevision: this.currentRevision } : {}),
       ...(this.reason ? { reason: this.reason } : {}) };
   }
 }
@@ -60,6 +67,7 @@ interface PageRow {
   content_schema_version: number;
   kind: PageKind;
   row_properties: RowProperties | null;
+  page_properties?: PageProperty[] | null;
   revision: string;
   created_at: Date;
   updated_at: Date;
@@ -78,6 +86,7 @@ interface ReceiptRow<T = PageDocument> {
 interface VersionRow {
   page_id: string; revision: string; title: string; parent_id: string | null;
   icon: string | null; cover: PageCoverId | null; row_properties: RowProperties | null;
+  page_properties: PageProperty[] | null;
   content_json: PageDocument['content']; saved_at: Date; operation: PageVersionOperation;
   deleted_at: Date | null; label: string | null; note: string | null;
 }
@@ -115,6 +124,7 @@ function pageFromRow(row: PageRow): PageDocument {
     ...(row.calendar_sync ? { calendarSync: true as const } : {}),
     content: row.content_json,
     ...(row.kind === 'row' ? { properties: row.row_properties ?? {} } : {}),
+    ...((row.kind ?? 'document') === 'document' ? { pageProperties: row.page_properties ?? [] } : {}),
     revision: row.revision,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -122,8 +132,8 @@ function pageFromRow(row: PageRow): PageDocument {
 }
 
 function summaryFromRow(row: PageRow): PageSummary {
-  const { content: _content, properties: _properties, ...summary } = pageFromRow(row);
-  void _content; void _properties;
+  const { content: _content, properties: _properties, pageProperties: _pageProperties, ...summary } = pageFromRow(row);
+  void _content; void _properties; void _pageProperties;
   return summary;
 }
 
@@ -148,22 +158,25 @@ const pageReceiptOperations = new Set(['create', 'update', 'trash', 'restore', '
 const sortPositionGap = 1024;
 
 const pageColumns = `id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, kind, row_properties,
-  revision::text AS revision, created_at, updated_at,
+  page_properties, revision::text AS revision, created_at, updated_at,
   EXISTS (SELECT 1 FROM databases cd WHERE cd.workspace_id = pages.workspace_id AND cd.page_id = pages.id AND cd.calendar_hidden) AS calendar_sync`;
 const joinedPageColumns = `p.id, p.workspace_id, p.parent_id, p.title, p.icon, p.cover, p.content_json, p.content_schema_version,
-  p.kind, p.row_properties, p.revision::text AS revision, p.created_at, p.updated_at,
+  p.kind, p.row_properties, p.page_properties, p.revision::text AS revision, p.created_at, p.updated_at,
   EXISTS (SELECT 1 FROM databases cd WHERE cd.workspace_id = p.workspace_id AND cd.page_id = p.id AND cd.calendar_hidden) AS calendar_sync,
   ARRAY(SELECT pt.tag_id FROM page_tags pt WHERE pt.workspace_id = p.workspace_id AND pt.page_id = p.id ORDER BY pt.tag_id) AS tag_ids`;
 
 export class PgPageRepository {
+  /** Real-time rooms of this process, so a saver cannot claim more of a room than the server stored. */
+  collabRooms: { heldStateVector(workspaceId: string, pageId: string, epoch: number): Map<number, number> | null } | undefined;
+
   constructor(private readonly pool: Pool) {}
 
   async snapshot(client: PoolClient, workspaceId: string, ids: string[], actorId: string,
     operation: PageVersionOperation): Promise<void> {
     await client.query(`INSERT INTO page_versions (workspace_id, page_id, revision, title, parent_id, icon, cover,
-      content_json, content_schema_version, row_properties, deleted_at, saved_at, actor_user_id, operation)
+      content_json, content_schema_version, row_properties, page_properties, deleted_at, saved_at, actor_user_id, operation, search_text)
       SELECT workspace_id, id, revision, title, parent_id, icon, cover, content_json, content_schema_version,
-        row_properties, deleted_at, updated_at, $3, $4 FROM pages WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
+        row_properties, page_properties, deleted_at, updated_at, $3, $4, search_text FROM pages WHERE workspace_id = $1 AND id = ANY($2::uuid[])`,
     [workspaceId, ids, actorId, operation]);
   }
 
@@ -171,7 +184,7 @@ export class PgPageRepository {
     before: string | null, named = false): Promise<PageHistoryResponse> {
     const result = await this.pool.query<VersionRow>(`SELECT h.revision::text AS revision, h.title,
       h.saved_at, h.operation, h.deleted_at, h.label, h.note FROM page_versions h
-      JOIN workspace_memberships m ON m.workspace_id = h.workspace_id AND m.user_id = $2
+      JOIN workspace_memberships m ON m.workspace_id = h.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
       WHERE h.workspace_id = $1 AND h.page_id = $3 AND ($4::bigint IS NULL OR h.revision < $4)
         AND (NOT $6::boolean OR h.label IS NOT NULL)
       ORDER BY h.revision DESC LIMIT $5`, [workspaceId, actorId, pageId, before, limit + 1, named]);
@@ -182,15 +195,16 @@ export class PgPageRepository {
 
   async version(workspaceId: string, actorId: string, pageId: string, revision: string): Promise<PageVersion | null> {
     const result = await this.pool.query<VersionRow>(`SELECT h.page_id, h.revision::text AS revision,
-      h.title, h.parent_id, h.icon, h.cover, h.row_properties, h.content_json, h.saved_at, h.operation, h.deleted_at,
+      h.title, h.parent_id, h.icon, h.cover, h.row_properties, h.page_properties, h.content_json, h.saved_at, h.operation, h.deleted_at,
       h.label, h.note FROM page_versions h
-      JOIN workspace_memberships m ON m.workspace_id = h.workspace_id AND m.user_id = $2
+      JOIN workspace_memberships m ON m.workspace_id = h.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
       WHERE h.workspace_id = $1 AND h.page_id = $3 AND h.revision = $4::bigint`,
     [workspaceId, actorId, pageId, revision]);
     const row = result.rows[0];
     return row ? { ...versionSummary(row), pageId: row.page_id, parentId: row.parent_id,
       icon: row.icon ?? null, cover: row.cover ?? null, content: row.content_json,
-      ...(row.row_properties ? { properties: row.row_properties } : {}) } : null;
+      ...(row.row_properties ? { properties: row.row_properties } : {}),
+      ...(row.page_properties ? { pageProperties: row.page_properties } : {}) } : null;
   }
 
   /** Absolute state, so a retry after a lost response needs no receipt; the page revision does not change. */
@@ -198,7 +212,7 @@ export class PgPageRepository {
     label: string | null, note: string | null): Promise<PageVersionSummary | null> {
     const result = await this.pool.query<VersionRow>(`UPDATE page_versions h SET label = $5, note = $6
       FROM workspace_memberships m
-      WHERE m.workspace_id = h.workspace_id AND m.user_id = $2
+      WHERE m.workspace_id = h.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
         AND h.workspace_id = $1 AND h.page_id = $3 AND h.revision = $4::bigint
       RETURNING h.revision::text AS revision, h.title, h.saved_at, h.operation, h.deleted_at, h.label, h.note`,
     [workspaceId, actorId, pageId, revision, label, note]);
@@ -210,7 +224,7 @@ export class PgPageRepository {
     cursor: { createdAt: string; id: string } | null): Promise<TrashListResponse> {
     const result = await this.pool.query<TrashRow>(`SELECT ${joinedPageColumns}, p.deleted_at,
       p.deletion_group_id, p.deleted_at::text AS cursor_deleted_at FROM pages p
-      JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
+      JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
       WHERE p.workspace_id = $1 AND p.deleted_at IS NOT NULL
         AND NOT (p.kind = 'row' AND p.deletion_group_id <> p.id)
         AND ($3::timestamptz IS NULL OR (p.deleted_at, p.id) < ($3::timestamptz, $4::uuid))
@@ -227,26 +241,31 @@ export class PgPageRepository {
   async trashed(workspaceId: string, actorId: string, pageId: string): Promise<TrashedPageDocument | null> {
     const result = await this.pool.query<TrashRow>(`SELECT ${joinedPageColumns}, p.deleted_at,
       p.deletion_group_id FROM pages p
-      JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
+      JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
       WHERE p.workspace_id = $1 AND p.id = $3 AND p.deleted_at IS NOT NULL`, [workspaceId, actorId, pageId]);
     const row = result.rows[0];
     return row ? { ...pageFromRow(row), deletedAt: row.deleted_at.toISOString(), deletionGroupId: row.deletion_group_id } : null;
   }
 
+  /** Carries the account that saved the current revision; baseline revisions from before v4 have none. */
   async get(workspaceId: string, actorId: string, pageId: string): Promise<PageDocument | null> {
-    const result = await this.pool.query<PageRow>(`
-      SELECT ${joinedPageColumns} FROM pages p
-      JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
+    const result = await this.pool.query<PageRow & { editor_id: string | null; editor_login: string | null }>(`
+      SELECT ${joinedPageColumns}, editor.id AS editor_id, editor.login_name AS editor_login FROM pages p
+      JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
+      LEFT JOIN page_versions h ON h.workspace_id = p.workspace_id AND h.page_id = p.id AND h.revision = p.revision
+      LEFT JOIN users editor ON editor.id = h.actor_user_id
       WHERE p.workspace_id = $1 AND p.id = $3 AND p.deleted_at IS NULL
     `, [workspaceId, actorId, pageId]);
-    return result.rows[0] ? pageFromRow(result.rows[0]) : null;
+    const row = result.rows[0];
+    return row ? { ...pageFromRow(row),
+      lastEditor: row.editor_id ? { userId: row.editor_id, loginName: row.editor_login ?? '' } : null } : null;
   }
 
   async backlinks(workspaceId: string, actorId: string, pageId: string): Promise<PageBacklinksResponse | null> {
     const result = await this.pool.query<BacklinkRow>(`
       SELECT link.source_page_id, link.source_title, link.source_revision, link.occurrence, link.snippet
       FROM pages target
-      JOIN workspace_memberships member ON member.workspace_id = target.workspace_id AND member.user_id = $2
+      JOIN workspace_memberships member ON member.workspace_id = target.workspace_id AND member.user_id = $2 AND member.removed_at IS NULL
       LEFT JOIN LATERAL (
         SELECT source.id AS source_page_id, source.title AS source_title, source.revision::text AS source_revision,
           source.updated_at AS source_updated_at, refs.occurrence, refs.snippet
@@ -272,7 +291,7 @@ export class PgPageRepository {
     limit: number, cursor: { position: string; id: string } | null): Promise<PageListResponse> {
     const result = await this.pool.query<PageRow & { cursor_position: string }>(`
       SELECT ${joinedPageColumns}, p.sort_position::text AS cursor_position FROM pages p
-      JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
+      JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
       WHERE p.workspace_id = $1 AND p.parent_id IS NOT DISTINCT FROM $3::uuid AND p.deleted_at IS NULL
         AND ($4::bigint IS NULL OR (p.sort_position, p.id) > ($4::bigint, $5::uuid))
       ORDER BY p.sort_position, p.id LIMIT $6
@@ -295,7 +314,7 @@ export class PgPageRepository {
     const result = await this.pool.query<PageRow>(`
       WITH RECURSIVE tree AS (
         SELECT p.id, p.kind FROM pages p
-        JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
+        JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
         WHERE p.workspace_id = $1 AND p.parent_id IS NULL AND p.deleted_at IS NULL
         UNION
         SELECT c.id, c.kind FROM pages c JOIN tree t ON c.parent_id = t.id
@@ -312,7 +331,7 @@ export class PgPageRepository {
     const result = await this.pool.query<ReceiptRow>(`
       SELECT r.operation, r.request_hash, r.page_id, r.response_status, r.response_json
       FROM page_mutation_receipts r
-      JOIN workspace_memberships m ON m.workspace_id = r.workspace_id AND m.user_id = $2
+      JOIN workspace_memberships m ON m.workspace_id = r.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
       WHERE r.workspace_id = $1 AND r.actor_user_id = $2 AND r.client_mutation_id = $3
         AND r.page_id IS NOT NULL
     `, [workspaceId, actorId, mutationId]);
@@ -345,6 +364,16 @@ export class PgPageRepository {
     return searchPages(this.pool, workspaceId, actorId, phrase, limit, tagIds);
   }
 
+  async searchHistory(workspaceId: string, actorId: string, phrase: string, limit: number,
+    tagIds: string[] = []): Promise<WorkspaceHistorySearchResponse> {
+    return searchWorkspaceHistory(this.pool, workspaceId, actorId, phrase, limit, tagIds);
+  }
+
+  async searchPageHistory(workspaceId: string, actorId: string, pageId: string, phrase: string,
+    limit: number): Promise<PageHistorySearchResponse> {
+    return searchPageHistory(this.pool, workspaceId, actorId, pageId, phrase, limit);
+  }
+
   /** Run one authorized write and its idempotency receipt under the workspace lock. */
   async mutate<T extends object>(
     workspaceId: string, actorId: string, mutationId: string, operation: string,
@@ -361,11 +390,13 @@ export class PgPageRepository {
       // Serializes every tree mutation and same-key retry in this workspace.
       const membership = await client.query<{ role: 'owner' | 'editor' | 'viewer' }>(`
         SELECT m.role FROM workspaces w
-        JOIN workspace_memberships m ON m.workspace_id = w.id AND m.user_id = $2
+        JOIN workspace_memberships m ON m.workspace_id = w.id AND m.user_id = $2 AND m.removed_at IS NULL
         WHERE w.id = $1 FOR UPDATE OF w
       `, [workspaceId, actorId]);
       if (!membership.rows[0]) throw new PageError(404, 'NOT_FOUND');
       if (membership.rows[0].role === 'viewer') throw new PageError(403, 'FORBIDDEN');
+      // Read by the real-time trigger to say who changed a page outside its room, and how.
+      await client.query("SELECT set_config('nbase.actor', $1, true), set_config('nbase.write_reason', $2, true)", [actorId, operation]);
 
       const hash = requestHash(operation, pageId, body);
       const prior = await client.query<ReceiptRow<T>>(`
@@ -501,13 +532,17 @@ export class PgPageRepository {
       if (kind !== 'document') throw new PageError(422, 'PAGE_KIND_INVALID');
       kind = 'whiteboard';
     }
+    if (body.pageProperties !== undefined && kind !== 'document') throw new PageError(422, 'PAGE_KIND_INVALID');
+    const pageProperties = body.pageProperties?.length ? body.pageProperties : null;
+    if (pageProperties) searchText = documentIndexText(searchText, pageProperties);
     const result = await client.query<PageRow>(`
       INSERT INTO pages (id, workspace_id, parent_id, title, icon, cover, content_json, content_schema_version, search_text,
-        kind, row_properties)
-      VALUES ($1, $2, $3, $4, $7, $8, $5::jsonb, 1, $6, $9, $10::jsonb)
+        kind, row_properties, page_properties)
+      VALUES ($1, $2, $3, $4, $7, $8, $5::jsonb, 1, $6, $9, $10::jsonb, $11::jsonb)
       RETURNING ${pageColumns}
     `, [randomUUID(), workspaceId, body.parentId, body.title, JSON.stringify(body.content),
-      searchText, body.icon ?? null, body.cover ?? null, kind, rowProperties ? JSON.stringify(rowProperties) : null]);
+      searchText, body.icon ?? null, body.cover ?? null, kind, rowProperties ? JSON.stringify(rowProperties) : null,
+      pageProperties ? JSON.stringify(pageProperties) : null]);
     const page = pageFromRow(result.rows[0]!);
     await refreshPagePinyin(client, workspaceId, page.id, { title: body.title, searchText });
     if (body.tagIds?.length) page.tagIds = await this.replaceTags(client, workspaceId, page.id, body.tagIds);
@@ -563,7 +598,18 @@ export class PgPageRepository {
     const row = existing.rows[0];
     if (!row) throw new PageError(404, 'NOT_FOUND');
     if (row.content_schema_version !== 1) throw new PageError(422, 'CONTENT_VERSION_UNSUPPORTED');
-    if (row.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', row.revision);
+    const collab = body.collab === undefined ? null : parseCollabWrite(body.collab);
+    if (body.collab !== undefined && !collab) throw new PageError(400, 'INVALID_REQUEST');
+    let collabVector: Uint8Array | null = null;
+    if (collab) {
+      try {
+        collabVector = await checkCollabWrite(client, workspaceId, pageId, collab,
+          this.collabRooms?.heldStateVector(workspaceId, pageId, collab.epoch) ?? null);
+      } catch (error) {
+        if (error instanceof CollabWriteError && error.code !== 'COLLAB_INVALID') throw new PageError(409, error.code, row.revision);
+        throw error;
+      }
+    } else if (row.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', row.revision);
     if (body.content && (row.kind === 'database' || !contentMatchesKind(row.kind, body.content))) throw new PageError(422, 'PAGE_KIND_INVALID');
     if (body.content) await this.validateAttachments(client, workspaceId, body.content);
     const index = body.content ? extractDocumentIndex(body.content) : null;
@@ -588,6 +634,10 @@ export class PgPageRepository {
       } else if (kind === 'row') kind = 'document';
     }
     if (body.properties !== undefined && kind !== 'row') throw new PageError(422, 'PAGE_KIND_INVALID');
+    if (body.pageProperties !== undefined && kind !== 'document') throw new PageError(422, 'PAGE_KIND_INVALID');
+    // A page that joins a database keeps only the database's fields; its own properties stay in its history.
+    const pageProperties = kind !== 'document' ? null
+      : body.pageProperties === undefined ? row.page_properties ?? null : body.pageProperties.length ? body.pageProperties : null;
     const icon = body.icon === undefined ? row.icon : body.icon;
     const cover = body.cover === undefined ? row.cover : body.cover;
     let rowProperties = row.row_properties;
@@ -615,19 +665,26 @@ export class PgPageRepository {
       const bodyText = index?.searchText ?? extractDocumentIndex(row.content_json).searchText;
       searchText = rowIndexText(bodyText, schema.properties_json, rowProperties ?? {});
     }
+    if (kind === 'document' && (index || body.pageProperties !== undefined)) {
+      searchText = documentIndexText(index?.searchText ?? extractDocumentIndex(row.content_json).searchText, pageProperties);
+    }
 
     const result = await client.query<PageRow>(`
       UPDATE pages SET title = $3, parent_id = $4, content_json = $5::jsonb,
         content_schema_version = 1, search_text = COALESCE($7, search_text), icon = $8, cover = $9,
-        row_properties = $10::jsonb, kind = $11,
+        row_properties = $10::jsonb, kind = $11, page_properties = $12::jsonb,
         sort_position = CASE WHEN parent_id IS DISTINCT FROM $4::uuid THEN nextval('pages_sort_position_seq') * 1024 ELSE sort_position END,
         revision = revision + 1, updated_at = now()
       WHERE workspace_id = $1 AND id = $2 AND revision = $6::bigint AND deleted_at IS NULL
       RETURNING ${pageColumns}
     `, [workspaceId, pageId, body.title ?? row.title, parentId,
-      JSON.stringify(body.content ?? row.content_json), body.expectedRevision,
-      searchText, icon, cover, rowProperties ? JSON.stringify(rowProperties) : null, kind]);
+      JSON.stringify(body.content ?? row.content_json), row.revision,
+      searchText, icon, cover, rowProperties ? JSON.stringify(rowProperties) : null, kind,
+      pageProperties ? JSON.stringify(pageProperties) : null]);
     if (!result.rows[0]) throw new PageError(409, 'REVISION_CONFLICT');
+    if (collab && collabVector) {
+      await recordCollabWrite(client, workspaceId, pageId, collab.epoch, result.rows[0].revision, collabVector, actorId);
+    }
     if (left) {
       // Links and cached results belong to the row; the plain page it became has neither.
       await client.query('DELETE FROM database_row_links WHERE workspace_id = $1 AND (source_row_id = $2 OR target_row_id = $2)', [workspaceId, pageId]);
@@ -761,8 +818,8 @@ export class PgPageRepository {
       if (current.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', current.revision);
       if (current.kind === 'database') throw new PageError(422, 'PAGE_KIND_INVALID');
       const source = await client.query<{ title: string; content_json: PageDocument['content'];
-        row_properties: RowProperties | null }>(
-        'SELECT title, content_json, row_properties FROM page_versions WHERE workspace_id = $1 AND page_id = $2 AND revision = $3::bigint',
+        row_properties: RowProperties | null; page_properties: PageProperty[] | null }>(
+        'SELECT title, content_json, row_properties, page_properties FROM page_versions WHERE workspace_id = $1 AND page_id = $2 AND revision = $3::bigint',
         [workspaceId, pageId, body.sourceRevision]);
       const version = source.rows[0];
       if (!version) throw new PageError(404, 'NOT_FOUND');
@@ -786,12 +843,15 @@ export class PgPageRepository {
         }
         searchText = rowIndexText(index.searchText, schema.properties_json, rowProperties);
       }
-      // Restore title/body (and row values) and retain the current page metadata.
+      const pageProperties = (current.kind ?? 'document') === 'document' ? version.page_properties : null;
+      if (pageProperties) searchText = documentIndexText(searchText, pageProperties);
+      // Restore title/body (and row values or page properties) and retain the current page metadata.
       const result = await client.query<PageRow>(`UPDATE pages SET title = $3, content_json = $4::jsonb,
-        content_schema_version = 1, search_text = $5, row_properties = $6::jsonb, revision = revision + 1, updated_at = now()
+        content_schema_version = 1, search_text = $5, row_properties = $6::jsonb, page_properties = $7::jsonb,
+        revision = revision + 1, updated_at = now()
         WHERE workspace_id = $1 AND id = $2 RETURNING ${pageColumns}`,
       [workspaceId, pageId, version.title, JSON.stringify(content), searchText,
-        rowProperties ? JSON.stringify(rowProperties) : null]);
+        rowProperties ? JSON.stringify(rowProperties) : null, pageProperties ? JSON.stringify(pageProperties) : null]);
       await refreshPagePinyin(client, workspaceId, pageId, { title: version.title, searchText });
       await replacePageLinks(client, workspaceId, pageId, index.references);
       if (current.kind === 'row' && current.parent_id) {
@@ -811,8 +871,9 @@ export class PgPageRepository {
      Personal preference data: idempotent writes, no mutation receipts,
      no revision bump and no page_versions rows. */
 
+  /** `allowViewer` is for personal preferences such as favorites, which change no workspace content. */
   private async workspaceLock<T>(workspaceId: string, actorId: string,
-    action: (client: PoolClient) => Promise<T>): Promise<T> {
+    action: (client: PoolClient) => Promise<T>, allowViewer = false): Promise<T> {
     const client = await this.pool.connect();
     let transactionOpen = false;
     try {
@@ -820,11 +881,11 @@ export class PgPageRepository {
       transactionOpen = true;
       const membership = await client.query<{ role: string }>(`
         SELECT m.role FROM workspaces w
-        JOIN workspace_memberships m ON m.workspace_id = w.id AND m.user_id = $2
+        JOIN workspace_memberships m ON m.workspace_id = w.id AND m.user_id = $2 AND m.removed_at IS NULL
         WHERE w.id = $1 FOR UPDATE OF w
       `, [workspaceId, actorId]);
       if (!membership.rows[0]) throw new PageError(404, 'NOT_FOUND');
-      if (membership.rows[0].role === 'viewer') throw new PageError(403, 'FORBIDDEN');
+      if (membership.rows[0].role === 'viewer' && !allowViewer) throw new PageError(403, 'FORBIDDEN');
       const result = await action(client);
       await client.query('COMMIT');
       transactionOpen = false;
@@ -842,7 +903,7 @@ export class PgPageRepository {
   async favorites(workspaceId: string, actorId: string): Promise<FavoriteListResponse> {
     const result = await this.pool.query<{ page_id: string }>(`
       SELECT f.page_id FROM page_favorites f
-      JOIN workspace_memberships m ON m.workspace_id = f.workspace_id AND m.user_id = $2 AND m.user_id = f.user_id
+      JOIN workspace_memberships m ON m.workspace_id = f.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL AND m.user_id = f.user_id
       JOIN pages p ON p.workspace_id = f.workspace_id AND p.id = f.page_id AND p.deleted_at IS NULL
       WHERE f.workspace_id = $1 AND f.user_id = $2
       ORDER BY f.created_at, f.page_id
@@ -861,7 +922,7 @@ export class PgPageRepository {
       await client.query(
         'INSERT INTO page_favorites (workspace_id, user_id, page_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
         [workspaceId, actorId, pageId]);
-    });
+    }, true);
   }
 
   /**
@@ -927,7 +988,7 @@ export class PgPageRepository {
       await client.query(
         'DELETE FROM page_favorites WHERE workspace_id = $1 AND user_id = $2 AND page_id = $3',
         [workspaceId, actorId, pageId]);
-    });
+    }, true);
   }
 }
 

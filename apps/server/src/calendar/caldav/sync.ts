@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { calendarEventLimit, databaseRowLimit, formatDateCell, parseDateCell, type CalendarConflictChoice, type CalendarConflictKind,
+import { calendarEventLimit, databaseRowLimit, formatDateCell, iterateOccurrences, parseDateCell, type CalendarConflictChoice, type CalendarConflictKind,
   type CalendarEventSnapshot, type CalendarImportWarning, type CalendarImportWarningCode, type CalendarSyncConflict, type CalendarSyncCounts,
-  type CalendarSyncFields, type PropertyDefinition, type PropertyValue, type RowProperties } from '@nbase/contracts';
+  type CalendarSyncFields, type DateCell, type PropertyDefinition, type PropertyValue, type RowProperties } from '@nbase/contracts';
 import type { Pool, PoolClient } from 'pg';
 import { markRowsChanged } from '../../databases/computed.js';
 import { loadDatabaseSchema, mergeRowProperties, rowIndexText } from '../../databases/schema.js';
@@ -641,6 +641,50 @@ function pushWork(scopes: Scopes, state: State): Map<string, PushWork> {
   return work;
 }
 
+/** Occurrences compared to tell two forms of one recurrence rule apart. */
+const sameDatesOccurrences = 500;
+
+function occurrenceList(cell: DateCell): string {
+  const out: string[] = [];
+  for (const occurrence of iterateOccurrences(cell)) {
+    out.push(`${occurrence.start}/${occurrence.end}`);
+    if (out.length >= sameDatesOccurrences) break;
+  }
+  return out.join(',');
+}
+
+/** Whether two date values give the same occurrences, e.g. `FREQ=WEEKLY` and the `FREQ=WEEKLY;BYDAY=MO` Graph turns it into. */
+function sameDates(a: string, b: string): boolean {
+  if (a === b) return true;
+  const x = parseDateCell(a);
+  const y = parseDateCell(b);
+  if (!x || !y || x.allDay !== y.allDay || (x.timeZone ?? null) !== (y.timeZone ?? null)) return false;
+  return occurrenceList(x) === occurrenceList(y);
+}
+
+/**
+ * Reads a resource again right after a write that returned no ETag. A server that rewrites what it is sent
+ * (Microsoft Graph keeps events in its own form) would otherwise show its form as an external change on the
+ * next run and write it into the row, or turn the next local edit into a conflict. The resource is kept only when
+ * `matches` accepts every event in it; null when it cannot be read or differs, and the next run reads it as before.
+ */
+async function readBack(client: RemoteCalendar, target: CaldavTarget, href: string,
+  matches: (event: IcsEvent) => boolean): Promise<RemoteResource | null> {
+  try {
+    const resource = await client.get(href);
+    if (!resource?.etag || resource.etag.length > etagLimit || !bodyFits(resource.body)) return null;
+    const events = parseIcs(resource.body, { timeZone: target.timeZone, details: true }).events;
+    return events.length > 0 && events.every(matches) ? resource : null;
+  } catch { return null; }
+}
+
+/** Whether an event read back holds what was written, in the server's form. */
+function holdsWritten(scope: Scope, event: IcsEvent, written: CalendarEventSnapshot): boolean {
+  const remote = canonical(scope, event);
+  return remote !== null && remote.event.title === written.title && remote.event.location === written.location
+    && remote.event.description === written.description && sameDates(remote.event.value, written.value);
+}
+
 async function pushResource(pool: Pool, target: CaldavTarget, snapshot: Snapshot, client: RemoteCalendar, scopes: Scopes, state: State,
   work: PushWork, counts: CalendarSyncCounts): Promise<PushStatus> {
   const stored = state.resources.get(hrefKey(work.href));
@@ -693,7 +737,7 @@ async function pushResource(pool: Pool, target: CaldavTarget, snapshot: Snapshot
     droppedUids.push(item.uid);
     if (point !== null) dropped.push(point);
   }
-  const written: { uid: string; revision: string; hash: Buffer }[] = [];
+  const written: { uid: string; revision: string; hash: Buffer; scope: Scope; local: CalendarEventSnapshot }[] = [];
   for (const item of work.edits) {
     const event = byUid.get(item.uid);
     const scope = activeScope(scopes, item);
@@ -704,7 +748,7 @@ async function pushResource(pool: Pool, target: CaldavTarget, snapshot: Snapshot
     const text = scope.propertyId === null ? local : { ...local, location: event.location, description: event.description };
     const keep = event.overrides?.filter(point => !dropped.includes(point));
     patch.edits.push({ component: event.component, event: text, ...(keep ? { keep } : {}) });
-    written.push({ uid: item.uid, revision: item.revision, hash: eventHash(local) });
+    written.push({ uid: item.uid, revision: item.revision, hash: eventHash(local), scope, local });
   }
   if (dropped.length && series?.component !== undefined && !editsSeries) patch.exclude!.push({ component: series.component, points: dropped });
   if (!patch.edits.length && !patch.drop.length) return 'idle';
@@ -713,6 +757,14 @@ async function pushResource(pool: Pool, target: CaldavTarget, snapshot: Snapshot
   const result = await client.put(stored.href, text, { ifMatch: stored.etag });
   if (result.status === 412 || result.status === 404 || result.status === 410) return 'stale';
   if (!success(result.status)) return 'rejected';
+  // Dropped occurrences change their series' exceptions, which no row holds yet: such a resource is read on the next run.
+  const fresh = result.etag === null && !patch.drop.length ? await readBack(client, target, stored.href, event => {
+    const mine = written.find(w => w.uid === event.uid);
+    if (mine) return holdsWritten(mine.scope, event, mine.local);
+    const item = state.items.get(event.uid);
+    const scope = item && activeScope(scopes, item);
+    return !!item && !!scope && canonical(scope, event)?.hash.equals(item.content_hash) === true;
+  }) : null;
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
@@ -722,8 +774,9 @@ async function pushResource(pool: Pool, target: CaldavTarget, snapshot: Snapshot
       [target.sourceId, written.map(w => w.uid), written.map(w => w.revision), written.map(w => w.hash.toString('hex'))]);
     }
     if (droppedUids.length) await db.query('DELETE FROM calendar_sync_items WHERE source_id = $1 AND uid = ANY($2::text[])', [target.sourceId, droppedUids]);
-    // Without an ETag in the answer the resource is read again next time, and found equal.
-    await saveResources(db, target, [{ href: stored.href, etag: result.etag, body: text }]);
+    // Without an ETag in the answer, and without a matching read back, the resource is read again next time.
+    await saveResources(db, target, [fresh ? { href: stored.href, etag: fresh.etag, body: fresh.body }
+      : { href: stored.href, etag: result.etag, body: text }]);
     await db.query('COMMIT');
   } catch (error) {
     await db.query('ROLLBACK').catch(() => undefined);
@@ -765,6 +818,8 @@ async function pushNewRow(pool: Pool, target: CaldavTarget, snapshot: Snapshot, 
   const createdUid = result.uid ?? uid;
   // A server that named the event itself holds other text than `text`: without an ETag it is read again next run.
   const createdEtag = createdUid === uid ? result.etag : null;
+  const fresh = createdEtag === null ? await readBack(client, target, createdHref, event => event.uid === createdUid
+    && holdsWritten(scope, event, local)) : null;
   await inWorkspace(pool, target, async (db, properties) => {
     let revision: string | undefined;
     // Only the source's own database has an external ID field to hold the UID.
@@ -792,7 +847,7 @@ async function pushNewRow(pool: Pool, target: CaldavTarget, snapshot: Snapshot, 
     if (!revision) return;
     await saveItems(db, target, [{ uid: createdUid, rowId: row.id, revision, hash: eventHash(local), href: createdHref, attendees: false,
       ...itemPlace(scope) }]);
-    await saveResources(db, target, [{ href: createdHref, etag: createdEtag, body: text }]);
+    await saveResources(db, target, [fresh ? { href: createdHref, etag: fresh.etag, body: fresh.body } : { href: createdHref, etag: createdEtag, body: text }]);
   });
   counts.pushed = (counts.pushed ?? 0) + 1;
 }

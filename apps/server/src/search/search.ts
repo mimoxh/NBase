@@ -17,7 +17,7 @@ WITH q AS (SELECT lower($3::text) AS phrase, lower($6::text) AS compact, ARRAY(S
 -- Rank without carrying page text through the sort, then read text only for the returned rows.
 , ranked AS (SELECT p.id, r.tier, s.score, p.updated_at
 FROM pages p
-JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
+JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
 CROSS JOIN q
 CROSS JOIN LATERAL (SELECT lower(p.title) AS lt, lower(p.search_text) AS lb OFFSET 0) x
 CROSS JOIN LATERAL (SELECT CASE
@@ -70,7 +70,7 @@ WHERE p.workspace_id = $1 AND p.id = ANY($2::uuid[])
 interface Row { id: string; parent_id: string | null; title: string; icon: string | null; revision: string;
   updated_at: Date; search_text: string; tier: number }
 
-type Located = Pick<SearchResult, 'snippet' | 'matchField'> & { highlight: string };
+export type Located = Pick<SearchResult, 'snippet' | 'matchField'> & { highlight: string };
 
 async function pinyinPositions(pool: Pool, workspaceId: string, ids: string[], query: ParsedQuery) {
   const byRow = new Map<string, { title: LexemePositions; body: LexemePositions }>();
@@ -86,7 +86,8 @@ async function pinyinPositions(pool: Pool, workspaceId: string, ids: string[], q
   return byRow;
 }
 
-function locate(row: Row, query: ParsedQuery, positions?: { title: LexemePositions; body: LexemePositions }): Located {
+export function locate(row: Pick<Row, 'title' | 'search_text' | 'tier'>, query: ParsedQuery,
+  positions?: { title: LexemePositions; body: LexemePositions }): Located {
   const { title, search_text: body } = row;
   const terms = query.terms.map(term => term.text);
   const phraseIn = (text: string) => findLiteral(text, query.phrase) >= 0 ? query.phrase : query.compact ?? query.phrase;

@@ -1,4 +1,6 @@
 import type { PageKind, PropertyValue, RowProperties } from './databases.js';
+import type { CollabWrite } from './realtime.js';
+import type { PageProperty } from './pageProperties.js';
 
 /** API content is validated on the server before storage. The web editor owns Lexical's node types. */
 export interface StoredDocumentContent {
@@ -35,8 +37,15 @@ export interface PageSummary {
 
 export interface PageDocument extends PageSummary {
   content: StoredDocumentContent;
+  /**
+   * Who saved the current revision. Null for revisions without a recorded actor; omitted by older servers and
+   * stored receipts.
+   */
+  lastEditor?: { userId: string; loginName: string } | null;
   /** Row pages only: property values keyed by property id. */
   properties?: RowProperties;
+  /** Document pages only: the page's own properties, in display order. Omitted by older servers. */
+  pageProperties?: PageProperty[];
 }
 
 export interface PageListResponse {
@@ -59,6 +68,8 @@ export interface CreatePageRequest {
   tagIds?: string[];
   /** Only when the parent is a database; the page becomes a row. */
   properties?: RowProperties;
+  /** Document pages only. */
+  pageProperties?: PageProperty[];
 }
 
 export interface UpdatePageRequest {
@@ -73,6 +84,10 @@ export interface UpdatePageRequest {
   tagIds?: string[];
   /** Row pages only: partial patch, null removes a value. */
   properties?: Record<string, PropertyValue | null>;
+  /** Document pages only: replaces all of the page's properties. */
+  pageProperties?: PageProperty[];
+  /** Set by a real-time room's saver (docs/architecture/realtime.md); the room's epoch replaces the revision check. */
+  collab?: CollabWrite;
 }
 
 export interface PageStateRequest {

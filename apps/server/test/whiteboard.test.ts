@@ -124,3 +124,44 @@ test('enforces element count and byte limits', () => {
   assert.equal(whiteboardContentProblem(withElements(...heavy)), 'size');
   rejects(withElements(...heavy));
 });
+
+test('accepts styled text runs, bend points and organisation charts, and rejects malformed ones', () => {
+  const runs = [{ text: '加粗', bold: true }, { text: '红色', color: 'red', italic: true }, { text: '大', fontSize: 32 }];
+  const content = withElements(
+    shape(1, { text: '加粗红色大', runs, mindParentId: null, mindLayout: 'down' }),
+    shape(2, { mindParentId: id(1) }),
+    { id: id(5), type: 'note', ...box, text: 'ab', runs: [{ text: 'a' }, { text: 'b', bold: false }], color: '#fff3b0', fontSize: 16, textAlign: 'left' },
+    { id: id(6), type: 'text', ...box, text: '标题', runs: [{ text: '标题', italic: true }], color: '#1f2328', fontSize: 24, textAlign: 'left' },
+    { ...connector(3, 1, 2), waypoints: [{ x: 200, y: 40 }, { x: 200, y: 160.5 }] },
+  );
+  assert.equal(whiteboardContentProblem(content), null);
+  assert.equal(validateDocumentContent(content), content);
+  // Search and the reference index read the plain text, which the runs spell out.
+  assert.equal(extractSearchText(content), '加粗红色大 ab 标题 流向');
+
+  const styled = (extra: object) => withElements(shape(1, { text: 'ab', ...extra }));
+  rejects(styled({ runs: [{ text: 'a' }] }));
+  rejects(styled({ runs: [{ text: 'a' }, { text: 'c' }] }));
+  rejects(styled({ runs: [] }));
+  rejects(styled({ runs: [{ text: '' }, { text: 'ab' }] }));
+  rejects(styled({ runs: [{ text: 'ab', color: '#ff0000' }] }));
+  rejects(styled({ runs: [{ text: 'ab', fontSize: 2 }] }));
+  rejects(styled({ runs: [{ text: 'ab', bold: 'yes' }] }));
+  rejects(styled({ runs: [{ text: 'ab', underline: true }] }));
+  rejects(styled({ runs: 'ab' }));
+  rejects(styled({ runs: Array.from({ length: whiteboardLimits.maxRuns + 1 }, () => ({ text: 'a' })), text: 'a'.repeat(whiteboardLimits.maxRuns + 1) }));
+  rejects(withElements({ id: id(7), type: 'pen', ...box, points: [0, 0, 5, 5], color: '#d1242f', strokeWidth: 3, runs: [{ text: 'x' }] }));
+
+  const routed = (waypoints: unknown) => withElements(shape(1), shape(2), { ...connector(3, 1, 2), waypoints });
+  rejects(routed([]));
+  rejects(routed([{ x: 1 }]));
+  rejects(routed([{ x: 1, y: Number.NaN }]));
+  rejects(routed([{ x: 1, y: 2, z: 3 }]));
+  rejects(routed([{ x: 1e9, y: 0 }]));
+  rejects(routed(Array.from({ length: whiteboardLimits.maxWaypoints + 1 }, (_, n) => ({ x: n, y: n }))));
+  rejects(routed({ x: 1, y: 2 }));
+
+  rejects(withElements(shape(1, { mindParentId: null }), shape(2, { mindParentId: id(1), mindLayout: 'down' })));
+  rejects(withElements(shape(1, { mindParentId: null, mindLayout: 'up' })));
+  rejects(withElements(shape(1, { mindLayout: 'down' })));
+});

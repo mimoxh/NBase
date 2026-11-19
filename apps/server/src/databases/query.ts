@@ -3,7 +3,7 @@ import { localDay, resolveFilters, activeProperties, aggregatesFor, databaseQuer
   type DatabaseAggregateResponse, type DatabaseQueryRange, type DatabaseRowGroup, type DatabaseQueryRequest, type DatabaseQueryResponse,
   type DatabaseRow, type DayRange, type PropertyDefinition, type QueryContext, type ResolvedCondition, type ViewSort } from '@nbase/contracts';
 import type { Pool, PoolClient } from 'pg';
-import { computeValues } from './computed.js';
+import { computedSources, computeValues } from './computed.js';
 import { loadRelationCells } from './relations.js';
 import { databaseRow, rowTagIdsColumn, type RowRecord } from './schema.js';
 
@@ -264,9 +264,18 @@ function sortSql(sql: Sql, rawDef: PropertyDefinition, direction: 'asc' | 'desc'
   }
 }
 
-function groupKeySql(sql: Sql, def: PropertyDefinition): string {
-  if (def.type === 'checkbox') return `(CASE WHEN ${checkedOf(sql, def)} THEN 'true' ELSE 'false' END)`;
-  return `(CASE WHEN ${emptyOf(sql, def)} THEN NULL ELSE ${selectOf(sql, def)} END)`;
+/**
+ * The board columns of a row as a text array, as in contracts' `rowGroupKeys`: one key for select and checkbox, the
+ * current options in option order for a multi-select, and an empty array for a row in the column without options.
+ */
+function groupKeysSql(sql: Sql, def: PropertyDefinition): string {
+  if (def.type === 'checkbox') return `ARRAY[CASE WHEN ${checkedOf(sql, def)} THEN 'true' ELSE 'false' END]`;
+  if (def.type === 'multi_select') {
+    const v = jsonValue(sql, def);
+    return `ARRAY(SELECT o.id FROM unnest(${sql.add(optionIds(def), 'text[]')}) WITH ORDINALITY AS o(id, n)
+      WHERE jsonb_typeof(${v}) = 'array' AND ${v} ? o.id ORDER BY o.n)`;
+  }
+  return `ARRAY_REMOVE(ARRAY[CASE WHEN ${emptyOf(sql, def)} THEN NULL ELSE ${selectOf(sql, def)} END], NULL)`;
 }
 
 function compile(sql: Sql, properties: PropertyDefinition[], request: DatabaseQueryRequest, context: QueryContext) {
@@ -360,15 +369,17 @@ async function loadHead(client: PoolClient, workspaceId: string, actorId: string
   const head = await client.query<{ properties_json: PropertyDefinition[]; schema_revision: string }>(`
     SELECT d.properties_json, d.revision::text AS schema_revision FROM databases d
     JOIN pages p ON p.workspace_id = d.workspace_id AND p.id = d.page_id AND p.deleted_at IS NULL
-    JOIN workspace_memberships m ON m.workspace_id = d.workspace_id AND m.user_id = $2
+    JOIN workspace_memberships m ON m.workspace_id = d.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
     WHERE d.workspace_id = $1 AND d.page_id = $3`, [workspaceId, actorId, databaseId]);
   return head.rows[0] ?? null;
 }
 
+/** Work left for this database or for any database whose computed fields its rollups read, see `computedSources`. */
 async function computedCachePending(client: PoolClient, workspaceId: string, databaseId: string): Promise<boolean> {
-  const pending = await client.query(`SELECT 1 FROM databases d WHERE d.workspace_id = $1 AND d.page_id = $2
-    AND (d.computed_done_generation < d.computed_generation OR EXISTS (SELECT 1 FROM database_computed_dirty x WHERE x.workspace_id = d.workspace_id AND x.database_id = d.page_id))`,
-  [workspaceId, databaseId]);
+  const ids = [databaseId, ...await computedSources(client, workspaceId, databaseId)];
+  const pending = await client.query(`SELECT 1 FROM databases d WHERE d.workspace_id = $1 AND d.page_id = ANY($2::uuid[])
+    AND (d.computed_done_generation < d.computed_generation OR EXISTS (SELECT 1 FROM database_computed_dirty x WHERE x.workspace_id = d.workspace_id AND x.database_id = d.page_id))
+    LIMIT 1`, [workspaceId, ids]);
   return pending.rows.length > 0;
 }
 
@@ -386,8 +397,8 @@ export function runDatabaseQuery(pool: Pool, workspaceId: string, actorId: strin
     const hasComputed = head.properties_json.some(p => isComputedProperty(p) && !p.deletedAt);
     const computedJoin = hasComputed ? 'LEFT JOIN database_computed c ON c.workspace_id = p.workspace_id AND c.row_id = p.id' : '';
     const groupDef = request.groupBy ? activeProperties(head.properties_json).find(p => p.id === request.groupBy && isGroupableProperty(p)) : undefined;
-    const groupColumn = groupDef ? `, ${groupKeySql(sql, groupDef)} AS group_key` : '';
-    const ordered = await client.query<{ id: string; group_key?: string | null }>(`SELECT p.id${groupColumn} FROM pages p ${computedJoin} ${sql.joins()}
+    const groupColumn = groupDef ? `, ${groupKeysSql(sql, groupDef)} AS group_keys` : '';
+    const ordered = await client.query<{ id: string; group_keys?: string[] }>(`SELECT p.id${groupColumn} FROM pages p ${computedJoin} ${sql.joins()}
       WHERE ${scope} ${where} ORDER BY ${order}`, sql.values);
     const computedStale = hasComputed && await computedCachePending(client, workspaceId, databaseId);
     const ids = ordered.rows.map(row => row.id);
@@ -395,9 +406,11 @@ export function runDatabaseQuery(pool: Pool, workspaceId: string, actorId: strin
     if (groupDef) {
       const byKey = new Map<string | null, string[]>();
       for (const row of ordered.rows) {
-        const key = row.group_key ?? null;
-        const list = byKey.get(key);
-        if (list) list.push(row.id); else byKey.set(key, [row.id]);
+        const keys: (string | null)[] = row.group_keys?.length ? row.group_keys : [null];
+        for (const key of keys) {
+          const list = byKey.get(key);
+          if (list) list.push(row.id); else byKey.set(key, [row.id]);
+        }
       }
       groups = [...byKey].map(([key, list]) => ({ key, ids: list }));
     }

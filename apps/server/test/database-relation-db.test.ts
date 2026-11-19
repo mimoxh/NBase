@@ -162,7 +162,14 @@ test('two-way relations stay consistent through edits, trash and history', {
     };
     await setAmount(o1.id, 10);
     await setAmount(o2.id, 3);
-    const drain = async () => { while (await runComputedBatch(pool!)) { /* until empty */ } };
+    // The app's own worker may hold a batch while this runs, so wait until the queue is really empty.
+    const drain = async () => {
+      for (let i = 0; i < 500; i++) {
+        if (!await runComputedBatch(pool!) && !(await pool!.query('SELECT 1 FROM database_computed_dirty LIMIT 1')).rowCount) return;
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      assert.fail('computed queue did not drain');
+    };
     assert.equal((await read(orders)).computedStale, true);
     await drain();
     assert.equal((await read(orders)).computedStale, undefined);

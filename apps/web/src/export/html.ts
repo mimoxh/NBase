@@ -102,7 +102,7 @@ function attachment(node: SerializedNode, context: HtmlContext): string {
   const alt = str(node.alt) || fileName;
   if (mediaType.startsWith('image/')) {
     if (!file) return `<span class="nb-placeholder">图片：${escapeHtml(alt)}（未包含在导出中）</span>`;
-    const src = context.mode === 'single' ? `data:${file.mediaType};base64,${file.base64 ?? ''}` : assetPath(file);
+    const src = context.mode === 'single' ? `data:${file.mediaType};base64,${file.base64 ?? ''}` : (context.resources.assetUrl ?? assetPath)(file);
     const width = int(node.width, 0);
     const align = ['left', 'center', 'right'].includes(str(node.align)) ? str(node.align) : 'left';
     const caption = str(node.caption);
@@ -111,7 +111,7 @@ function attachment(node: SerializedNode, context: HtmlContext): string {
       + `<img src="${attr(src)}" alt="${attr(alt)}"${size}>${caption ? `<span class="nb-caption">${escapeHtml(caption)}</span>` : ''}</span>`;
   }
   if (!file || context.mode === 'single') return `<span class="nb-file">附件：${escapeHtml(fileName)}${context.mode === 'single' ? '（单文件 HTML 不含附件）' : '（未包含在导出中）'}</span>`;
-  const href = attr(assetPath(file));
+  const href = attr((context.resources.assetUrl ?? assetPath)(file));
   if (mediaType.startsWith('audio/')) return `<span class="nb-media"><audio controls preload="none" src="${href}"></audio><a href="${href}">${escapeHtml(fileName)}</a></span>`;
   if (mediaType.startsWith('video/')) return `<span class="nb-media"><video controls preload="none" src="${href}"></video><a href="${href}">${escapeHtml(fileName)}</a></span>`;
   return `<a class="nb-file" href="${href}">附件：${escapeHtml(fileName)}</a>`;

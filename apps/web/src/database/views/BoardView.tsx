@@ -12,16 +12,19 @@ interface Column { key: string | null; label: React.ReactNode; value: PropertyVa
 
 function columnsOf(def: PropertyDefinition): Column[] {
   if (def.type === 'checkbox') return [{ key: 'false', label: '未勾选', value: null }, { key: 'true', label: '已勾选', value: true }];
-  return [{ key: null, label: `没有${def.name}`, value: null },
+  return [{ key: null, label: def.type === 'multi_select' ? '无选项' : `没有${def.name}`, value: null },
     ...(def.options ?? []).map(option => ({ key: option.id, label: <OptionTag option={option} />, value: option.id }))];
 }
 
-/** Rows as cards in columns of one single-select or checkbox field. Dragging a card writes that field. */
+/**
+ * Rows as cards in columns of one single-select, multi-select or checkbox field. Dragging a card writes that field;
+ * a multi-select card shows in the column of each of its options, and dragging it swaps one option for another.
+ */
 export default function BoardView({ source, store, doc, view, group, canWrite }: {
   source: DatabaseDataSource; store: RowStore; doc: DatabaseDocument; view: View; group: PropertyDefinition; canWrite: boolean;
 }) {
   const [limits, setLimits] = useState<Record<string, number>>({});
-  const [dragging, setDragging] = useState<string | null>(null);
+  const [dragging, setDragging] = useState<{ id: string; from: string | null } | null>(null);
   const [dropKey, setDropKey] = useState<string | null | undefined>(undefined);
   const columns = useMemo(() => columnsOf(group), [group]);
   const shown = viewColumns(doc.properties, view).filter(def => def.type !== 'title' && def.id !== group.id).slice(0, cardFields);
@@ -41,14 +44,14 @@ export default function BoardView({ source, store, doc, view, group, canWrite }:
           setDropKey(undefined);
           const moving = dragging;
           setDragging(null);
-          if (moving && !idsOf(column.key).includes(moving)) void store.moveToGroup(moving, column.key, group.id, column.value);
+          if (moving && !idsOf(column.key).includes(moving.id)) void store.moveToGroup(moving.id, moving.from, column.key, group);
         }}>
         <header className="nb-db-board-head"><span className="nb-db-board-label">{column.label}</span><span className="nb-db-count">{ids.length}</span></header>
         <div className="nb-db-board-cards">
           {ids.slice(0, limitOf(column.key)).map(id => {
             const row = store.rowById(id);
             if (!row) return <div key={id} className="nb-db-card nb-db-card-loading" aria-busy="true" />;
-            return <article key={id} className="nb-db-card" draggable={canWrite} onDragStart={() => setDragging(id)} onDragEnd={() => { setDragging(null); setDropKey(undefined); }}>
+            return <article key={id} className="nb-db-card" draggable={canWrite} onDragStart={() => setDragging({ id, from: column.key })} onDragEnd={() => { setDragging(null); setDropKey(undefined); }}>
               <button className="nb-db-card-title" onClick={() => source.openRow(id)}>{row.title || <span className="nb-db-placeholder">未命名</span>}</button>
               {shown.map(def => <div key={def.id} className="nb-db-card-field"><CellValue row={row} def={def} /></div>)}
             </article>;
@@ -56,7 +59,8 @@ export default function BoardView({ source, store, doc, view, group, canWrite }:
           {ids.length > limitOf(column.key) && <button className="nb-btn nb-btn-quiet" onClick={() => setLimits({ ...limits, [String(column.key)]: limitOf(column.key) + pageSize })}>
             再显示 {Math.min(pageSize, ids.length - limitOf(column.key))} 张</button>}
         </div>
-        {canWrite && <button className="nb-db-add-row" onClick={() => void store.createRow('', column.value === null ? {} : { [group.id]: column.value }, column.key)}>
+        {canWrite && <button className="nb-db-add-row" onClick={() => void store.createRow('', column.value === null ? {}
+          : { [group.id]: group.type === 'multi_select' ? [column.value as string] : column.value }, column.key)}>
           <Icon name="plus" size={14} />新建</button>}
       </section>;
     })}

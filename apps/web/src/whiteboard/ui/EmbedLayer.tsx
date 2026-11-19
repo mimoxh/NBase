@@ -100,7 +100,7 @@ const EmbedContent = memo(function EmbedContent({ el, active, embeds, controller
  * moving and resizing on the canvas; an active one takes input until Esc or a click outside.
  */
 export function EmbedLayer({ store, controller, onExit }: { store: BoardStore; controller: Controller; onExit: () => void }) {
-  useBoard(store);
+  useBoard(store, s => s.hasEmbeds() ? s.version : 'none');
   const embeds = useEmbeddedPages();
   if (!embeds) return null;
   const { view, size } = store;

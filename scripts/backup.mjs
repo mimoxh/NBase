@@ -6,6 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { prospectivePath, within, assertOutsideDataVolumes } from './backup-paths.mjs';
 
+process.on('uncaughtException', error => {
+  console.error('NBase maintenance failed:', error.message);
+  process.exitCode = 1;
+});
+
 const root = fileURLToPath(new URL('../', import.meta.url));
 const { values, positionals } = parseArgs({ allowPositionals: true, options: {
   config: { type: 'string', default: '.env.docker' }, directory: { type: 'string' },

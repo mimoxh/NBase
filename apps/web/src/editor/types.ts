@@ -1,5 +1,7 @@
 import type { SerializedEditorState } from 'lexical';
-import type { AttachmentMetadata, LinkPreview, PageSummary } from '@nbase/contracts';
+import type { Provider } from '@lexical/yjs';
+import type { Doc } from 'yjs';
+import type { AttachmentMetadata, CommentAnchor, LinkPreview, PageSummary } from '@nbase/contracts';
 import type { DatabaseEmbedding } from './nodes/DatabaseViewNode';
 import type { EmbeddedPages } from '../embed/source';
 
@@ -30,8 +32,20 @@ export interface EditorPageReferences {
 
 export type AttachmentPickKind = 'image' | 'file';
 
+/** A real-time room the editor is bound to (docs/architecture/realtime.md). */
+export interface DocumentCollab {
+  providerFactory: (id: string, docs: Map<string, Doc>) => Provider;
+  /** Shown next to this user's cursor in other tabs. */
+  username: string;
+  cursorColor: string;
+  /** Called when an input method composition starts and ends in this editor. */
+  onComposition?: ((composing: boolean) => void) | undefined;
+}
+
 export interface DocumentEditorProps {
   documentId: string;
+  /** Edits a room's shared document instead of local state; undo then only covers this user's own changes. */
+  collab?: DocumentCollab | undefined;
   title?: string | undefined;
   onReplaceTitle?: ((title: string, bodyChanged: boolean) => void) | undefined;
   pageReferences?: EditorPageReferences | undefined;
@@ -64,6 +78,10 @@ export interface DocumentEditorHandle {
   findText: (phrase: string) => boolean;
   jumpToHeading: (id: string) => void;
   locatePageReference: (targetPageId: string, occurrence?: number) => boolean;
+  /** Where a new comment would point: the block under the current selection, or null when nothing is selected. */
+  commentAnchor: () => CommentAnchor | null;
+  /** Whether the commented block can still be found; with `reveal`, scrolls to it and flashes it. */
+  locateComment: (anchor: CommentAnchor, reveal?: boolean) => boolean;
 }
 
 export interface MarkdownAssessment {

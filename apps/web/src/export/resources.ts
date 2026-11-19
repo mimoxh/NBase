@@ -21,6 +21,8 @@ export interface ExportResources {
   highlight?: ((code: string, language: string) => string | null) | undefined;
   /** Titles for page and database ids, when the host knows them. */
   pageTitle?: ((id: string) => string | undefined) | undefined;
+  /** Package mode only: where an attachment is served from, instead of the archive's assets/ folder. */
+  assetUrl?: ((file: Pick<ExportFile, 'id' | 'mediaType' | 'fileName'>) => string) | undefined;
 }
 
 export interface ResourceLoaders {

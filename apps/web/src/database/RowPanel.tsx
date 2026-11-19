@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { databaseRelationPreview, isComputedProperty, type DatabaseRow, type PropertyDefinition, type PropertyValue, type RelationCell } from '@nbase/contracts';
+import { databaseRelationPreview, isComputedProperty, type DatabaseRow, type PagePropertyType, type PropertyDefinition, type PropertyValue,
+  type RelationCell } from '@nbase/contracts';
 import { nextOptionColor } from './labels';
 import type { RelationHost } from './RelationEditor';
 import { RowProperties } from './RowProperties';
@@ -56,11 +57,19 @@ export function RowPanel({ source, databaseId, row, editable, pending, onChange,
     const properties = doc.properties.map(p => p.id === def.id ? { ...p, options: [...(p.options ?? []), option] } : p);
     return await state.saveSchema({ properties, views: doc.views }) ? option.id : null;
   };
+  // Views list fields missing from their column order after the others, so the new field needs no view change.
+  const addProperty = async (name: string, type: PagePropertyType) => {
+    const doc = state.doc;
+    if (!doc) return false;
+    const def: PropertyDefinition = { id: crypto.randomUUID(), name, type, ...(type === 'select' ? { options: [] } : {}) };
+    return state.saveSchema({ properties: [...doc.properties, def], views: doc.views });
+  };
   // Tags of the open row page are changed with the page's own tag control, so here they only show.
   const workspaceTags = source.workspaceTags?.();
   return <DatabaseTagsContext.Provider value={workspaceTags ? { tags: workspaceTags } : null}>
     <RowProperties row={{ ...row, ...(relations ? { relations } : {}), ...(computed ? { computed } : {}) }} properties={state.doc.properties} editable={editable && source.canWrite} pending={pending}
       onChange={onChange} onCreateOption={createOption} databaseTitle={state.doc.page.title} databaseIcon={state.doc.page.icon}
-      onOpenDatabase={() => source.openDatabase(databaseId)} relationHostFor={relationHost} locked={lockedPropertyIdsForRow(state.doc, row.id)} />
+      onOpenDatabase={() => source.openDatabase(databaseId)} relationHostFor={relationHost} locked={lockedPropertyIdsForRow(state.doc, row.id)}
+      onAddProperty={editable && source.canWrite ? addProperty : undefined} />
   </DatabaseTagsContext.Provider>;
 }

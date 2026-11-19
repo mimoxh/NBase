@@ -6,12 +6,13 @@ import { isSelfOrAncestor, siblingStep, type PagePlacement } from './pageOrder';
 
 export interface TreeRowActions {
   onOpen: (id: string) => void;
-  onAddChild: (id: string) => void;
+  /** The structure actions are absent for read-only members; favorites stay, being personal. */
+  onAddChild?: ((id: string) => void) | undefined;
   /** Creates a database under the page; absent where databases cannot be created. */
   onAddDatabase?: ((id: string) => void) | undefined;
   onFavorite: (id: string) => void;
-  onMove: (id: string) => void;
-  onTrash: (id: string) => void;
+  onMove?: ((id: string) => void) | undefined;
+  onTrash?: ((id: string) => void) | undefined;
   /** Absent where the page order cannot be changed, such as for viewers. */
   onPlace?: ((id: string, placement: PagePlacement) => void) | undefined;
 }
@@ -58,12 +59,14 @@ export const PageTree = memo(function PageTree({ pages, activeId, favorites, act
     if (zone === 'inside' && (page.kind === 'database' || page.kind === 'whiteboard')) return false;
     return Boolean(id) && !isSelfOrAncestor(pages, id!, zone === 'inside' ? page.id : page.parentId) && id !== page.id;
   };
-  const branch = (parentId: string | null, depth: number): ReactNode => (childrenByParent.get(parentId) ?? []).map(page => {
+  const branch = (parentId: string | null, depth: number): ReactNode => (childrenByParent.get(parentId) ?? []).map((page, index, siblings) => {
     const hasChildren = childrenByParent.has(page.id);
     const favorite = favorites.has(page.id);
     const onPlace = actions.onPlace;
-    const up = onPlace && siblingStep(pages, page.id, -1);
-    const down = onPlace && siblingStep(pages, page.id, 1);
+    const up = onPlace && siblingStep(siblings, index, -1);
+    const down = onPlace && siblingStep(siblings, index, 1);
+    const { onAddChild, onMove, onTrash } = actions;
+    const canHoldPages = page.kind !== 'database' && page.kind !== 'whiteboard';
     return <div key={page.id}>
       <div className={`nb-tree-row ${activeId === page.id ? 'selected' : ''} ${drop?.id === page.id ? 'drop-' + drop.zone : ''}`}
         style={{ paddingLeft: 8 + depth * 15 }} draggable={Boolean(onPlace)}
@@ -100,19 +103,19 @@ export const PageTree = memo(function PageTree({ pages, activeId, favorites, act
           {favorite && <Icon name="star-filled" size={11} />}
         </button>
         <span className="nb-tree-actions">
-          {page.kind !== 'database' && page.kind !== 'whiteboard' && <button className="nb-tree-act" aria-label={`在「${page.title || '未命名页面'}」下新建子页面`}
-            onClick={() => actions.onAddChild(page.id)}><Icon name="plus" size={14} /></button>}
+          {canHoldPages && onAddChild && <button className="nb-tree-act" aria-label={`在「${page.title || '未命名页面'}」下新建子页面`}
+            onClick={() => onAddChild(page.id)}><Icon name="plus" size={14} /></button>}
           <Menu label={`「${page.title || '未命名页面'}」页面操作`} align="end"
             trigger={<Icon name="more" size={16} />} items={[
               { key: 'fav', label: favorite ? '取消收藏' : '收藏', icon: 'star', onSelect: () => actions.onFavorite(page.id) },
-              ...(page.kind !== 'database' && page.kind !== 'whiteboard' ? [{ key: 'child', label: '添加子页面', icon: 'plus' as const, onSelect: () => actions.onAddChild(page.id) },
-                ...(actions.onAddDatabase ? [{ key: 'database', label: '添加数据库', icon: 'table' as const,
-                  onSelect: () => actions.onAddDatabase?.(page.id) }] : [])] : []),
-              { key: 'move', label: '移动到…', icon: 'folder', onSelect: () => actions.onMove(page.id) },
+              ...(canHoldPages && onAddChild ? [{ key: 'child', label: '添加子页面', icon: 'plus' as const, onSelect: () => onAddChild(page.id) }] : []),
+              ...(canHoldPages && actions.onAddDatabase ? [{ key: 'database', label: '添加数据库', icon: 'table' as const,
+                onSelect: () => actions.onAddDatabase?.(page.id) }] : []),
+              ...(onMove ? [{ key: 'move', label: '移动到…', icon: 'folder' as const, onSelect: () => onMove(page.id) }] : []),
               ...(up ? [{ key: 'up', label: '上移', icon: 'chevron' as const, onSelect: () => onPlace?.(page.id, up) }] : []),
               ...(down ? [{ key: 'down', label: '下移', icon: 'chevron' as const, onSelect: () => onPlace?.(page.id, down) }] : []),
-              'divider',
-              { key: 'trash', label: '移入回收站', icon: 'trash', danger: true, onSelect: () => actions.onTrash(page.id) },
+              ...(onTrash ? ['divider' as const,
+                { key: 'trash', label: '移入回收站', icon: 'trash' as const, danger: true, onSelect: () => onTrash(page.id) }] : []),
             ]} />
         </span>
       </div>

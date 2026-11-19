@@ -2,7 +2,9 @@ import type { StoredDocumentContent } from '@nbase/contracts';
 import { normalizeCodeBlockLanguage } from '../editor/codeLanguages';
 import { renderMermaid } from '../editor/renderMermaid';
 import { exportPage, type PageExportFormat, type PageExportResult } from './index';
-import type { ExportFile, RasterImage, ResourceLoaders } from './resources';
+import { renderHtmlDocument } from './html';
+import { loadResources, type ExportFile, type RasterImage, type ResourceLoaders } from './resources';
+import { attachmentNodes, rootOf } from './tree';
 
 /** Browser-only loaders: Prism, the sandboxed Mermaid renderer and canvas rasterizing. Lazily imported from menus. */
 async function highlighter(): Promise<ResourceLoaders['highlight']> {
@@ -74,4 +76,23 @@ export async function exportPageFile({ title, content, format, fetchAttachment, 
   };
   if (format === 'html') { const highlight = await highlighter(); if (highlight) loaders.highlight = highlight; }
   return exportPage({ title, content }, format, loaders);
+}
+
+/**
+ * The HTML export of a page for the share view: attachments stay on the server and load from `assetUrl`, so nothing
+ * is downloaded up front and only what the reader scrolls to is fetched.
+ */
+export async function renderSharedPage({ title, content, assetUrl, pageTitle, signal }: {
+  title: string; content: StoredDocumentContent; assetUrl: (id: string) => string; pageTitle: (id: string) => string | undefined;
+  signal?: AbortSignal;
+}): Promise<string> {
+  const root = rootOf(content);
+  const highlight = await highlighter();
+  const resources = await loadResources(root, {
+    renderMermaid: async source => (await renderMermaid(source, signal ?? new AbortController().signal)).text(),
+    pageTitle, ...(highlight ? { highlight } : {}),
+  }, 'html');
+  for (const item of attachmentNodes(root)) resources.files.set(item.id, { ...item, bytes: new Uint8Array(0) });
+  resources.assetUrl = file => assetUrl(file.id);
+  return renderHtmlDocument({ title, content }, resources, 'package');
 }

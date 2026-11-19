@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import type { Pool } from 'pg';
+import { runHistoryTextBatch } from './history-index.js';
 import { pinyinBodyUnitLimit, pinyinTitleUnitLimit, pinyinVector } from './pinyin-index.js';
 
 const batchSize = 25;
@@ -38,7 +39,10 @@ export async function runPinyinBatch(pool: Pool, limit = batchSize): Promise<boo
   } finally { client.release(); }
 }
 
-/** In-process loop for the pinyin backfill and for pages written by paths that do not compute keys. */
+/**
+ * In-process loop for the pinyin backfill, for pages written by paths that do not compute keys, and for the search
+ * text of versions saved before migration 29. Current pages go first.
+ */
 export class PinyinIndexWorker {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private running: Promise<void> | null = null;
@@ -65,7 +69,7 @@ export class PinyinIndexWorker {
     let delay = idleMs;
     try {
       // Yields between batches so request handlers get the pool and the event loop.
-      if (await runPinyinBatch(this.pool)) delay = 10;
+      if (await runPinyinBatch(this.pool) || await runHistoryTextBatch(this.pool)) delay = 10;
     } catch (error) {
       this.onError(error);
       delay = failureMs;
@@ -75,7 +79,7 @@ export class PinyinIndexWorker {
 }
 
 export function registerPinyinIndexWorker(app: FastifyInstance, pool: Pool): void {
-  const worker = new PinyinIndexWorker(pool, error => app.log.error({ err: error }, 'pinyin index worker failed'));
+  const worker = new PinyinIndexWorker(pool, error => app.log.error({ err: error }, 'search index worker failed'));
   worker.start(idleMs);
   app.addHook('onClose', () => worker.close());
 }

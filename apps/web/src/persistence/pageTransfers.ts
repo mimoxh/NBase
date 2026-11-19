@@ -1,7 +1,10 @@
 import { attachmentLimitFor } from '@nbase/contracts';
 import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from 'react';
-import type { AttachmentMetadata, AuthSessionResponse, PageDocument, StoredDocumentContent, WorkspaceTag } from '@nbase/contracts';
-import { addMarkdownFrontMatter, markdownFromContent, parseMarkdownImport } from '../editor/markdown';
+import type { AttachmentMetadata, AuthSessionResponse, PageDocument, PageProperty, PropertyDefinition, StoredDocumentContent,
+  WorkspaceTag } from '@nbase/contracts';
+import { databaseClient } from '../database/persistentSource';
+import { addMarkdownFrontMatter, markdownFromContent, pagePropertiesFrontMatter, parseMarkdownImport, rowPropertiesFrontMatter } from '../editor/markdown';
+import type { FrontMatterPropertyValue } from '../editor/markdownFrontMatter';
 import type { DocumentContent, DocumentEditorHandle, EditorSnapshot } from '../editor/types';
 import { exportAttachments, packagePage } from './attachmentExport';
 import { withCaptionParagraphs } from './attachmentPresentation';
@@ -50,7 +53,28 @@ export interface PageTransferContext {
   setPendingUploads: Dispatch<SetStateAction<PendingUpload[]>>;
   settlePageBeforeWrite: (pageId: string) => Promise<void>;
   createPage: (parentId: string | null, title?: string, content?: StoredDocumentContent, resolvesDraft?: LocalPageDraft,
-    tagIds?: string[], openResult?: boolean) => Promise<PageDocument | undefined>;
+    tagIds?: string[], openResult?: boolean, pageProperties?: PageProperty[]) => Promise<PageDocument | undefined>;
+}
+
+type HeaderProperties = Record<string, FrontMatterPropertyValue>;
+
+/**
+ * Header properties of saved pages: a page's own properties, or a row's values under its database's fields. Schemas are
+ * read once per database; a database that cannot be read exports its rows without values instead of failing the export.
+ */
+export function createHeaderProperties(workspaceId: string | undefined) {
+  const schemas = new Map<string, Promise<PropertyDefinition[] | null>>();
+  return async (page: PageDocument): Promise<HeaderProperties> => {
+    if ((page.kind ?? 'document') === 'document') return pagePropertiesFrontMatter(page.pageProperties ?? []);
+    if (page.kind !== 'row' || !page.parentId || !workspaceId || !page.properties) return {};
+    let schema = schemas.get(page.parentId);
+    if (!schema) {
+      schema = databaseClient.get(workspaceId, page.parentId).then(doc => doc.properties, () => null);
+      schemas.set(page.parentId, schema);
+    }
+    const definitions = await schema;
+    return definitions ? rowPropertiesFrontMatter(definitions, page.properties) : {};
+  };
 }
 
 /** Page export, attachment upload and Markdown import for the page that is open now. */
@@ -59,11 +83,12 @@ export function createPageTransfers({ session, workspace, workspaceScope, liveSc
   folderExportingRef, importResolvingRef, createBusyRef, setDialog, setNotice, setReauth, setNoteDialogError, setFolderExporting,
   setImportResolving, setPendingImport, setPendingUploads, settlePageBeforeWrite, createPage }: PageTransferContext) {
   const tagNamesFor = (ids: string[] | undefined) => tags.filter(tag => ids?.includes(tag.id)).map(tag => tag.name);
-  const downloadPage = async (name: string, markdown: string, content: StoredDocumentContent, documentTitle: string, tagNames: string[]) => {
+  const downloadPage = async (name: string, markdown: string, content: StoredDocumentContent, documentTitle: string, tagNames: string[],
+    page: PageDocument) => {
     try {
       const captioned = withCaptionParagraphs(content);
       const body = captioned === content ? markdown : markdownFromContent(captioned as Parameters<typeof markdownFromContent>[0]);
-      const portable = addMarkdownFrontMatter(body, content, documentTitle, tagNames);
+      const portable = addMarkdownFrontMatter(body, content, documentTitle, tagNames, await createHeaderProperties(workspace?.id)(page));
       const attachments = exportAttachments(content);
       if (!attachments.length) { download(name, portable); return; }
       if (!workspace) { setNotice('当前工作区不可用，无法导出附件。'); return; }
@@ -78,15 +103,18 @@ export function createPageTransfers({ session, workspace, workspaceScope, liveSc
     if (conflict) {
       const name = `${conflict.draft.title || '未命名页面'}-本机草稿`;
       if (conflictMarkdown !== null) void downloadPage(name, conflictMarkdown, conflict.draft.content,
-        conflict.draft.title || '未命名页面', tagNamesFor(conflict.server.tagIds));
+        conflict.draft.title || '未命名页面', tagNamesFor(conflict.server.tagIds), conflict.server);
       else download(name, JSON.stringify(conflict.draft.content, null, 2), 'application/json', '.json');
       return;
     }
-    if (!supported) download(`${current.title || '页面'}-原始数据`, JSON.stringify(current.content, null, 2), 'application/json', '.json');
+    if (current.kind === 'whiteboard') {
+      const content = editorSnapshot?.content ?? current.content;
+      download(`${title || '未命名白板'}-白板数据`, JSON.stringify(content, null, 2), 'application/json', '.json');
+    } else if (!supported) download(`${current.title || '页面'}-原始数据`, JSON.stringify(current.content, null, 2), 'application/json', '.json');
     else {
       const snapshot = editorRef.current?.getSnapshot();
       void downloadPage(title || '未命名页面', snapshot?.markdown ?? editorSnapshot?.markdown ?? '',
-        snapshot?.content ?? editorSnapshot?.content ?? current.content, title || '未命名页面', tagNamesFor(current.tagIds));
+        snapshot?.content ?? editorSnapshot?.content ?? current.content, title || '未命名页面', tagNamesFor(current.tagIds), current);
     }
   };
   /** HTML / Word: same content choice as `exportCurrent` (unsaved editor state, or the local draft during a conflict). */
@@ -113,10 +141,12 @@ export function createPageTransfers({ session, workspace, workspaceScope, liveSc
       setNotice('正在打包已保存的页面、子页面和附件…');
       const currentPages = await loadPageTree(workspace.id);
       const availableTags = (await tagClient.list(workspace.id)).tags;
+      const headerProperties = createHeaderProperties(workspace.id);
       const blob = await packageFolderSubtree({ rootPageId: current.id, pages: currentPages,
         fetchPage: id => pageClient.get(workspace.id, id), fetchAttachment: id => attachmentClient.download(workspace.id, id),
-        formatMarkdown: page => addMarkdownFrontMatter(markdownFromContent(page.content as DocumentContent),
-          page.content, page.title || '未命名页面', availableTags.filter(tag => page.tagIds?.includes(tag.id)).map(tag => tag.name)),
+        formatMarkdown: async page => addMarkdownFrontMatter(markdownFromContent(page.content as DocumentContent),
+          page.content, page.title || '未命名页面', availableTags.filter(tag => page.tagIds?.includes(tag.id)).map(tag => tag.name),
+          await headerProperties(page)),
       });
       if (liveScope.current !== workspaceScope) return;
       downloadBlob(current.title || '页面与子页面', blob, '.zip');
@@ -186,7 +216,7 @@ export function createPageTransfers({ session, workspace, workspaceScope, liveSc
     try {
       const tagIds = await resolveImportTags(workspace.id, session.csrfToken, pendingImport.parsed.tagNames);
       if (liveScope.current !== workspaceScope) return;
-      await createPage(null, pendingImport.title, pendingImport.parsed.content, undefined, tagIds);
+      await createPage(null, pendingImport.title, pendingImport.parsed.content, undefined, tagIds, true, pendingImport.parsed.pageProperties);
     } catch (error) { setNoteDialogError(message(error)); if (isAuthError(error)) setReauth(true); }
     finally { importResolvingRef.current = false; setImportResolving(false); }
   };

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { databaseQueryWindow, databaseRelationLimit, databaseSchemaProblem, defaultDatabaseSchema, isChangeRelationRequest, isCreateRelationRequest, isDatabaseAggregateRequest, isDatabaseBulkRequest, isDatabaseQueryRequest,
+import { databaseQueryWindow, databaseRelationLimit, databaseSchemaHistoryPage, databaseSchemaProblem, defaultDatabaseSchema,
+  isRestoreDatabaseSchemaRequest, planSchemaRestore, type RestoreDatabaseSchemaResponse, isChangeRelationRequest, isCreateRelationRequest, isDatabaseAggregateRequest, isDatabaseBulkRequest, isDatabaseQueryRequest,
   type ChangeRelationResponse, type CreateDatabaseRequest,
   type DatabaseBulkResponse, type DatabaseDocument, type DatabaseSchemaResponse, type DatabaseView, type PageSummary, type PropertyDefinition,
   type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
@@ -15,9 +16,11 @@ import { attendeeRowIds, sourceForDatabase, toSyncSource } from '../calendar/sou
 import { validatePageIcon } from '../pages/validate.js';
 import { applyBulk } from './bulk.js';
 import { markSchemaChanged } from './computed.js';
+import { activeDatabaseIds, checkComputedDependencies, listSchemaHistory, loadSchemaVersion, readSchemaVersion,
+  recordSchemaVersion } from './history.js';
 import { changeRelation, createRelation, mirrorRelationDeletion, relationsUnchanged } from './relations.js';
 import { readDatabaseRows, runDatabaseAggregate, runDatabaseQuery } from './query.js';
-import { databaseRow, loadDatabaseSchema, rowTagIdsColumn, searchProjection, type RowRecord } from './schema.js';
+import { databaseRow, loadDatabaseSchema, rowTagIdsColumn, searchProjection, type DatabaseSchemaRow, type RowRecord } from './schema.js';
 import { DatabaseWorker, selectRowsForIndex, writeRowSearchText } from './worker.js';
 
 interface WorkspaceParams { workspaceId: string }
@@ -69,7 +72,7 @@ async function readDatabase(db: Pick<Pool, 'query'>, workspaceId: string, actorI
     SELECT p.id, p.workspace_id, p.parent_id, p.title, p.icon, p.cover, p.revision::text AS revision, p.created_at, p.updated_at,
       d.properties_json, d.views_json, d.revision::text AS schema_revision
     FROM pages p
-    JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
+    JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
     JOIN databases d ON d.workspace_id = p.workspace_id AND d.page_id = p.id
     WHERE p.workspace_id = $1 AND p.id = $3 AND p.deleted_at IS NULL AND p.kind = 'database'
   `, [workspaceId, actorId, pageId]);
@@ -110,6 +113,59 @@ async function reindexRows(client: PoolClient, workspaceId: string, pageId: stri
   return true;
 }
 
+interface SchemaWrite {
+  properties: PropertyDefinition[];
+  views: DatabaseView[];
+  operation: 'update' | 'restore';
+  restoredFrom?: string;
+}
+
+/**
+ * Writes fields and views of a locked database whose revision the caller checked, and records the version.
+ * Returns the saved schema and whether the background worker has work.
+ */
+async function writeSchema(client: PoolClient, workspaceId: string, actorId: string, pageId: string, current: DatabaseSchemaRow,
+  write: SchemaWrite): Promise<{ response: DatabaseSchemaResponse; backgroundWork: boolean }> {
+  // Properties are only soft-deleted, and the title property keeps its identity.
+  const next = new Map(write.properties.map(property => [property.id, property]));
+  // Fields a calendar source writes keep their type and stay, so the next sync still has a place to write.
+  const managed = await managedPropertyIds(client, workspaceId, pageId);
+  for (const property of current.properties_json) {
+    const replacement = next.get(property.id);
+    if (!replacement || (property.type === 'title') !== (replacement.type === 'title')) {
+      throw new PageError(422, 'DATABASE_SCHEMA_INVALID');
+    }
+    if (managed.has(property.id) && (replacement.type !== property.type || (replacement.deletedAt && !property.deletedAt))) {
+      throw new PageError(422, 'DATABASE_SCHEMA_INVALID', undefined, 'property-synced');
+    }
+  }
+  if (!relationsUnchanged(current.properties_json, write.properties)) throw new PageError(422, 'DATABASE_SCHEMA_INVALID');
+  await checkComputedDependencies(client, workspaceId, pageId, current.properties_json, write.properties);
+  const properties = await mirrorRelationDeletion(client, workspaceId, actorId, current.properties_json, write.properties);
+  const updated = await client.query<{ revision: string }>(`UPDATE databases SET properties_json = $3::jsonb,
+    views_json = $4::jsonb, revision = revision + 1, updated_at = now()
+    WHERE workspace_id = $1 AND page_id = $2 RETURNING revision::text AS revision`,
+  [workspaceId, pageId, JSON.stringify(properties), JSON.stringify(write.views)]);
+  await recordSchemaVersion(client, workspaceId, pageId, actorId, write.operation, write.restoredFrom ?? null);
+  let backgroundWork = false;
+  if (searchProjection(current.properties_json) !== searchProjection(properties)
+    && await reindexRows(client, workspaceId, pageId, properties)) backgroundWork = true;
+  if (JSON.stringify(current.properties_json) !== JSON.stringify(properties)) {
+    await markSchemaChanged(client, workspaceId, pageId, properties);
+    backgroundWork = true;
+  }
+  return { response: { pageId, properties, views: write.views, schemaRevision: updated.rows[0]!.revision }, backgroundWork };
+}
+
+/** The database for a schema write, locked, at the revision the reader expects. */
+async function lockedSchema(client: PoolClient, workspaceId: string, pageId: string, expectedRevision: string): Promise<DatabaseSchemaRow> {
+  const active = await client.query(`SELECT 1 FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL AND kind = 'database'`,
+    [workspaceId, pageId]);
+  const current = active.rows[0] ? await loadDatabaseSchema(client, workspaceId, pageId, true) : null;
+  if (!current) throw new PageError(404, 'NOT_FOUND');
+  if (current.revision !== expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', current.revision);
+  return current;
+}
 /** `credentialKeyId` is the id of the CalDAV credential key this server holds, for `calendarSync.caldav.credentialsOk`. */
 export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: PgPageRepository,
   auth: AuthRepository, publicOrigin: string, credentialKeyId: string | null = null): void {
@@ -144,7 +200,7 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
       const body = request.body;
       if (!isCreateRelationRequest(body)) requestError();
       const result = await pages.mutate<DatabaseSchemaResponse>(workspaceId, actorId, body.clientMutationId, 'database-relation-create', pageId, body,
-        async client => ({ statusCode: 200, body: await createRelation(client, workspaceId, pageId, body) }), response => response.pageId);
+        async client => ({ statusCode: 200, body: await createRelation(client, workspaceId, actorId, pageId, body) }), response => response.pageId);
       return reply.code(result.statusCode).send(result.body);
     } catch (error) { return sendError(request, reply, error, secure); }
   });
@@ -241,6 +297,7 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
             (workspace_id, page_id, properties_json, views_json) VALUES ($1, $2, $3::jsonb, $4::jsonb)
             RETURNING revision::text AS revision`,
           [workspaceId, created.body.id, JSON.stringify(schema.properties), JSON.stringify(schema.views)]);
+          await recordSchemaVersion(client, workspaceId, created.body.id, actorId, 'create');
           const { content: _content, properties: _properties, ...page } = created.body;
           void _content; void _properties;
           return { statusCode: 201, body: { page, properties: schema.properties, views: schema.views,
@@ -261,38 +318,82 @@ export function registerDatabaseRoutes(app: FastifyInstance, pool: Pool, pages: 
       let backgroundWork = false;
       const result = await pages.mutate<DatabaseSchemaResponse>(workspaceId, actorId, body.clientMutationId,
         'database-update', pageId, body, async client => {
-          const active = await client.query('SELECT 1 FROM pages WHERE workspace_id = $1 AND id = $2 AND deleted_at IS NULL',
-            [workspaceId, pageId]);
-          const current = active.rows[0] ? await loadDatabaseSchema(client, workspaceId, pageId, true) : null;
-          if (!current) throw new PageError(404, 'NOT_FOUND');
-          if (current.revision !== body.expectedRevision) throw new PageError(409, 'REVISION_CONFLICT', current.revision);
-          // Properties are only soft-deleted, and the title property keeps its identity.
-          const next = new Map(body.properties.map(property => [property.id, property]));
-          // Fields a calendar source writes keep their type and stay, so the next sync still has a place to write.
-          const managed = await managedPropertyIds(client, workspaceId, pageId);
-          for (const property of current.properties_json) {
-            const replacement = next.get(property.id);
-            if (!replacement || (property.type === 'title') !== (replacement.type === 'title')) {
-              throw new PageError(422, 'DATABASE_SCHEMA_INVALID');
-            }
-            if (managed.has(property.id) && (replacement.type !== property.type || (replacement.deletedAt && !property.deletedAt))) {
-              throw new PageError(422, 'DATABASE_SCHEMA_INVALID', undefined, 'property-synced');
-            }
-          }
-          if (!relationsUnchanged(current.properties_json, body.properties)) throw new PageError(422, 'DATABASE_SCHEMA_INVALID');
-          const properties = await mirrorRelationDeletion(client, workspaceId, current.properties_json, body.properties);
-          const updated = await client.query<{ revision: string }>(`UPDATE databases SET properties_json = $3::jsonb,
-            views_json = $4::jsonb, revision = revision + 1, updated_at = now()
-            WHERE workspace_id = $1 AND page_id = $2 RETURNING revision::text AS revision`,
-          [workspaceId, pageId, JSON.stringify(properties), JSON.stringify(body.views)]);
-          if (searchProjection(current.properties_json) !== searchProjection(properties)
-            && await reindexRows(client, workspaceId, pageId, properties)) backgroundWork = true;
-          if (JSON.stringify(current.properties_json) !== JSON.stringify(properties)) {
-            await markSchemaChanged(client, workspaceId, pageId, properties);
-            backgroundWork = true;
-          }
-          return { statusCode: 200, body: { pageId, properties, views: body.views,
-            schemaRevision: updated.rows[0]!.revision } };
+          const current = await lockedSchema(client, workspaceId, pageId, body.expectedRevision);
+          const saved = await writeSchema(client, workspaceId, actorId, pageId, current,
+            { properties: body.properties, views: body.views, operation: 'update' });
+          backgroundWork = saved.backgroundWork;
+          return { statusCode: 200, body: saved.response };
+        }, response => response.pageId);
+      if (backgroundWork) worker.nudge();
+      return reply.code(result.statusCode).send(result.body);
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.get<{ Params: DatabaseParams; Querystring: { before?: string; limit?: string } }>(`${base}/:pageId/schema-history`, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId, pageId } = request.params;
+      await authorize(request, workspaceId, false);
+      if (!isUuid(pageId)) throw new PageError(404, 'NOT_FOUND');
+      const { before, limit } = request.query;
+      if (before !== undefined && !isRevision(before)) requestError();
+      const count = limit === undefined ? databaseSchemaHistoryPage : Number(limit);
+      if (!Number.isInteger(count) || count < 1 || count > databaseSchemaHistoryPage) requestError();
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+        const history = await listSchemaHistory(client, workspaceId, pageId.toLowerCase(), before ?? null, count);
+        await client.query('COMMIT');
+        if (!history) throw new PageError(404, 'NOT_FOUND');
+        return reply.send(history);
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => undefined);
+        throw error;
+      } finally { client.release(); }
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.get<{ Params: DatabaseParams & { revision: string } }>(`${base}/:pageId/schema-history/:revision`, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId, pageId, revision } = request.params;
+      await authorize(request, workspaceId, false);
+      if (!isUuid(pageId) || !isRevision(revision)) throw new PageError(404, 'NOT_FOUND');
+      const version = await readSchemaVersion(pool, workspaceId, pageId.toLowerCase(), revision);
+      if (!version) throw new PageError(404, 'NOT_FOUND');
+      return reply.send(version);
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.post<{ Params: DatabaseParams & { revision: string } }>(`${base}/:pageId/schema-history/:revision/restore`, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const { workspaceId, revision } = request.params;
+      const actorId = await authorize(request, workspaceId, true);
+      if (!isUuid(request.params.pageId) || !isRevision(revision)) throw new PageError(404, 'NOT_FOUND');
+      const pageId = request.params.pageId.toLowerCase();
+      const body = request.body;
+      if (!isRestoreDatabaseSchemaRequest(body)) requestError();
+      let backgroundWork = false;
+      const result = await pages.mutate<RestoreDatabaseSchemaResponse>(workspaceId, actorId, body.clientMutationId,
+        'database-schema-restore', pageId, { revision, ...body }, async client => {
+          const current = await lockedSchema(client, workspaceId, pageId, body.expectedRevision);
+          const version = await loadSchemaVersion(client, workspaceId, pageId, revision);
+          if (!version) throw new PageError(404, 'NOT_FOUND');
+          const relationTargets = [...current.properties_json, ...version.properties_json]
+            .flatMap(def => def.type === 'relation' && def.relation ? [def.relation.databaseId] : []);
+          const plan = planSchemaRestore({ properties: current.properties_json, views: current.views_json as DatabaseView[] },
+            { properties: version.properties_json, views: version.views_json }, {
+              activeDatabaseIds: await activeDatabaseIds(client, workspaceId, [...new Set(relationTargets)]),
+              managedPropertyIds: await managedPropertyIds(client, workspaceId, pageId),
+              now: new Date().toISOString(),
+            });
+          const problem = databaseSchemaProblem(plan.properties, plan.views);
+          if (problem) throw new PageError(422, 'DATABASE_SCHEMA_INVALID', undefined, problem);
+          const saved = await writeSchema(client, workspaceId, actorId, pageId, current,
+            { properties: plan.properties, views: plan.views, operation: 'restore', restoredFrom: revision });
+          backgroundWork = saved.backgroundWork;
+          return { statusCode: 200, body: { ...saved.response, restoredFrom: revision, notes: plan.notes } };
         }, response => response.pageId);
       if (backgroundWork) worker.nudge();
       return reply.code(result.statusCode).send(result.body);

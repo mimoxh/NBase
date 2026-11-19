@@ -27,7 +27,9 @@ CMD ["node", "apps/server/dist/index.js"]
 
 FROM runtime AS maintenance
 USER root
-RUN apk add --no-cache postgresql18-client=18.6-r0
+# Alpine drops superseded package revisions, so an exact pin stops building. Only the major must match the server;
+# the backup manifest records the pg_dump version that was actually used.
+RUN apk add --no-cache "postgresql18-client~18"
 COPY --chown=node:node scripts/backup-engine.mjs ./scripts/backup-engine.mjs
 USER node
 HEALTHCHECK NONE

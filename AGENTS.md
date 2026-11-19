@@ -30,11 +30,14 @@ npm run build
 
 npm run dev 启动前后端；npm start 提供构建后的页面与 API。当前无 Rust/Tauri 后端，不再执行 cargo 命令。
 
+安卓外壳在 `android/` 单独构建，不在 `npm run check` 内；工具链位置、命令和本机 TLS 绕过见 docs/architecture/android.md。改动外壳或它依赖的网页结构（对话框、菜单、`.nb-scrim`、`a[download]`）后，运行其中的 Gradle 检查并在模拟器实测。
+
 ## 目录
 
 - apps/web：React 界面。
 - apps/server：Fastify 服务端。
 - packages/contracts：共享 API 契约。
+- android：安卓 WebView 外壳（Gradle / Kotlin）。
 - docs：需求、技术决定、设计原则、计划和验证。
 
 ## 约束

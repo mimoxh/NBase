@@ -10,9 +10,12 @@
 | [product/editing-gaps-roadmap.md](product/editing-gaps-roadmap.md) | 编辑体验补齐计划 N16～N27（待确认提案） |
 | [architecture/decisions.md](architecture/decisions.md) | 技术选型、Web-first、数据与扩展边界、官方资料 |
 | [architecture/p2-api.md](architecture/p2-api.md) | P2 最小账号与后续文档 API 契约 |
+| [architecture/members.md](architecture/members.md) | 成员与角色：邀请链接、所有者/编辑者/只读成员、移除与恢复、写接口审计 |
+| [architecture/collaboration.md](architecture/collaboration.md) | 成员活动提示、最后修改人、块评论、页面只读分享链接 |
 | [architecture/local-postgres.md](architecture/local-postgres.md) | 本机隔离 PostgreSQL 测试库的启动、凭据位置与边界 |
 | [architecture/attachments.md](architecture/attachments.md) | 附件授权、存储、导出与清理边界 |
 | [architecture/databases.md](architecture/databases.md) | 多维表格首版：页面类型、字段与视图契约、接口、文档内嵌和分页边界 |
+| [architecture/page-properties.md](architecture/page-properties.md) | 普通页面自定义属性：类型与限制、接口、搜索、front matter 导出与导入 |
 | [architecture/search.md](architecture/search.md) | 当前页面搜索索引、授权、查询与定位契约 |
 | [architecture/graph.md](architecture/graph.md) | 双链关系图接口、边界与布局 |
 | [architecture/whiteboards.md](architecture/whiteboards.md) | 白板数据契约、存储、渲染与已知缺口 |
@@ -20,6 +23,7 @@
 | [architecture/export.md](architecture/export.md) | HTML 与 Word 导出的节点映射、限制与损失 |
 | [architecture/history-trash.md](architecture/history-trash.md) | 历史快照、回收站子树、修订恢复与本机重试记录 |
 | [architecture/deployment.md](architecture/deployment.md) | Docker 持久卷、秘密文件、启动/就绪检查、账号恢复与会话撤销 |
+| [architecture/android.md](architecture/android.md) | 安卓 WebView 外壳：服务器地址、HTTPS 规则、下载/打印/返回键等网页能力的处理、构建与已知限制 |
 | [architecture/backup-recovery.md](architecture/backup-recovery.md) | 停写备份、完整性清单、空目标恢复、镜像保管与失败升级回退 |
 | [design/principles.md](design/principles.md) | 好看、好用的具体标准；视觉方向仍可调整 |
 | [plan.md](plan.md) | 里程碑、任务依赖、交付物、验收、分工、风险和待决事项 |

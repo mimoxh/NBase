@@ -1,4 +1,4 @@
-import { aggregateRows, computeRow, isComputedProperty, type RollupSource, databaseQueryWindow, databaseSchemaProblem, evaluateView, groupRows, isGroupableProperty, rowValueProblem, type DatabaseDocument, type DatabaseRow,
+import { aggregateRows, computeRow, computedDependencyProblem, formulaDepthLimit, isComputedProperty, type RollupSource, databaseQueryWindow, databaseSchemaProblem, evaluateView, groupRows, isGroupableProperty, rowValueProblem, type DatabaseDocument, type DatabaseRow,
   type DatabaseView, type PropertyDefinition, type PropertyValue, type RelationCell } from '@nbase/contracts';
 import { workspaceReducer, type Action, type Page, type Workspace } from '../workspace/model';
 import { DatabaseSourceError, type DatabaseDataSource } from './source';
@@ -68,7 +68,8 @@ export function createDemoSource(options: {
       const others = owner ? (Array.isArray(value) ? value : []).flatMap(id => activeRow(id) ?? [])
         : options.state.current.pages.filter(p => p.parentId === databaseId && p.kind === 'row' && !p.deleted
           && (p.properties?.[pairedPropertyId] as string[] | undefined)?.includes(page.id));
-      sources.set(def.id, { rows: others.map(rowOf), schema: linkedSchema, target });
+      // Saves refuse cycles, so following a computed target into the linked rows always ends.
+      sources.set(def.id, { rows: others.map(isComputedProperty(target) ? withRelations : rowOf), schema: linkedSchema, target });
     }
     return sources;
   };
@@ -181,6 +182,14 @@ export function createDemoSource(options: {
       const { schema } = database(id);
       if (String(schema.revision) !== expectedRevision) throw new DatabaseSourceError('REVISION_CONFLICT', '数据库结构已改变。');
       if (databaseSchemaProblem(next.properties, next.views)) throw new DatabaseSourceError('DATABASE_SCHEMA_INVALID', '设置无效。');
+      const schemas = new Map(options.state.current.pages.filter(p => p.kind === 'database' && !p.deleted && p.database)
+        .map(p => [p.id, p.database!.properties]));
+      schemas.set(id, next.properties);
+      const problem = computedDependencyProblem(id, schemas);
+      if (problem) {
+        const code = problem.kind === 'cycle' ? 'DATABASE_FORMULA_CYCLE' : 'DATABASE_FORMULA_DEPTH';
+        throw new DatabaseSourceError(code, code, { error: code, path: problem.path, depthLimit: formulaDepthLimit });
+      }
       apply({ type: 'db-schema', id, properties: next.properties, views: next.views });
       return { pageId: id, properties: next.properties, views: next.views, schemaRevision: String(schema.revision + 1) };
     },

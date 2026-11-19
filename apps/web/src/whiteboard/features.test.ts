@@ -222,12 +222,14 @@ describe('elbow connectors', () => {
     }
   });
 
-  it('keeps the shift only where it means something', () => {
+  it('keeps the shift of boards from before bend points only where it means something', () => {
     const a = rect(0, 0, 100, 100), b = rect(400, 200, 100, 100);
     const end = (id: string) => ({ x: 0, y: 0, bind: { elementId: id, ax: 0.5, ay: 0.5 } });
     const connector: Connector = { ...createConnector(uid(), end(a.id), end(b.id)), bend: 40 };
     const index = indexElements([a, b, connector]);
-    expect(connectorPath(connector, index).bend).toMatchObject({ axis: 'x', shift: 40, point: { x: 290, y: 150 } });
+    const path = connectorPath(connector, index);
+    expect(path.manual).toBe(true);
+    expect(path.points.filter(p => p.x === 290)).toHaveLength(2);
     const saved = normalizeForSave([a, b, connector]);
     expect((saved[2] as Connector).bend).toBe(40);
     valid(saved);
@@ -485,35 +487,69 @@ describe('controller', () => {
     valid(store.elements);
   });
 
-  it('drags the bend handle of an elbow connector and puts it back', () => {
+  it('slides a segment of an elbow connector, keeps it when an end moves, and puts it back', () => {
     const a = rect(0, 0, 100, 100), b = rect(400, 200, 100, 100);
     const { store, controller, saves, drag } = setup([a, b]);
     store.setTool('connector');
     drag([50, 50], [450, 250]);
     const connector = () => store.elements.find(el => el.type === 'connector') as Connector;
-    const handle = connectorPath(connector(), store.index).bend!;
-    expect(handle.axis).toBe('x');
-    expect(store.overlay.bend).toEqual(handle.point);
-    drag([handle.point.x, handle.point.y], [handle.point.x + 50, handle.point.y + 30]);
-    expect(connector().bend).toBe(50);
+    const middle = store.overlay.segments.find(segment => segment.axis === 'x')!;
+    expect(middle.point.x).toBe(250);
+    drag([middle.point.x, middle.point.y], [middle.point.x + 50, middle.point.y + 30]);
     expect(saves).toHaveLength(2);
-    expect(connectorPath(connector(), store.index).points.some(p => p.x === handle.point.x + 50)).toBe(true);
+    expect(connector().waypoints?.length).toBeGreaterThan(0);
+    expect(connectorPath(connector(), store.index).points.filter(p => p.x === 300)).toHaveLength(2);
     valid(store.elements);
-    // The segment stops where the route would fold back on itself.
-    const moved = connectorPath(connector(), store.index).bend!.point;
-    drag([moved.x, moved.y], [moved.x + 900, moved.y]);
-    expect(connector().bend).toBe(130);
-    controller.resetBend();
-    expect(connector().bend).toBeUndefined();
-    // A tiny nudge snaps back to the default route and saves nothing.
+    // Moving a bound element re-plans only the stretch next to it; the slid segment stays.
+    store.select([b.id]);
+    drag([450, 250], [450, 330]);
+    expect(byId(store.elements, b.id).y).toBe(280);
+    const after = connectorPath(connector(), store.index).points;
+    expect(after.filter(p => p.x === 300)).toHaveLength(2);
+    for (let i = 1; i < after.length; i += 1) expect(after[i]!.x === after[i - 1]!.x || after[i]!.y === after[i - 1]!.y).toBe(true);
+    // Back to automatic.
+    store.select([connector().id]);
+    controller.resetRoute();
+    expect(connector().waypoints).toBeUndefined();
+    // A tiny nudge does nothing and saves nothing.
+    controller.refreshOverlay();
+    const handle = store.overlay.segments[0]!;
     const before = saves.length;
     drag([handle.point.x, handle.point.y], [handle.point.x + 2, handle.point.y]);
-    expect(connector().bend).toBeUndefined();
+    expect(connector().waypoints).toBeUndefined();
     expect(saves).toHaveLength(before);
   });
 
-  it('rubs out part of a stroke without touching shapes, or whole elements in the other mode', () => {
-    const shape = rect(150, 300, 100, 60);
+  it('adds and removes bend points from the context actions', () => {
+    const a = rect(0, 0, 100, 100), b = rect(400, 0, 100, 100);
+    const { store, controller, saves, drag } = setup([a, b]);
+    store.setTool('connector');
+    drag([50, 50], [450, 50]);
+    const connector = () => store.elements.find(el => el.type === 'connector') as Connector;
+    expect(connectorPath(connector(), store.index).points).toHaveLength(2);
+    const add = controller.bendActionAt({ x: 250, y: 50 })!;
+    expect(add.kind).toBe('add');
+    add.run();
+    expect(connector().waypoints).toHaveLength(2);
+    expect(saves).toHaveLength(2);
+    // The new pair can be pulled apart into a step.
+    controller.refreshOverlay();
+    const half = store.overlay.segments.find(segment => segment.point.x > 250)!;
+    drag([half.point.x, half.point.y], [half.point.x, half.point.y + 40]);
+    const stepped = connectorPath(connector(), store.index);
+    expect(stepped.points.some(p => p.y === 90)).toBe(true);
+    controller.refreshOverlay();
+    expect(store.overlay.corners.length).toBeGreaterThanOrEqual(2);
+    const corner = store.overlay.corners[0]!;
+    const remove = controller.bendActionAt(corner)!;
+    expect(remove.kind).toBe('remove');
+    remove.run();
+    for (const p of connectorPath(connector(), store.index).points) expect(Number.isFinite(p.x) && Number.isFinite(p.y)).toBe(true);
+    valid(store.elements);
+  });
+
+  it('rubs out part of a stroke, or whole elements in the other mode', () => {
+    const shape = rect(400, 300, 100, 60);
     const { store, saves, drag } = setup([shape]);
     store.setTool('pen');
     drag([100, 100], [300, 100]);
@@ -532,7 +568,7 @@ describe('controller', () => {
     store.setStyle({ eraserMode: 'element' });
     drag([120, 80], [120, 120]);
     expect(store.elements.filter(el => el.type === 'pen')).toHaveLength(1);
-    drag([200, 280], [200, 380]);
+    drag([450, 280], [450, 380]);
     expect(store.elements.some(el => el.id === shape.id)).toBe(false);
   });
 

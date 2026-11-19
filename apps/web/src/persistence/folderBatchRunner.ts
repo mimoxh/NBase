@@ -99,7 +99,7 @@ export async function processFolderBatch(batch: FolderImportBatch, io: FolderRun
       if (await failure(item, error)) return;
       continue;
     }
-    item.skeleton = { id: created.id, revision: created.revision };
+    item.skeleton = { id: created.id, revision: created.revision, ...(created.kind ? { kind: created.kind } : {}) };
     delete item.createStarted;
     item.status = item.cancelAfterCreate ? 'cancelled' : page.sourcePath ? 'pending' : 'success';
     delete item.cancelAfterCreate;
@@ -152,8 +152,12 @@ export async function processFolderBatch(batch: FolderImportBatch, io: FolderRun
         const parsed = options.parseMarkdown(await readFolderMarkdown(await io.source(page.sourcePath)));
         if (page.tagNames.length && !options.resolveTagIds) throw new Error('需要先连接工作区标签服务。');
         const tagIds = page.tagNames.length ? await options.resolveTagIds!(page.tagNames) : undefined;
+        // A page placed in a database became a row, which takes the database's fields instead of its own.
+        const pageProperties = (item.skeleton.kind ?? 'document') === 'document' && parsed.pageProperties?.length
+          ? [...parsed.pageProperties] : undefined;
         item.pendingUpdate = { clientMutationId: page.updateId, expectedRevision: item.skeleton.revision,
-          content: rebuildFolderContent(plan, page, parsed.content, pageIds, uploaded), ...(tagIds ? { tagIds } : {}) };
+          content: rebuildFolderContent(plan, page, parsed.content, pageIds, uploaded), ...(tagIds ? { tagIds } : {}),
+          ...(pageProperties ? { pageProperties } : {}) };
       }
       await io.checkpoint(batch);
       await io.update(item.skeleton.id, item.pendingUpdate);

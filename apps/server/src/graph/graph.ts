@@ -31,7 +31,7 @@ const nodeQuery = `
     CASE WHEN parent.kind = 'row' THEN parent.parent_id ELSE p.parent_id END AS parent_id,
     ARRAY(SELECT pt.tag_id FROM page_tags pt WHERE pt.workspace_id = p.workspace_id AND pt.page_id = p.id ORDER BY pt.tag_id) AS tag_ids
   FROM pages p
-  JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
+  JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
   LEFT JOIN pages parent ON parent.workspace_id = p.workspace_id AND parent.id = p.parent_id
   WHERE p.workspace_id = $1 AND p.deleted_at IS NULL AND p.kind <> 'row'
     AND NOT EXISTS (SELECT 1 FROM databases cd WHERE cd.workspace_id = p.workspace_id AND cd.page_id = p.id AND cd.calendar_hidden)
@@ -43,7 +43,7 @@ const edgeQuery = `
     SELECT CASE WHEN s.kind = 'row' THEN s.parent_id ELSE s.id END AS source,
       CASE WHEN t.kind = 'row' THEN t.parent_id ELSE t.id END AS target, l.kind
     FROM (${linkSources}) l
-    JOIN workspace_memberships m ON m.workspace_id = l.workspace_id AND m.user_id = $2
+    JOIN workspace_memberships m ON m.workspace_id = l.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
     JOIN pages s ON s.workspace_id = l.workspace_id AND s.id = l.source_page_id AND s.deleted_at IS NULL
     JOIN pages t ON t.workspace_id = l.workspace_id AND t.id = l.target_page_id AND t.deleted_at IS NULL
     WHERE l.workspace_id = $1

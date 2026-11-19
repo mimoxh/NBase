@@ -1,5 +1,5 @@
 import { attachmentLimitFor } from '@nbase/contracts';
-import type { AttachmentMetadata, AttachmentPresentation, PageSummary, StoredDocumentContent } from '@nbase/contracts';
+import type { AttachmentMetadata, AttachmentPresentation, PageProperty, PageSummary, StoredDocumentContent } from '@nbase/contracts';
 import { readAttachmentPresentations, restoreAttachmentPresentations } from './attachmentPresentation';
 import {
   folderAttachment, folderBaseName, folderDestination, folderNodeLink, folderPageReference, folderParentPath,
@@ -26,6 +26,8 @@ export interface FolderParsedMarkdown {
   content: StoredDocumentContent;
   title?: string | undefined;
   tagNames: readonly string[];
+  /** Unknown header keys turned into the page's own properties. */
+  pageProperties?: readonly PageProperty[] | undefined;
   warnings: readonly string[];
 }
 

@@ -12,7 +12,7 @@ export const dailyClient = {
     request<DailyNoteSettings>(workspacePath(workspaceId) + '/daily-note/settings', 'PUT', body, csrfToken),
 };
 
-type DailyMode = 'today' | 'quick-capture' | 'settings';
+type DailyMode = 'today' | 'quick-capture';
 
 interface Props {
   workspaceId: string;
@@ -20,19 +20,17 @@ interface Props {
   /** Preselected day for the 'today' mode, e.g. a day clicked on the calendar. */
   initialDate?: string | undefined;
   templates: readonly Pick<NoteTemplate, 'id' | 'name'>[];
-  parents: readonly Pick<PageSummary, 'id' | 'title'>[];
   readOnly?: boolean;
   onClose: () => void;
   onOpenPage: (id: string) => void | Promise<void>;
   onRestorePage: (id: string) => void;
   onCreate: (input: Omit<OpenDailyNoteRequest, 'clientMutationId'>) => Promise<void>;
   onCapture: (input: Omit<QuickCaptureRequest, 'clientMutationId'>, page: DailyNoteStatus['page']) => Promise<void>;
-  onSaveSettings: (input: DailyNoteSettings) => Promise<void>;
 }
 
 const descriptions: Record<string, string> = {
   DAILY_NOTE_TRASHED: '该日期的笔记在回收站，请先恢复。',
-  DAILY_PARENT_UNAVAILABLE: '默认父页不可用，请恢复父页或在每日笔记设置中重新选择。',
+  DAILY_PARENT_UNAVAILABLE: '默认父页不可用，请恢复父页或在“设置 › 每日笔记”中重新选择。',
   DAILY_TEMPLATE_ATTACHMENTS_MISSING: '所选模板包含缺失的附件，请检查模板或选择空白笔记。',
   REVISION_CONFLICT: '每日笔记已有新修订。记录文字已保留，请重试。',
   INVALID_REQUEST: '日期、时区或记录内容无效，请检查输入。',
@@ -56,12 +54,11 @@ function dateInZone(timeZone: string): string {
 }
 
 export function DailyNoteDialog({
-  workspaceId, mode, initialDate, templates, parents, readOnly, onClose, onOpenPage, onRestorePage, onCreate, onCapture, onSaveSettings,
+  workspaceId, mode, initialDate, templates, readOnly, onClose, onOpenPage, onRestorePage, onCreate, onCapture,
 }: Props) {
   const [date, setDate] = useState(initialDate ?? '');
   const [template, setTemplate] = useState('');
   const [status, setStatus] = useState<DailyNoteStatus | null>(null);
-  const [settings, setSettings] = useState<DailyNoteSettings | null>(null);
   const [text, setText] = useState('');
   const [pinnedDate, setPinnedDate] = useState<string>();
   const [success, setSuccess] = useState('');
@@ -81,7 +78,6 @@ export function DailyNoteDialog({
       .then(result => {
         if (controller.signal.aborted) return;
         setStatus(result);
-        setSettings(result.settings);
       }).catch(reason => {
         if (!controller.signal.aborted) {
           setLoadFailed(true);
@@ -94,14 +90,13 @@ export function DailyNoteDialog({
   }, [workspaceId, mode, date, reload]);
 
   const length = [...text].length;
-  const selectedPage = mode !== 'settings' && !loading && !loadFailed && status
+  const selectedPage = !loading && !loadFailed && status
     && (mode !== 'today' || !date || status.date === date) ? status.page : null;
   const targetDate = pinnedDate ?? status?.date;
   const close = () => { if (!busyRef.current) onClose(); };
   const disabled = busy || loading || loadFailed || !status
     || (mode === 'today' && (Boolean(date && status.date !== date) || Boolean(readOnly && !selectedPage) || Boolean(selectedPage?.deleted)))
-    || (mode === 'quick-capture' && (readOnly || !text.trim() || length > quickCaptureLimit || Boolean(selectedPage?.deleted)))
-    || (mode === 'settings' && (readOnly || !settings?.timeZone.trim()));
+    || (mode === 'quick-capture' && (readOnly || !text.trim() || length > quickCaptureLimit || Boolean(selectedPage?.deleted)));
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -111,10 +106,7 @@ export function DailyNoteDialog({
     setError('');
     setSuccess('');
     try {
-      if (mode === 'settings' && settings) {
-        await onSaveSettings({ ...settings, timeZone: settings.timeZone.trim() });
-        onClose();
-      } else if (mode === 'today') {
+      if (mode === 'today') {
         if (selectedPage) await onOpenPage(selectedPage.id);
         else await onCreate({ date: status.date, ...(template ? { templateId: template === 'blank' ? null : template } : {}) });
         onClose();
@@ -146,8 +138,8 @@ export function DailyNoteDialog({
     }
   };
 
-  const heading = mode === 'today' ? '每日笔记' : mode === 'quick-capture' ? '快速记录' : '每日笔记设置';
-  const action = mode === 'today' ? (selectedPage ? '打开笔记' : '创建笔记') : mode === 'settings' ? '保存设置' : '记录';
+  const heading = mode === 'today' ? '每日笔记' : '快速记录';
+  const action = mode === 'today' ? (selectedPage ? '打开笔记' : '创建笔记') : '记录';
   return <Modal title={heading} onClose={close}>
     <form onSubmit={event => void submit(event)}>
       {mode === 'today' && <>
@@ -171,27 +163,6 @@ export function DailyNoteDialog({
         <textarea id="daily-quick-text" rows={5} value={text} disabled={busy || readOnly} onChange={event => setText(event.target.value)} />
         <p className="dialog-description">{length} / {quickCaptureLimit} 字</p>
       </>}
-      {mode === 'settings' && settings && <>
-        <label className="field-label" htmlFor="daily-note-zone">时区（IANA）</label>
-        <input id="daily-note-zone" type="text" value={settings.timeZone} placeholder="Asia/Shanghai" maxLength={100}
-          disabled={busy || readOnly} onChange={event => setSettings({ ...settings, timeZone: event.target.value })} />
-        <label className="field-label" htmlFor="daily-note-parent">默认父页</label>
-        <select className="select-field" id="daily-note-parent" value={settings.parentId ?? ''} disabled={busy || readOnly}
-          onChange={event => setSettings({ ...settings, parentId: event.target.value || null })}>
-          <option value="">工作区根目录</option>
-          {settings.parentId && !parents.some(page => page.id === settings.parentId) &&
-            <option value={settings.parentId}>当前父页不可用</option>}
-          {parents.map(page => <option key={page.id} value={page.id}>{page.title || '未命名页面'}</option>)}
-        </select>
-        <label className="field-label" htmlFor="daily-note-default-template">默认模板</label>
-        <select className="select-field" id="daily-note-default-template" value={settings.templateId ?? ''} disabled={busy || readOnly}
-          onChange={event => setSettings({ ...settings, templateId: event.target.value || null })}>
-          <option value="">空白页</option>
-          {settings.templateId && !templates.some(item => item.id === settings.templateId) &&
-            <option value={settings.templateId}>当前模板不可用</option>}
-          {templates.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
-        </select>
-      </>}
       {loading && <p role="status" className="dialog-description">正在查找每日笔记…</p>}
       {busy && <p role="status" className="dialog-description">正在处理…</p>}
       {success && <p role="status" className="dialog-description">{success}</p>}
@@ -206,4 +177,78 @@ export function DailyNoteDialog({
       </div>
     </form>
   </Modal>;
+}
+
+/** Workspace daily-note defaults (owner only), shown as a settings section. */
+export function DailyNoteSettingsPanel({ workspaceId, templates, parents, readOnly, onSave }: {
+  workspaceId: string;
+  templates: readonly Pick<NoteTemplate, 'id' | 'name'>[];
+  parents: readonly Pick<PageSummary, 'id' | 'title'>[];
+  readOnly?: boolean;
+  onSave: (input: DailyNoteSettings) => Promise<void>;
+}) {
+  const [settings, setSettings] = useState<DailyNoteSettings | null>(null);
+  const [saved, setSaved] = useState<DailyNoteSettings | null>(null);
+  const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [reload, setReload] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setError('');
+    void dailyClient.status(workspaceId, undefined, controller.signal).then(result => {
+      if (controller.signal.aborted) return;
+      setSettings(result.settings); setSaved(result.settings);
+    }).catch(reason => { if (!controller.signal.aborted) setError(describe(reason)); });
+    return () => controller.abort();
+  }, [workspaceId, reload]);
+
+  const edit = (patch: Partial<DailyNoteSettings>) => { if (settings) { setSettings({ ...settings, ...patch }); setSuccess(''); } };
+  const changed = Boolean(settings && saved && JSON.stringify(settings) !== JSON.stringify(saved));
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!settings || busy || readOnly || !settings.timeZone.trim()) return;
+    setBusy(true); setError(''); setSuccess('');
+    try {
+      const next = { ...settings, timeZone: settings.timeZone.trim() };
+      await onSave(next);
+      setSettings(next); setSaved(next); setSuccess('每日笔记设置已保存。');
+    } catch (reason) { setError(describe(reason)); }
+    finally { setBusy(false); }
+  };
+
+  if (!settings) return <div className="nb-settings-form">
+    {error ? <p role="alert" className="dialog-description">{error}
+      <button type="button" className="nb-btn nb-btn-quiet" onClick={() => setReload(value => value + 1)}>重试</button></p>
+      : <p role="status" className="dialog-description">正在读取每日笔记设置…</p>}
+  </div>;
+  return <form className="nb-settings-form" onSubmit={event => void submit(event)}>
+    <p className="nb-settings-hint">「今天」和「快速记录」按这里的时区确定日期，新建的每日笔记放在默认父页下。</p>
+    <label className="field-label" htmlFor="daily-note-zone">时区（IANA）</label>
+    <input className="select-field" id="daily-note-zone" type="text" value={settings.timeZone} placeholder="Asia/Shanghai" maxLength={100}
+      disabled={busy || readOnly} onChange={event => edit({ timeZone: event.target.value })} />
+    <label className="field-label" htmlFor="daily-note-parent">默认父页</label>
+    <select className="select-field" id="daily-note-parent" value={settings.parentId ?? ''} disabled={busy || readOnly}
+      onChange={event => edit({ parentId: event.target.value || null })}>
+      <option value="">工作区根目录</option>
+      {settings.parentId && !parents.some(page => page.id === settings.parentId) &&
+        <option value={settings.parentId}>当前父页不可用</option>}
+      {parents.map(page => <option key={page.id} value={page.id}>{page.title || '未命名页面'}</option>)}
+    </select>
+    <label className="field-label" htmlFor="daily-note-default-template">默认模板</label>
+    <select className="select-field" id="daily-note-default-template" value={settings.templateId ?? ''} disabled={busy || readOnly}
+      onChange={event => edit({ templateId: event.target.value || null })}>
+      <option value="">空白页</option>
+      {settings.templateId && !templates.some(item => item.id === settings.templateId) &&
+        <option value={settings.templateId}>当前模板不可用</option>}
+      {templates.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+    </select>
+    {busy && <p role="status" className="dialog-description">正在保存…</p>}
+    {success && <p role="status" className="dialog-description">{success}</p>}
+    {error && <p role="alert" className="dialog-description">{error}</p>}
+    <div className="dialog-actions">
+      <button type="submit" className="nb-btn nb-btn-primary" disabled={busy || readOnly || !changed || !settings.timeZone.trim()}>保存设置</button>
+    </div>
+  </form>;
 }

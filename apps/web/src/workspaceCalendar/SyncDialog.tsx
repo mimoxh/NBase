@@ -19,6 +19,8 @@ function sourceHost(url: string): string {
 }
 
 const scheduled = (item: CalendarSyncSource) => item.kind === 'ics-url' || item.kind === 'caldav';
+/** How long the list keeps polling after “立即同步” queued a source. */
+const runWaitMs = 30_000;
 
 function stopText(item: CalendarSyncSource): string {
   const kept = '停止后数据库会保留，仍不显示在页面树中，可在全局日历的“来源”里选择“显示到页面树”';
@@ -71,6 +73,7 @@ export function SyncDialog({ source, timeZone, onChanged, onClose }: {
   const [credentialsFor, setCredentialsFor] = useState<string | null>(null);
   const [conflictsFor, setConflictsFor] = useState<CalendarSyncSource | null>(null);
   const [reauthorized, setReauthorized] = useState<string | null>(null);
+  const [awaitingRunUntil, setAwaitingRunUntil] = useState(0);
   const busyRef = useRef(false);
   const reauth = useOAuthFlow(api);
   const reauthState = reauth.state;
@@ -83,10 +86,15 @@ export function SyncDialog({ source, timeZone, onChanged, onClose }: {
   }, [api]);
   useEffect(() => { void reload(); }, [reload]);
   useEffect(() => {
-    if (!list?.some(item => item.status === 'running')) return;
+    // A queued run is not 'running' until the scheduler claims it, and a quick run can start and finish between two
+    // reloads, so neither the status nor a changed row tells whether this run is done; keep polling for a while.
+    const running = list?.some(item => item.status === 'running') ?? false;
+    const waitLeft = awaitingRunUntil - Date.now();
+    if (!running && waitLeft <= 0) return;
     const timer = setInterval(() => void reload(), 3000);
-    return () => clearInterval(timer);
-  }, [list, reload]);
+    const stop = running ? undefined : setTimeout(() => clearInterval(timer), waitLeft);
+    return () => { clearInterval(timer); clearTimeout(stop); };
+  }, [list, reload, awaitingRunUntil]);
   useEffect(() => {
     if (reauthState.step !== 'ready' || !reauthState.sourceId) return;
     const updated = reauthState.result.source;
@@ -183,7 +191,11 @@ export function SyncDialog({ source, timeZone, onChanged, onClose }: {
 
   const runNow = async (item: CalendarSyncSource) => {
     setError('');
-    try { await api.run(item.id); void reload(); }
+    try {
+      await api.run(item.id);
+      setAwaitingRunUntil(Date.now() + runWaitMs);
+      void reload();
+    }
     catch (failure) { setError(describe(failure)); }
   };
 

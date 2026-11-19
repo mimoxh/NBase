@@ -57,8 +57,11 @@ test('computed results recover on upgrade and preserve edits made during a batch
     const read = () => runDatabaseQuery(pool, workspaceId, userId, databaseId, { filters: [], sorts: [] });
     const sum = () => runDatabaseAggregate(pool, workspaceId, userId, databaseId,
       { filters: [], items: [{ propertyId: formulaId, fn: 'sum' }] });
+    // Today's queries also check membership removal (v26); the v17 schema gets that column only for these two reads.
+    await pool.query('ALTER TABLE workspace_memberships ADD COLUMN removed_at timestamptz');
     assert.equal((await read())?.computedStale, undefined);
     assert.deepEqual(await sum(), { values: [20] });
+    await pool.query('ALTER TABLE workspace_memberships DROP COLUMN removed_at');
     await runMigrations(pool);
     assert.equal((await read())?.computedStale, true);
     assert.equal(await runComputedBatch(pool), true);

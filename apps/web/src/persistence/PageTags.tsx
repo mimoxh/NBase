@@ -1,5 +1,6 @@
-import { useRef, useState } from 'react';
+import { useState } from 'react';
 import { pageTagLimit, tagNameLimit, type PageSummary, type WorkspaceTag } from '@nbase/contracts';
+import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { ApiError, tagClient } from './client';
 import './pageTags.css';
@@ -30,7 +31,7 @@ function TagChoices({ tags, value, onChange, showCount, disabled }: TagSelection
   if (!tags.length) return <p className="nbase-tag-hint">此工作区还没有标签。</p>;
   return <div className="nbase-tag-choices">{tags.map(tag => {
     const selected = value.includes(tag.id);
-    return <label key={tag.id}>
+    return <label key={tag.id} className={selected ? 'selected' : undefined}>
       <input type="checkbox" checked={selected} disabled={disabled || (!selected && value.length >= pageTagLimit)}
         onChange={() => onChange(selected ? value.filter(id => id !== tag.id) : [...value, tag.id])} />
       <span>{tag.name}</span>{showCount && <small>{tag.pageCount}</small>}
@@ -40,44 +41,22 @@ function TagChoices({ tags, value, onChange, showCount, disabled }: TagSelection
 
 export function TagFilter(props: TagSelection) {
   if (!props.tags.length) return null;
-  return <details className="nbase-tag-filter">
-    <summary>标签筛选{props.value.length ? `（${props.value.length}）` : ''}</summary>
-    <p className="nbase-tag-hint">同时包含所选标签</p>
-    <TagChoices {...props} showCount />
-    {props.value.length > 0 && <button type="button" className="nb-btn nb-btn-quiet" onClick={() => props.onChange([])}>清除标签筛选</button>}
+  const count = props.value.length;
+  return <details className={`nbase-tag-filter${count ? ' active' : ''}`}>
+    <summary>
+      <Icon name="tag" size={14} /><span className="nbase-tag-filter-label">标签筛选</span>
+      {count > 0 && <span className="nbase-tag-filter-count" aria-label={`已选 ${count} 个标签`}>{count}</span>}
+      <span className="nbase-tag-filter-caret"><Icon name="chevron" size={12} /></span>
+    </summary>
+    <div className="nbase-tag-filter-body">
+      <div className="nbase-tag-filter-head">
+        <span>同时包含所选标签</span>
+        {count > 0 && <button type="button" aria-label="清除标签筛选" onClick={() => props.onChange([])}>清除</button>}
+      </div>
+      <TagChoices {...props} showCount />
+    </div>
   </details>;
 }
-
-export function PageTagControls({ tags, value, onApply, disabled = false }: {
-  tags: WorkspaceTag[];
-  value: string[];
-  onApply?: ((ids: string[]) => void | boolean | Promise<void | boolean>) | undefined;
-  disabled?: boolean | undefined;
-}) {
-  const [selection, setSelection] = useState(value);
-  const [busy, setBusy] = useState(false);
-  const details = useRef<HTMLDetailsElement>(null);
-  const applied = tags.filter(tag => value.includes(tag.id));
-  const apply = async () => {
-    if (!onApply || disabled || busy) return;
-    setBusy(true);
-    try {
-      if (await onApply(selection) !== false && details.current) details.current.open = false;
-    } finally { setBusy(false); }
-  };
-  if (!applied.length && !onApply) return null;
-  return <div className="nbase-page-tags" aria-label="页面标签">
-    {applied.map(tag => <span className="nbase-tag-chip" key={tag.id}>{tag.name}</span>)}
-    {onApply && <details ref={details} onToggle={event => { if (event.currentTarget.open) setSelection(applied.map(tag => tag.id)); }}>
-      <summary>编辑标签</summary>
-      <TagChoices tags={tags} value={selection} onChange={setSelection} disabled={disabled || busy} />
-      {tags.length > 0 && <button type="button" className="nb-btn" onClick={() => void apply()}
-        disabled={disabled || busy || (selection.length === applied.length && applied.every(tag => selection.includes(tag.id)))}>
-        {busy ? '正在保存…' : '保存页面标签'}</button>}
-    </details>}
-  </div>;
-}
-
 type Mutation = { clientMutationId: string } & (
   | { type: 'create'; name: string }
   | { type: 'rename'; id: string; name: string }

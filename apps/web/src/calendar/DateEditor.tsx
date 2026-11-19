@@ -21,6 +21,8 @@ export interface DateEditorProps {
   /** The fields did not form a valid value when the editor closed; nothing was saved. */
   onInvalid?: ((message: string) => void) | undefined;
   onClose: () => void;
+  /** Dates and times only, without the repetition and reminder fields. */
+  plain?: boolean | undefined;
 }
 
 const freqLabels: [CustomRepeat['freq'], string][] = [['DAILY', '天'], ['WEEKLY', '周'], ['MONTHLY', '个月'], ['YEARLY', '年']];
@@ -35,7 +37,8 @@ function addHour(time: string): { time: string; nextDay: boolean } {
  * Popover for a date value: start, optional end, time, repetition and reminders. Changes are saved when it
  * closes; times are shown and entered on the reader's clock and stored as UTC.
  */
-export function DateEditor({ value, label, timeZone = readerTimeZone(), className = 'nb-cal-pop', seed, onCommit, onInvalid, onClose }: DateEditorProps) {
+export function DateEditor({ value, label, timeZone = readerTimeZone(), className = 'nb-cal-pop', seed, onCommit, onInvalid, onClose,
+  plain = false }: DateEditorProps) {
   const today = todayIn(timeZone);
   const [state, setState] = useState<DateEditorState>(() => editorStateFrom(value, timeZone, today));
   const [typed, setTyped] = useState(() => seed?.() ?? '');
@@ -108,6 +111,7 @@ export function DateEditor({ value, label, timeZone = readerTimeZone(), classNam
         <label className="nb-cal-check"><input type="checkbox" checked={state.includeTime}
           onChange={event => { const next = event.target.checked; update(current => withIncludeTime(current, next)); }} />包含时间</label>
       </div>
+      {!plain && <>
       <div className="nb-cal-field">
         <span className="nb-cal-label">重复</span>
         <select className="nb-cal-select" aria-label="重复" value={state.repeat}
@@ -167,6 +171,7 @@ export function DateEditor({ value, label, timeZone = readerTimeZone(), classNam
           {!state.reminders.length && !options.length && <span className="nb-cal-hint">无</span>}
         </div>
       </div>
+      </>}
       {state.includeTime && <p className="nb-cal-hint">时间按 {timeZone} 显示和填写</p>}
       {touched.current && !result.ok && <p className="nb-cal-error" role="alert">{result.error}</p>}
       <div className="nb-cal-editor-actions">

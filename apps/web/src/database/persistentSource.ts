@@ -1,5 +1,6 @@
 import { databaseSchemaProblem, type ChangeRelationResponse, type CreateDatabaseRequest, type DatabaseAggregateResponse, type DatabaseBulkResponse, type DatabaseDocument, type DatabaseQueryRequest, type DatabaseQueryResponse, type DatabaseRow,
-  type DatabaseRowsResponse, type DatabaseSchemaResponse, type PageDocument, type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
+  type DatabaseRowsResponse, type DatabaseSchemaHistoryResponse, type DatabaseSchemaResponse, type DatabaseSchemaVersion, type PageDocument,
+  type RestoreDatabaseSchemaRequest, type RestoreDatabaseSchemaResponse, type UpdateDatabaseSchemaRequest } from '@nbase/contracts';
 import { createContentFromMarkdown } from '../editor/markdown';
 import { ApiError, loadPageTree, pageClient, request, workspacePath } from '../persistence/client';
 import type { DatabaseDataSource, RowPatch } from './source';
@@ -47,6 +48,13 @@ export const databaseClient = {
     withReceipt(workspaceId, body.clientMutationId, () =>
       request<DatabaseSchemaResponse>(`${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}`,
         'PATCH', body, csrfToken)),
+  schemaHistory: (workspaceId: string, databaseId: string, before: string | null) =>
+    request<DatabaseSchemaHistoryResponse>(`${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/schema-history${before ? `?before=${encodeURIComponent(before)}` : ''}`),
+  schemaVersion: (workspaceId: string, databaseId: string, revision: string) =>
+    request<DatabaseSchemaVersion>(`${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/schema-history/${encodeURIComponent(revision)}`),
+  restoreSchema: (workspaceId: string, databaseId: string, revision: string, body: RestoreDatabaseSchemaRequest, csrfToken: string) =>
+    withReceipt(workspaceId, body.clientMutationId, () => request<RestoreDatabaseSchemaResponse>(
+      `${workspacePath(workspaceId)}/databases/${encodeURIComponent(databaseId)}/schema-history/${encodeURIComponent(revision)}/restore`, 'POST', body, csrfToken)),
 };
 
 export interface PersistentSourceOptions {
@@ -93,6 +101,10 @@ export function createPersistentSource(options: PersistentSourceOptions): Databa
     },
     saveSchema: (databaseId, schema, expectedRevision) => databaseClient.updateSchema(workspaceId, databaseId,
       { clientMutationId: crypto.randomUUID(), expectedRevision, ...schema }, csrfToken),
+    schemaHistory: (databaseId, before) => databaseClient.schemaHistory(workspaceId, databaseId, before),
+    schemaVersion: (databaseId, revision) => databaseClient.schemaVersion(workspaceId, databaseId, revision),
+    restoreSchema: (databaseId, revision, expectedRevision) => databaseClient.restoreSchema(workspaceId, databaseId, revision,
+      { clientMutationId: crypto.randomUUID(), expectedRevision }, csrfToken),
     createRow: async (databaseId, title, properties) => {
       const body = { clientMutationId: crypto.randomUUID(), parentId: databaseId, title,
         content: createContentFromMarkdown(''), properties };

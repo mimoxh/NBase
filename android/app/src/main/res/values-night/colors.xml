@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="nb_bg">#FF17181A</color>
+    <color name="nb_text">#FFE6E7E9</color>
+    <color name="nb_muted">#FF9AA0A6</color>
+    <color name="nb_accent">#FF7B93FF</color>
+    <color name="nb_danger">#FFFF7B72</color>
+</resources>

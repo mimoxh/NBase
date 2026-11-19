@@ -321,6 +321,30 @@ describe('CalDAV sources in the list', () => {
     expect(home.textContent).toContain('汇总到这个日历的其他数据库日程也停止同步');
   });
 
+  it('offers the aggregate for writable Google and Microsoft calendars and keeps re-authorization for an aggregate one', async () => {
+    const oauthInfo = (provider: 'google' | 'microsoft') => provider === 'google'
+      ? { provider, account: 'alice@gmail.test', serverHost: 'apidata.googleusercontent.com' } as const
+      : { provider, account: 'bob@contoso.test', serverHost: 'graph.microsoft.com' } as const;
+    const google = caldavSource({ id: 'g1', name: 'Google 日历' }, { ...oauthInfo('google'), calendarName: 'Alice' });
+    const outlook = caldavSource({ id: 'm1', name: 'Outlook', status: 'error', lastError: 'AUTH_FAILED' },
+      { ...oauthInfo('microsoft'), calendarName: '日历', aggregate: true });
+    const birthdays = caldavSource({ id: 'm2', name: '生日' }, { ...oauthInfo('microsoft'), calendarName: '生日', writable: false });
+    const api = fakeApi([google, outlook, birthdays], { update: vi.fn(async () => google) });
+    await open(api);
+    const of = (id: string) => document.querySelector<HTMLElement>(`[data-source-id="${id}"]`)!;
+    expect(buttons(of('m2')).map(b => b.textContent)).not.toContain('设为汇总日历');
+    expect(of('m1').textContent).toContain('汇总日历');
+    expect(of('m1').textContent).toContain('授权已失效，请重新授权');
+    expect(buttons(of('m1')).map(b => b.textContent)).toEqual(expect.arrayContaining(['重新授权', '取消汇总']));
+    await click(button('设为汇总日历', of('g1')));
+    expect(of('g1').textContent).toContain('会全部写到「Alice」');
+    expect(of('g1').textContent).toContain('「Outlook」将不再是汇总日历');
+    await click(button('确认设为汇总日历', of('g1')));
+    expect(api.update).toHaveBeenCalledWith('g1', { aggregate: true });
+    await click(button('停止同步', of('m1')));
+    expect(of('m1').textContent).toContain('保存的授权会被删除');
+    expect(of('m1').textContent).toContain('汇总到这个日历的其他数据库日程也停止同步');
+  });
   it('renames without a URL field and updates the password', async () => {
     const api = fakeApi([caldavSource({}, { writable: false, credentialsOk: false })]);
     await open(api);
@@ -829,6 +853,23 @@ describe('OAuth sources in the list', () => {
     expect(item().textContent).toContain('登录的不是这个来源原来的账号');
     await click(button('取消', item()));
     expect(button('重新授权', item())).toBeTruthy();
+  });
+
+  it('keeps reloading for a while after 立即同步, since the queued run may start and finish between reloads', async () => {
+    const before = googleSource();
+    const list = vi.fn().mockResolvedValueOnce({ sources: [before] }).mockResolvedValueOnce({ sources: [before] })
+      .mockResolvedValueOnce({ sources: [before] }).mockResolvedValue({ sources: [googleSource({ status: 'error', lastError: 'AUTH_FAILED' })] });
+    await open(fakeApi([before], { list }));
+    await click(button('立即同步', item()));
+    expect(item().textContent).not.toContain('授权已失效');
+    await advance(3000);
+    await advance(3000);
+    expect(item().textContent).toContain('授权已失效，请重新授权');
+    expect(button('重新授权', item())).toBeTruthy();
+    await advance(30_000);
+    const calls = list.mock.calls.length;
+    await advance(9000);
+    expect(list.mock.calls.length).toBe(calls);
   });
 
   it('offers neither a password nor re-authorization to a healthy OAuth source', async () => {

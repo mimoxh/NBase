@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { whiteboardContent, whiteboardLimits, type WhiteboardContent } from '@nbase/contracts';
+import type { Doc } from 'yjs';
 import { downloadBlob } from '../persistence/fileDownload';
+import type { RoomProvider } from '../persistence/collab/roomClient';
 import { clipboardImageSources, clipboardMime, pageIdFromPastedText, parseElements, plainText, serializeElements } from './clipboard';
 import { Controller, type PointerInput } from './controller';
 import type { Point } from './geometry';
 import { ImageCache } from './images';
 import { isMindNode } from './mind';
-import { groupToEnter, locateElement, type BoardLocate, type El } from './model';
-import { createMeasure, drawOverlay, drawScene, toWorldPoint, type PageInfo } from './render/canvas';
+import { elementBounds, groupToEnter, indexElements, locateElement, type BoardLocate, type El } from './model';
+import { WhiteboardBinding } from './collab';
+import { createMeasure, drawOverlay, drawScene, toScreen, toWorldPoint, type PageInfo } from './render/canvas';
 import { darkTheme, lightTheme } from './render/colors';
 import { boardToPng, boardToSvg, exportSet } from './render/export';
 import { BoardStore } from './store';
@@ -22,12 +25,21 @@ import './whiteboard.css';
 
 export interface UploadedImage { id: string; fileName: string; mediaType: string }
 
+export interface WhiteboardCollab {
+  doc: Doc;
+  provider: RoomProvider;
+  username: string;
+  cursorColor: string;
+}
+
 export interface WhiteboardViewProps {
   /** The page id; changes in content are reported with it so a late callback cannot land on another page. */
   boardId: string;
   content: WhiteboardContent;
   readOnly: boolean;
   title: string;
+  /** A joined real-time room; embedded and history boards stay local and read-only. */
+  collab?: WhiteboardCollab | undefined;
   /** Pages that page cards can point to; a card whose page is absent shows as missing. */
   pages: readonly PickablePage[];
   onChange: (boardId: string, content: WhiteboardContent) => void;
@@ -64,6 +76,37 @@ function useDarkTheme() {
   return dark;
 }
 
+function RemoteBoardOverlay({ store }: { store: BoardStore }) {
+  useBoard(store, state => state.version);
+  const previewElements = [...store.remotePreviews.values()].filter((element): element is El => Boolean(element));
+  const index = indexElements([...store.elements.filter(element => !store.remotePreviews.has(element.id)), ...previewElements]);
+  const outlines = store.remoteUsers.flatMap(user => user.selection.map(id => ({ user, id })));
+  const editors = store.editingId ? store.remoteUsers.filter(user => user.editingId === store.editingId) : [];
+  return <>
+    <div className="wb-remote-layer" aria-hidden="true">
+      {outlines.map(({ user, id }) => {
+        const element = index.get(id);
+        if (!element) return null;
+        const bounds = elementBounds(element, index), at = toScreen(bounds, store.view);
+        return <div key={`${user.clientId}:${id}`} className="wb-remote-outline" data-remote-client={user.clientId} data-remote-element={id}
+          style={{ left: at.x - 3, top: at.y - 3, width: bounds.w * store.view.zoom + 6, height: bounds.h * store.view.zoom + 6, borderColor: user.color }}>
+          <span style={{ background: user.color }}>{user.name}{user.editingId === id ? ' 正在编辑' : ''}</span>
+        </div>;
+      })}
+      {[...store.remotePreviews].map(([id, element]) => {
+        if (!element) return null;
+        const user = store.remoteUsers.find(candidate => candidate.selection.includes(id)) ?? store.remoteUsers[0];
+        const bounds = elementBounds(element, index), at = toScreen(bounds, store.view);
+        return <div key={`preview:${id}`} className="wb-remote-preview" data-remote-preview={id}
+          style={{ left: at.x - 3, top: at.y - 3, width: bounds.w * store.view.zoom + 6, height: bounds.h * store.view.zoom + 6, borderColor: user?.color ?? '#3e63dd' }} />;
+      })}
+    </div>
+    {editors.length > 0 && <div className="wb-collab-editing" role="status">
+      {editors.map(editor => editor.name).join('、')}也在编辑此元素；同一元素后写者胜。
+    </div>}
+  </>;
+}
+
 export function WhiteboardView(props: WhiteboardViewProps) {
   const propsRef = useRef(props);
   propsRef.current = props;
@@ -74,6 +117,7 @@ export function WhiteboardView(props: WhiteboardViewProps) {
   const frameRef = useRef(0);
   const drawRef = useRef<() => void>(() => undefined);
   const devicePixelsRef = useRef<{ width: number; height: number } | null>(null);
+  const zoomRef = useRef<{ zoom: number; at: number; timer: ReturnType<typeof setTimeout> | null }>({ zoom: 0, at: 0, timer: null });
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const schedule = useCallback(() => {
     if (frameRef.current || timerRef.current) return;
@@ -107,7 +151,17 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     contextMenu: (screen, targetId) => setMenu({ x: screen.x, y: screen.y, targetId }),
     notice: text => propsRef.current.onNotice(text),
   }), [store, measure]);
-  useBoard(store);
+  // The view itself only shows whether there are frames to present; the chrome subscribes for itself.
+  useBoard(store, s => `${s.frameCount()}|${s.readOnly}`);
+
+  useEffect(() => {
+    const collab = props.collab;
+    if (!collab) return;
+    const binding = new WhiteboardBinding(store, collab.doc, collab.provider, {
+      username: collab.username, cursorColor: collab.cursorColor, seed: props.content.board.elements as El[],
+    });
+    return () => binding.dispose();
+  }, [store, props.collab]);
 
   useEffect(() => {
     store.readOnly = props.readOnly;
@@ -138,10 +192,28 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     }
     ctx.setTransform(pixelWidth / width, 0, 0, pixelHeight / height, 0, 0);
     const theme = dark ? darkTheme : lightTheme;
-    drawScene(ctx, store.elements, store.index, store.view, width, height, {
-      theme, measure, images, pageInfo, background: store.background, faded: store.faded,
+    // While the zoom keeps changing, tiny type is drawn as bars; one more frame after it settles draws it properly.
+    const now = performance.now(), zoom = zoomRef.current;
+    if (store.view.zoom !== zoom.zoom) {
+      if (zoom.zoom) zoom.at = now;
+      zoom.zoom = store.view.zoom;
+    }
+    const lowDetail = now - zoom.at < 150;
+    if (lowDetail && !zoom.timer) zoom.timer = setTimeout(() => { zoom.timer = null; schedule(); }, 170);
+    const previews = [...store.remotePreviews.values()].filter((element): element is El => Boolean(element));
+    const settled = store.elements.filter(element => !store.remotePreviews.has(element.id));
+    const sceneIndex = previews.length ? indexElements([...settled, ...previews]) : store.index;
+    drawScene(ctx, settled, sceneIndex, store.view, width, height, {
+      theme, measure, images, pageInfo, background: store.background, faded: store.faded, lowDetail,
       ...(store.editingId ? { hideText: new Set([store.editingId]) } : {}),
     });
+    if (previews.length) {
+      ctx.save();
+      ctx.globalAlpha = 0.58;
+      drawScene(ctx, previews, sceneIndex, store.view, width, height,
+        { theme, measure, images, pageInfo, background: 'none', lowDetail, overlay: true });
+      ctx.restore();
+    }
     drawOverlay(ctx, store.overlay, store.view, theme);
   };
   useEffect(() => store.subscribe(schedule), [store, schedule]);
@@ -267,11 +339,21 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     picker.click();
   };
 
-  const insertCard = (page: PickablePage, at?: { x: number; y: number }) => {
-    const database = picker === 'database';
+  const insertCard = (page: PickablePage, at?: { x: number; y: number }, database = picker === 'database') => {
     setPicker(null);
     controller.insert([database ? controller.databaseElement(page) : controller.cardElement(page)], at);
     containerRef.current?.focus();
+  };
+
+  const createForPicker = (kind: 'page' | 'database') => {
+    const make = kind === 'database' ? embeds?.editor?.databases?.createDatabase : embeds?.createPage;
+    if (!make) return undefined;
+    return async (title: string) => {
+      const fallback = kind === 'database' ? '未命名数据库' : '未命名页面';
+      const id = await make(title || fallback).catch(() => null);
+      if (!id) { propsRef.current.onNotice(kind === 'database' ? '数据库没有创建，请重试。' : '页面没有创建，请重试。'); return; }
+      insertCard({ id, title: title || fallback, icon: null, kind: kind === 'database' ? 'database' : 'document' }, undefined, kind === 'database');
+    };
   };
 
   // ── Clipboard ──
@@ -394,6 +476,7 @@ export function WhiteboardView(props: WhiteboardViewProps) {
   };
 
   const frames = store.elements.filter(el => el.type === 'frame');
+  const bendAction = menu?.targetId ? controller.bendActionAt({ x: menu.x, y: menu.y }) : null;
   const presentFrom = (id: string | null) => setPresenting(Math.max(0, id ? frames.findIndex(frame => frame.id === id) : 0));
 
   // ── Context menu ──
@@ -420,6 +503,9 @@ export function WhiteboardView(props: WhiteboardViewProps) {
       ...(target?.type === 'card' || target?.type === 'database' ? [{ key: 'open', label: target.type === 'card' ? '打开页面' : '打开数据库', onSelect: () => controller.openCard(target.id) }, 'divider' as const] : []),
       ...(target?.type === 'frame' && frames.length ? [{ key: 'present', label: '从此框架放映', onSelect: () => presentFrom(target.id) }] : []),
       ...(editable && target && controller.canEdit(target) ? [{ key: 'edit', label: '编辑文字', shortcut: 'Enter', onSelect: () => controller.startEditing(target.id) }] : []),
+      ...(editable && target?.type === 'connector' && bendAction ? [{ key: 'bend', label: bendAction.kind === 'add' ? '在此添加拐点' : '删除此拐点', shortcut: '双击', onSelect: bendAction.run }] : []),
+      ...(editable && target?.type === 'connector' && target.mode !== 'curve' && (target.waypoints || target.bend !== undefined)
+        ? [{ key: 'route', label: '恢复自动路由', onSelect: () => controller.resetRoute() }] : []),
       ...(editable && isMindNode(target) ? [{ key: 'child', label: '添加子主题', shortcut: 'Tab', onSelect: () => controller.addMindNode('child') }] : []),
       ...(mind?.hasChildren ? [{ key: 'fold', label: mind.collapsed ? '展开分支' : '收起分支', onSelect: () => controller.toggleCollapsed(mind.node.id) }] : []),
       ...(enterable && target ? [{ key: 'enter', label: '进入编组', shortcut: '双击', onSelect: () => { controller.enterGroup(target.id); } }] : []),
@@ -479,9 +565,11 @@ export function WhiteboardView(props: WhiteboardViewProps) {
       onPointerMove={event => { controller.pointerMove(input(event)); setCursor(controller.cursorAt(local(event))); }}
       onPointerUp={event => { controller.pointerUp(input(event)); setCursor(controller.cursorAt(local(event))); }}
       onPointerCancel={event => controller.pointerCancel(input(event))}
+      onLostPointerCapture={event => { if (event.pointerType === 'mouse') controller.pointerUp(input(event)); }}
       onDoubleClick={event => controller.doubleClick(local(event))}
       onContextMenu={event => { event.preventDefault(); controller.contextMenu(local(event)); }} />
     <EmbedLayer store={store} controller={controller} onExit={() => containerRef.current?.focus({ preventScroll: true })} />
+    <RemoteBoardOverlay store={store} />
     <TextEditor store={store} controller={controller} measure={measure} />
     <PropertyBar store={store} controller={controller} onPresentFrame={id => presentFrom(id)}
       onFitCard={embeds ? id => {
@@ -505,7 +593,8 @@ export function WhiteboardView(props: WhiteboardViewProps) {
     </div>
     {menu && <ContextMenu x={menu.x} y={menu.y} items={menuItems()} bounds={store.size} onClose={() => { setMenu(null); containerRef.current?.focus({ preventScroll: true }); }} />}
     {picker && <PagePicker pages={picker === 'database' ? pickable.filter(page => page.kind === 'database') : pickable}
-      {...(picker === 'database' ? { label: '插入数据库视图', placeholder: '搜索数据库' } : {})}
+      {...(picker === 'database' ? { label: '插入数据库视图', placeholder: '搜索数据库', createLabel: '新建数据库', emptyLabel: '没有匹配的数据库' } : {})}
+      onCreate={store.readOnly ? undefined : createForPicker(picker)}
       onPick={page => insertCard(page)} onClose={() => { setPicker(null); containerRef.current?.focus(); }} />}
     {presenting !== null && <Presentation elements={store.elements} index={store.index} start={presenting} measure={measure} images={images}
       pageInfo={pageInfo} dark={dark} onClose={() => { setPresenting(null); containerRef.current?.focus(); }} />}

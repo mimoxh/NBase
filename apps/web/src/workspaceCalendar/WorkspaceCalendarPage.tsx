@@ -6,6 +6,7 @@ import { applyEventChange, newEventValue, type EventSpan, type EventWrite } from
 import type { WeekStart } from '../calendar/layout';
 import { buildEvents, type CalendarEvent, type CalendarEventInput } from '../calendar/model';
 import { RecurrenceScopeDialog } from '../calendar/RecurrenceScopeDialog';
+import { Icon } from '../components/Icon';
 import { Popover } from '../components/Popover';
 import { useCalendarNav } from '../database/views/calendarNav';
 import { reminderPermission, requestReminderPermission } from '../reminders/runner';
@@ -33,7 +34,7 @@ export function WorkspaceCalendarPage({ source, timeZone, weekStart, onDatabases
   const [loadError, setLoadError] = useState('');
   const [loading, setLoading] = useState(false);
   const [saveProblem, setSaveProblem] = useState(false);
-  const [panel, setPanel] = useState<'sources' | 'sync' | null>(null);
+  const [panel, setPanel] = useState<'sources' | 'sync' | 'settings' | null>(null);
   const [pending, setPending] = useState<{ event: CalendarEvent; next: EventSpan } | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [permission, setPermission] = useState(reminderPermission);
@@ -194,19 +195,36 @@ export function WorkspaceCalendarPage({ source, timeZone, weekStart, onDatabases
     {loadError && data && <span role="alert">{loadError}</span>}
     {truncatedTitles.length > 0 && <span role="status">「{truncatedTitles.join('、')}」的事件太多，只显示一部分。</span>}
     {saveProblem && <button className="nb-btn nb-btn-quiet" onClick={retrySave}>来源设置未保存，点击重试</button>}
-    <span className="nb-wcal-actions">
-      <button className="nb-btn nb-btn-quiet" onClick={() => setPanel(item => item === 'sources' ? null : 'sources')}>来源</button>
-      {panel === 'sources' && settings && databases && <Popover label="日历来源设置" className="nb-wcal-pop" portal width={300}
-        onClose={() => setPanel(null)}>
-        <SourcesPanel databases={databases} settings={settings} canWrite={source.canWrite} onChange={updateSettings}
-          {...(reveal ? { onReveal: reveal } : {})} />
-      </Popover>}
+    <span className="nb-wcal-toolbar">
+      <span className="nb-wcal-actions">
+        <button className="nb-btn nb-wcal-btn" aria-expanded={panel === 'sources'} onClick={() => setPanel(item => item === 'sources' ? null : 'sources')}>
+          <Icon name="calendar" size={14} /><span>来源</span></button>
+        {panel === 'sources' && settings && databases && <Popover label="日历来源设置" className="nb-wcal-pop" portal width={300}
+          onClose={() => setPanel(null)}>
+          <SourcesPanel databases={databases} settings={settings} canWrite={source.canWrite} onChange={updateSettings}
+            {...(reveal ? { onReveal: reveal } : {})} />
+        </Popover>}
+      </span>
+      {source.canWrite && <button className="nb-btn nb-wcal-btn" onClick={() => setPanel('sync')}>
+        <Icon name="restore" size={14} /><span>导入与同步</span></button>}
+      <span className="nb-wcal-actions">
+        <button className="nb-btn nb-wcal-btn nb-wcal-icon-btn" aria-label="日历设置" title="日历设置" aria-expanded={panel === 'settings'}
+          onClick={() => setPanel(item => item === 'settings' ? null : 'settings')}><Icon name="gear" size={15} /></button>
+        {panel === 'settings' && <Popover label="日历设置" className="nb-wcal-pop" portal width={300} onClose={() => setPanel(null)}>
+          <div className="nb-wcal-settings">
+            <h3>提醒通知</h3>
+            {!source.persistent ? <p>演示模式没有提醒和订阅。</p>
+              : permission === 'granted' ? <p>已开启：到提醒时间时，浏览器会弹出通知。</p>
+              : permission === 'default' ? <>
+                <p>开启后，到提醒时间时浏览器会弹出通知；不开启时，提醒显示在页面内。</p>
+                <button className="nb-btn nb-btn-primary" onClick={() => void requestReminderPermission().then(setPermission)}>开启提醒通知</button>
+              </>
+              : permission === 'denied' ? <p>浏览器通知已关闭，提醒将显示在页面内。如需开启，请在浏览器的网站设置中允许本站发送通知。</p>
+              : <p>这个浏览器不支持通知，提醒将显示在页面内。</p>}
+          </div>
+        </Popover>}
+      </span>
     </span>
-    <button className="nb-btn nb-btn-quiet" onClick={() => setPanel('sync')}>导入与同步</button>
-    {source.persistent && permission === 'default' && <button className="nb-btn nb-btn-quiet"
-      onClick={() => void requestReminderPermission().then(setPermission)}>开启提醒通知</button>}
-    {source.persistent && permission === 'denied' && <span className="nb-wcal-muted">浏览器通知已关闭，提醒将显示在页面内。</span>}
-    {!source.persistent && <span className="nb-wcal-muted">演示模式没有提醒和订阅。</span>}
   </>;
 
   if (!databases || !settings) {
@@ -221,7 +239,7 @@ export function WorkspaceCalendarPage({ source, timeZone, weekStart, onDatabases
       onOpen={open} onCreate={source.canWrite ? create : undefined} onChange={source.canWrite ? change : undefined}
       onDayClick={dayClick} status={status} label="工作区日历" />
     {pending && <RecurrenceScopeDialog onChoose={choose} onClose={() => setPending(null)} />}
-    {panel === 'sync' && <SyncDialog source={source} timeZone={timeZone} onChanged={() => { void reloadSources(); onDatabasesChanged?.(); }}
+    {panel === 'sync' && source.canWrite && <SyncDialog source={source} timeZone={timeZone} onChanged={() => { void reloadSources(); onDatabasesChanged?.(); }}
       onClose={() => setPanel(null)} />}
   </div>;
 }

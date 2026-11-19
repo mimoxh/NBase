@@ -1,3 +1,4 @@
+import type { AuthWorkspace } from '@nbase/contracts';
 import type { FastifyRequest } from 'fastify';
 import type { AuthRepository } from './repository.js';
 import {
@@ -11,10 +12,13 @@ export class WorkspaceRouteError extends Error {
     public readonly clearCookie = false) { super(code); }
 }
 
-/** `post-read` is a read carried by POST: it gets the write checks on origin and CSRF, but viewers may use it. */
-export async function authorizeWorkspace(request: FastifyRequest, auth: AuthRepository,
+/**
+ * `post-read` is a read carried by POST, or a personal preference that changes no workspace content: it gets the
+ * write checks on origin and CSRF, but viewers may use it. Removed members are not members at all (404).
+ */
+export async function authorizeWorkspaceMember(request: FastifyRequest, auth: AuthRepository,
   origin: string, secure: boolean, workspaceId: string, write: boolean | 'post-read',
-  contentType?: string): Promise<string> {
+  contentType?: string): Promise<{ userId: string; role: AuthWorkspace['role'] }> {
   if (!uuidPattern.test(workspaceId)) throw new WorkspaceRouteError(404, 'NOT_FOUND');
   if (write && request.headers.origin !== origin) throw new WorkspaceRouteError(403, 'ORIGIN_INVALID');
   if (write && contentType && request.headers['content-type']?.split(';', 1)[0]?.trim().toLowerCase() !== contentType) {
@@ -35,5 +39,11 @@ export async function authorizeWorkspace(request: FastifyRequest, auth: AuthRepo
       throw new WorkspaceRouteError(403, 'CSRF_INVALID');
     }
   }
-  return session.userId;
+  return { userId: session.userId, role: membership.role };
+}
+
+export async function authorizeWorkspace(request: FastifyRequest, auth: AuthRepository,
+  origin: string, secure: boolean, workspaceId: string, write: boolean | 'post-read',
+  contentType?: string): Promise<string> {
+  return (await authorizeWorkspaceMember(request, auth, origin, secure, workspaceId, write, contentType)).userId;
 }

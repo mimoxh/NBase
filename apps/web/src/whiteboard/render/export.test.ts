@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createConnector, createShape, type El } from '../model';
 import { approximateMeasure } from '../text';
+import { darkTheme, runColor } from './colors';
 import { boardToSvg, exportBounds, exportSet } from './export';
 
 const id = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -27,6 +28,18 @@ describe('SVG export', () => {
     expect(svg).toContain('页面不存在或已删除');
     expect(svg).not.toContain('<b>');
     expect((svg.match(/<path /g) ?? []).length).toBeGreaterThanOrEqual(6);
+  });
+
+  it('writes styled pieces of text as tspans in either theme', () => {
+    const shape = { ...createShape(id(1), { x: 0, y: 0, w: 300, h: 80 }), text: '粗体 red 斜体', runs: [{ text: '粗体', bold: true }, { text: ' ' }, { text: 'red', color: 'red' as const }, { text: ' ' }, { text: '斜体', italic: true, fontSize: 30 }] };
+    const light = boardToSvg([shape], new Map(), { measure: approximateMeasure, pageInfo: () => null });
+    expect(light).toContain('font-weight="600"');
+    expect(light).toContain('font-style="italic"');
+    expect(light).toContain(`fill="${runColor('red', false)}"`);
+    expect(light).toContain('font-size="30"');
+    expect(light.replace(/<[^>]+>/g, '')).toContain('粗体 red 斜体');
+    const dark = boardToSvg([shape], new Map(), { measure: approximateMeasure, pageInfo: () => null, theme: darkTheme });
+    expect(dark).toContain(`fill="${runColor('red', true)}"`);
   });
 
   it('exports only the selection when asked and pads the bounds', () => {

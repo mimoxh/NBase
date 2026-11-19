@@ -25,7 +25,7 @@ export function ViewTabs({ views, view, canWrite, canBoard, canCalendar, open, o
         <div className="nb-db-menu">
           <button onClick={() => { setRenaming(view.id); onClose(); }}>重命名当前视图</button>
           <button disabled={views.length >= databaseViewLimit} onClick={() => { onAdd('table'); onClose(); }}>新建表格视图</button>
-          <button disabled={views.length >= databaseViewLimit || !canBoard} title={canBoard ? undefined : '需要一个单选或复选框字段'} onClick={() => { onAdd('board'); onClose(); }}>新建看板视图</button>
+          <button disabled={views.length >= databaseViewLimit || !canBoard} title={canBoard ? undefined : '需要一个单选、多选或复选框字段'} onClick={() => { onAdd('board'); onClose(); }}>新建看板视图</button>
           <button disabled={views.length >= databaseViewLimit || !canCalendar} title={canCalendar ? undefined : '需要一个日期字段'} onClick={() => { onAdd('calendar'); onClose(); }}>新建日历视图</button>
           <button className="danger" disabled={views.length <= 1} onClick={() => { onDelete(); onClose(); }}>删除当前视图</button>
         </div>

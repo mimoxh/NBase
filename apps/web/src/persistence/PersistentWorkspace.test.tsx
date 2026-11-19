@@ -9,6 +9,8 @@ import { localDrafts, type LocalPageDraft } from './drafts';
 import { createContentFromMarkdown } from '../editor/markdown';
 
 vi.mock('../components/Modal', () => ({ Modal: ({ children }: { children: ReactNode }) => <section role="dialog">{children}</section> }));
+// These tests cover the single-user paths; real-time rooms have their own tests and the browser end-to-end run.
+vi.mock('./useLiveChannel', () => ({ useLiveChannel: () => ({ others: [], noteEdit: () => undefined, rooms: null }) }));
 
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
@@ -35,8 +37,11 @@ it('keeps writing and export available when pending-action storage cannot be rea
     expect((host.querySelector('[aria-label="页面标题"]') as HTMLInputElement).disabled).toBe(false);
     const menuTrigger = host.querySelector('[aria-label="页面操作"]') as HTMLButtonElement;
     await act(async () => menuTrigger.click());
-    const download = [...host.querySelectorAll('[role="menuitem"]')].find(item => item.textContent === '下载页面') as HTMLButtonElement;
-    expect(download).toBeDefined(); expect(download.disabled).toBe(false);
+    const exportItem = [...host.querySelectorAll('[role="menuitem"]')].find(item => item.textContent === '导出…') as HTMLButtonElement;
+    expect(exportItem).toBeDefined(); expect(exportItem.disabled).toBe(false);
+    await act(async () => exportItem.click());
+    const markdown = [...host.querySelectorAll('.nb-export-option')].find(item => item.textContent?.startsWith('Markdown')) as HTMLButtonElement;
+    expect(markdown).toBeDefined(); expect(markdown.disabled).toBe(false);
   } finally { await act(() => root.unmount()); host.remove(); }
 });
 

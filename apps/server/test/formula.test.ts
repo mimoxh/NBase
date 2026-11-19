@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
-import { computeRow, databaseSchemaProblem, evaluateView, formulaFromDisplay, formulaToDisplay, parseFormula, type DatabaseRow, type PropertyDefinition } from '@nbase/contracts';
+import { computeRow, computedDependencyProblem, databaseSchemaProblem, evaluateView, formulaDepthLimit, formulaFromDisplay, formulaToDisplay, parseFormula,
+  rollupSourceDatabases, type DatabaseRow, type PropertyDefinition } from '@nbase/contracts';
 
 const ids = { title: randomUUID(), price: randomUUID(), count: randomUUID(), status: randomUUID(), date: randomUUID(), done: randomUUID(), option: randomUUID(), f: randomUUID() };
 const properties: PropertyDefinition[] = [
@@ -75,13 +76,77 @@ test('field references are stored by id and shown by name', () => {
   assert.equal(formulaFromDisplay(formulaToDisplay(expression, renamed), renamed), expression);
 });
 
-test('formulas cannot read computed fields, so there are no cycles', () => {
-  const withFormula: PropertyDefinition[] = [...properties, { id: ids.f, name: '金额', type: 'formula', formula: { expression: stored('prop("单价") * 2'), resultType: 'number' } }];
-  const parsed = parseFormula(formulaFromDisplay('prop("金额") + 1', withFormula), withFormula);
-  assert.equal(parsed.ok, false);
-  assert.equal(databaseSchemaProblem(withFormula, [{ id: randomUUID(), name: 'v', type: 'table', filters: [], sorts: [], hiddenPropertyIds: [], propertyOrder: [], widths: {} }]), null);
+test('formulas read other formulas and rollups of the row, worked out in dependency order', () => {
+  const total: PropertyDefinition = { id: ids.f, name: '金额', type: 'formula', formula: { expression: '', resultType: 'number' } };
+  const rollup: PropertyDefinition = { id: randomUUID(), name: '件数', type: 'rollup', rollup: { relationPropertyId: randomUUID(), targetPropertyId: randomUUID(), fn: 'count', resultType: 'number' } };
+  const doubled: PropertyDefinition = { id: randomUUID(), name: '双倍', type: 'formula', formula: { expression: '', resultType: 'number' } };
+  // Listed before what it reads, so only a dependency order gets it right.
+  const schema: PropertyDefinition[] = [...properties, doubled, total, rollup];
+  total.formula!.expression = formulaFromDisplay('prop("单价") * prop("件数")', schema);
+  doubled.formula!.expression = formulaFromDisplay('prop("金额") * 2', schema);
+  assert.ok(parseFormula(doubled.formula!.expression, schema).ok);
+  const item = row({ [ids.price]: 3 });
+  const source = { rows: [row(), row()], schema: properties, target: properties[0]! };
+  assert.deepEqual(computeRow(item, schema, new Map([[rollup.id, source]])), { [rollup.id]: 2, [ids.f]: 6, [doubled.id]: 12 });
+  // A rollup without a source keeps the value already read from the cache.
+  assert.deepEqual(computeRow({ ...item, computed: { [rollup.id]: 5 } }, schema), { [rollup.id]: 5, [ids.f]: 15, [doubled.id]: 30 });
+  assert.deepEqual(computeRow({ ...item, computed: { [rollup.id]: 5 } }, schema, new Map(), ids.f), { [rollup.id]: 5, [ids.f]: 15 });
+  assert.equal(databaseSchemaProblem(schema, [{ id: randomUUID(), name: 'v', type: 'table', filters: [], sorts: [], hiddenPropertyIds: [], propertyOrder: [], widths: {} }]), null);
+  const tagged: PropertyDefinition[] = [...properties, { id: randomUUID(), name: '标签', type: 'tags' }];
+  const parsedTags = parseFormula(formulaFromDisplay('prop("标签")', tagged), tagged);
+  assert.equal(parsedTags.ok, false);
+  assert.match(parsedTags.ok ? '' : parsedTags.error, /关联和标签/u);
 });
 
+test('cycles between computed fields are found with their path, and left empty when old data has one', () => {
+  const db = randomUUID();
+  const a: PropertyDefinition = { id: randomUUID(), name: 'A', type: 'formula', formula: { expression: '', resultType: 'number' } };
+  const b: PropertyDefinition = { id: randomUUID(), name: 'B', type: 'formula', formula: { expression: '', resultType: 'number' } };
+  const ok: PropertyDefinition = { id: randomUUID(), name: 'C', type: 'formula', formula: { expression: '', resultType: 'number' } };
+  const schema = [...properties, a, b, ok];
+  a.formula!.expression = formulaFromDisplay('prop("B") + 1', schema);
+  b.formula!.expression = formulaFromDisplay('prop("A") + 1', schema);
+  ok.formula!.expression = formulaFromDisplay('prop("单价") + 1', schema);
+  const problem = computedDependencyProblem(db, new Map([[db, schema]]));
+  assert.equal(problem?.kind, 'cycle');
+  assert.deepEqual(problem!.path.map(node => node.name), ['A', 'B', 'A']);
+  assert.deepEqual(computeRow(row({ [ids.price]: 1 }), schema), { [ok.id]: 2 });
+  const self: PropertyDefinition = { id: randomUUID(), name: '自己', type: 'formula', formula: { expression: '', resultType: 'number' } };
+  self.formula!.expression = `prop("${self.id}") + 1`;
+  assert.deepEqual(computedDependencyProblem(db, new Map([[db, [...properties, self]]]))!.path.map(node => node.name), ['自己', '自己']);
+  assert.equal(computedDependencyProblem(db, new Map([[db, [...properties, ok]]])), null);
+});
+
+test('cycles through rollups of linked databases and chains that are too deep are rejected', () => {
+  const [orders, customers] = [randomUUID(), randomUUID()];
+  const link = { o: randomUUID(), c: randomUUID() };
+  const orderTotal: PropertyDefinition = { id: randomUUID(), name: '订单额', type: 'formula', formula: { expression: '', resultType: 'number' } };
+  const customerSum: PropertyDefinition = { id: randomUUID(), name: '客户总额', type: 'rollup', rollup: { relationPropertyId: link.c, targetPropertyId: orderTotal.id, fn: 'sum', resultType: 'number' } };
+  const orderBack: PropertyDefinition = { id: randomUUID(), name: '回读', type: 'rollup', rollup: { relationPropertyId: link.o, targetPropertyId: customerSum.id, fn: 'sum', resultType: 'number' } };
+  const orderSchema: PropertyDefinition[] = [{ id: randomUUID(), name: '名称', type: 'title' },
+    { id: link.o, name: '客户', type: 'relation', relation: { databaseId: customers, pairedPropertyId: link.c, owner: true } }, orderTotal, orderBack];
+  orderTotal.formula!.expression = `prop("${orderBack.id}") + 1`;
+  const customerSchema: PropertyDefinition[] = [{ id: randomUUID(), name: '名称', type: 'title' },
+    { id: link.c, name: '订单', type: 'relation', relation: { databaseId: orders, pairedPropertyId: link.o, owner: false } }, customerSum];
+  const schemas = new Map([[orders, orderSchema], [customers, customerSchema]]);
+  assert.deepEqual(rollupSourceDatabases(orderSchema), [customers]);
+  const cycle = computedDependencyProblem(customers, schemas);
+  assert.equal(cycle?.kind, 'cycle');
+  assert.deepEqual(cycle!.path.map(node => `${node.databaseId === orders ? '订单' : '客户'}.${node.name}`), ['客户.客户总额', '订单.订单额', '订单.回读', '客户.客户总额']);
+  // Without the back reference the chain is fine.
+  orderTotal.formula!.expression = '1';
+  assert.equal(computedDependencyProblem(customers, schemas), null);
+
+  const chain: PropertyDefinition[] = [{ id: randomUUID(), name: '名称', type: 'title' }];
+  for (let index = 0; index <= formulaDepthLimit; index += 1) {
+    const previous = chain.at(-1)!;
+    chain.push({ id: randomUUID(), name: `第${index}`, type: 'formula', formula: { expression: index === 0 ? '1' : `prop("${previous.id}") + 1`, resultType: 'number' } });
+  }
+  const deep = computedDependencyProblem(orders, new Map([[orders, chain]]));
+  assert.equal(deep?.kind, 'depth');
+  assert.equal(deep!.path.length, formulaDepthLimit + 1);
+  assert.equal(computedDependencyProblem(orders, new Map([[orders, chain.slice(0, -1)]])), null);
+});
 test('computed values filter, sort and total as their result type', () => {
   const formula: PropertyDefinition = { id: ids.f, name: '金额', type: 'formula', formula: { expression: stored('prop("单价") * 2'), resultType: 'number' } };
   const schema = [...properties, formula];

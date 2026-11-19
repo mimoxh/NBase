@@ -152,7 +152,7 @@ export interface DatabaseView {
   id: string;
   name: string;
   type: DatabaseViewType;
-  /** Board views: a single-select or checkbox property. */
+  /** Board views: a single-select, multi-select or checkbox property. */
   groupPropertyId?: string;
   /** Calendar views: a date, created-time or updated-time property. */
   datePropertyId?: string;
@@ -827,7 +827,7 @@ export interface DatabaseQueryRequest {
   filters: ViewFilterEntry[];
   sorts: ViewSort[];
   context?: Pick<QueryContext, 'timeZone' | 'weekStart'>;
-  /** Returns `groups` as well: rows split by this single-select or checkbox property. */
+  /** Returns `groups` as well: rows split by this single-select, multi-select or checkbox property, see `groupRows`. */
   groupBy?: string;
   /** Calendar views: only rows that may show on these days, see `rowInRange`. */
   range?: DatabaseQueryRange;
@@ -843,32 +843,62 @@ function isQueryRange(value: unknown): value is DatabaseQueryRange {
   return (Date.parse(`${value.to}T00:00:00Z`) - Date.parse(`${value.from}T00:00:00Z`)) / 86400000 < databaseRangeDayLimit;
 }
 
-/** A board column. `key` is an option id, 'true' or 'false', or null for rows with no group. */
+/**
+ * A board column. `key` is an option id, 'true' or 'false', or null for rows with no group. A multi-select row
+ * is in the column of each of its options, so the columns' counts add up to occurrences rather than rows.
+ */
 export interface DatabaseRowGroup { key: string | null; ids: string[] }
 
 export function isGroupableProperty(def: PropertyDefinition): boolean {
-  return def.type === 'select' || def.type === 'checkbox';
+  return def.type === 'select' || def.type === 'multi_select' || def.type === 'checkbox';
 }
 
 export function isCalendarProperty(def: PropertyDefinition): boolean {
   return def.type === 'date' || def.type === 'created_time' || def.type === 'updated_time';
 }
 
-/** The group a row belongs to on a board. */
+/** The group a row belongs to on a board; for a multi-select, the first of `rowGroupKeys`. */
 export function rowGroupKey(row: DatabaseRow, def: PropertyDefinition): string | null {
   if (def.type === 'checkbox') return cellValue(row, def) === true ? 'true' : 'false';
+  if (def.type === 'multi_select') return rowGroupKeys(row, def)[0] ?? null;
   return isEmpty(row, def) ? null : String(cellValue(row, def));
 }
 
-/** Splits ordered rows into groups, keeping their order inside each group. */
+/** Every group a row belongs to. A multi-select gives its current options in option order, or null when it has none. */
+export function rowGroupKeys(row: DatabaseRow, def: PropertyDefinition): (string | null)[] {
+  if (def.type !== 'multi_select') return [rowGroupKey(row, def)];
+  const value = cellValue(row, def);
+  const chosen = new Set(Array.isArray(value) ? value : []);
+  const keys = (def.options ?? []).filter(option => chosen.has(option.id)).map(option => option.id);
+  return keys.length ? keys : [null];
+}
+
+/** Splits ordered rows into groups, keeping their order inside each group. Groups come in order of first appearance. */
 export function groupRows(rows: DatabaseRow[], def: PropertyDefinition): DatabaseRowGroup[] {
   const groups = new Map<string | null, string[]>();
   for (const row of rows) {
-    const key = rowGroupKey(row, def);
-    const ids = groups.get(key);
-    if (ids) ids.push(row.id); else groups.set(key, [row.id]);
+    for (const key of rowGroupKeys(row, def)) {
+      const ids = groups.get(key);
+      if (ids) ids.push(row.id); else groups.set(key, [row.id]);
+    }
   }
   return [...groups].map(([key, ids]) => ({ key, ids }));
+}
+
+/**
+ * The value a row takes when its card moves from one board column to another. A multi-select loses the option of
+ * the column it left and gains the one it joins; moving to the column without options clears it. Null clears.
+ */
+export function groupMoveValue(def: PropertyDefinition, current: PropertyValue | undefined, fromKey: string | null, toKey: string | null): PropertyValue | null {
+  if (def.type === 'checkbox') return toKey === 'true' ? true : null;
+  if (def.type !== 'multi_select') return toKey;
+  const known = new Set((def.options ?? []).map(option => option.id));
+  // Ids of options removed from the field would not pass validation, so they are dropped.
+  const list = Array.isArray(current) ? current.filter((id): id is string => typeof id === 'string' && known.has(id)) : [];
+  if (toKey === null) return null;
+  let next = list.filter(id => id !== fromKey);
+  if (!next.includes(toKey) && next.length < databaseMultiSelectLimit) next = [...next, toKey];
+  return next.length ? next : null;
 }
 
 export interface DatabaseQueryResponse {

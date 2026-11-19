@@ -26,6 +26,8 @@ export interface PageActionContext {
   saveTimers: MutableRefObject<Map<string, ReturnType<typeof setTimeout>>>;
   savePageRef: MutableRefObject<(pageId: string) => Promise<void>>;
   editorRef: RefObject<DocumentEditorHandle | null>;
+  /** The open real-time room of a page, when its content is co-edited (docs/architecture/realtime.md). */
+  roomForPage: (pageId: string) => { whenSaved: (timeoutMs: number) => Promise<boolean> } | null;
   setActive: (id: string | null) => void;
   setStatus: (text: string) => void;
   setNotice: (text: string) => void;
@@ -48,7 +50,7 @@ export interface PageActionContext {
 
 /** Trash, restore and version restore: durable operation ID first, then a confirmable server write. */
 export function createPageActions({ session, workspace, actionsLoaded, pages, pendingUploads, activeIdRef, titleRef, docsRef, draftsRef,
-  pendingActionsRef, pendingCreatesRef, pageActionBusyRef, uploadingRef, openSequence, saveTimers, savePageRef, editorRef,
+  pendingActionsRef, pendingCreatesRef, pageActionBusyRef, uploadingRef, openSequence, saveTimers, savePageRef, editorRef, roomForPage,
   setActive, setStatus, setNotice, setReauth, setDialog, setPages, setPendingActions, setPageActionBusy, setDocumentPage,
   setInitialContent, setEditorSnapshot, setConflict, setOtherDraft, openPage, reloadTree, refreshTags, markDraft, waitForSave }: PageActionContext) {
   const syncPendingActions = () => setPendingActions([...pendingActionsRef.current.values()]);
@@ -137,7 +139,8 @@ export function createPageActions({ session, workspace, actionsLoaded, pages, pe
           throw new Error('请先完成待确认的创建和附件上传，再恢复历史或删除页面。');
         }
         const active = activeIdRef.current;
-        if (active && affectedIds.includes(active)) {
+        // A room page's content is settled through the room's saver, never through a local draft.
+        if (active && affectedIds.includes(active) && !roomForPage(active)) {
           const snapshot = editorRef.current?.getSnapshot();
           const server = docsRef.current.get(active);
           const existingDraft = draftsRef.current.get(active);
@@ -149,6 +152,8 @@ export function createPageActions({ session, workspace, actionsLoaded, pages, pe
           }
         }
         for (const id of affectedIds) {
+          const room = roomForPage(id);
+          if (room && !await room.whenSaved(10_000)) throw new Error('协同修改尚未保存完成，请稍后再试。');
           await waitForSave(id);
           await savePageRef.current(id);
           await waitForSave(id);

@@ -3,6 +3,7 @@ import { lazy, Suspense, type ComponentProps } from 'react';
 /** The table UI loads on first use, so documents that never show a database stay light. */
 const DatabaseViewModule = lazy(() => import('./DatabaseView').then(module => ({ default: module.DatabaseView })));
 const RowPanelModule = lazy(() => import('./RowPanel').then(module => ({ default: module.RowPanel })));
+const PagePropertiesModule = lazy(() => import('./PageProperties').then(module => ({ default: module.PageProperties })));
 
 export function LazyDatabaseView(props: ComponentProps<typeof DatabaseViewModule>) {
   return <Suspense fallback={<div className="nb-db-loading" role="status">正在加载数据库…</div>}>
@@ -11,4 +12,8 @@ export function LazyDatabaseView(props: ComponentProps<typeof DatabaseViewModule
 
 export function LazyRowPanel(props: ComponentProps<typeof RowPanelModule>) {
   return <Suspense fallback={null}><RowPanelModule {...props} /></Suspense>;
+}
+
+export function LazyPageProperties(props: ComponentProps<typeof PagePropertiesModule>) {
+  return <Suspense fallback={null}><PagePropertiesModule {...props} /></Suspense>;
 }

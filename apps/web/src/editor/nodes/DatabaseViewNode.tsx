@@ -10,7 +10,7 @@ import type { DatabaseDataSource } from '../../database/source';
 export interface DatabaseEmbedding {
   source: DatabaseDataSource;
   /** Creates a new database under the current page and returns its id, or null when it was not created. */
-  createDatabase?: () => Promise<string | null>;
+  createDatabase?: (title?: string) => Promise<string | null>;
   /** Databases that can be linked from this document. */
   databases?: readonly { id: string; title: string; icon: string | null }[];
 }

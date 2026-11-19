@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ChangeRelationRequest, ChangeRelationResponse, CreateRelationRequest, DatabaseOption, DatabaseAggregateRequest, DatabaseAggregateResponse, DatabaseBulkRequest, DatabaseBulkResponse, DatabaseDocument, DatabaseQueryRequest, DatabaseQueryResponse, DatabaseRow, DatabaseSchemaResponse, DatabaseView,
-  PropertyDefinition, PropertyValue, RowProperties } from '@nbase/contracts';
+import type { ChangeRelationRequest, ChangeRelationResponse, ComputedDependencyNode, CreateRelationRequest, DatabaseOption, DatabaseAggregateRequest, DatabaseAggregateResponse, DatabaseBulkRequest, DatabaseBulkResponse, DatabaseDocument, DatabaseQueryRequest, DatabaseQueryResponse, DatabaseRow,
+  DatabaseSchemaHistoryResponse, DatabaseSchemaResponse, DatabaseSchemaVersion, DatabaseView, PropertyDefinition, PropertyValue, RestoreDatabaseSchemaResponse, RowProperties } from '@nbase/contracts';
 
 export interface RowPatch {
   title?: string;
@@ -32,6 +32,11 @@ export interface DatabaseDataSource {
   bulk(databaseId: string, request: DatabaseBulkRequest): Promise<DatabaseBulkResponse>;
   aggregate(databaseId: string, request: DatabaseAggregateRequest): Promise<DatabaseAggregateResponse>;
   saveSchema(databaseId: string, schema: DatabaseSchema, expectedRevision: string): Promise<DatabaseSchemaResponse>;
+  /** Schema history, newest first; absent where the host keeps none. */
+  schemaHistory?(databaseId: string, before: string | null): Promise<DatabaseSchemaHistoryResponse>;
+  schemaVersion?(databaseId: string, revision: string): Promise<DatabaseSchemaVersion>;
+  /** Saves an earlier version as a new one; `expectedRevision` is the schema revision the view holds. */
+  restoreSchema?(databaseId: string, revision: string, expectedRevision: string): Promise<RestoreDatabaseSchemaResponse>;
   createRow(databaseId: string, title: string, properties: RowProperties): Promise<DatabaseRow>;
   updateRow(rowId: string, expectedRevision: string, patch: RowPatch): Promise<DatabaseRow>;
   moveRow(databaseId: string, rowId: string, afterRowId: string | null): Promise<void>;
@@ -44,7 +49,7 @@ export interface DatabaseDataSource {
 }
 
 export class DatabaseSourceError extends Error {
-  constructor(public readonly code: string, message: string) { super(message); }
+  constructor(public readonly code: string, message: string, public readonly details?: Record<string, unknown>) { super(message); }
 }
 
 type Listener = (origin: symbol) => void;
@@ -82,8 +87,21 @@ export function errorCode(error: unknown): string {
   return error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' ? error.code : '';
 }
 
+/** The fields of a cycle or of a chain that is too deep, from a schema save that was refused. */
+export function dependencyPath(error: unknown): ComputedDependencyNode[] | null {
+  if (!error || typeof error !== 'object' || !('details' in error)) return null;
+  const path = (error.details as { path?: unknown } | undefined)?.path;
+  return Array.isArray(path) && path.every(node => !!node && typeof node === 'object' && typeof (node as ComputedDependencyNode).name === 'string')
+    ? path as ComputedDependencyNode[] : null;
+}
+
 export function failureText(error: unknown, fallback: string): string {
   const code = errorCode(error);
+  if (code === 'DATABASE_FORMULA_CYCLE' || code === 'DATABASE_FORMULA_DEPTH') {
+    const path = dependencyPath(error)?.map(node => `“${node.name}”`).join(' → ');
+    return code === 'DATABASE_FORMULA_CYCLE' ? `公式和汇总形成了循环引用${path ? `：${path}` : ''}，未保存。`
+      : `公式和汇总的引用层级超过上限${path ? `：${path}` : ''}，未保存。`;
+  }
   if (conflictCodes.has(code)) return '数据已在别处修改，已重新载入最新内容。';
   if (code === 'PROPERTY_INVALID') return '这个值不符合字段设置，未保存。';
   if (code === 'DATABASE_ROW_LIMIT') return '这个数据库已达到行数上限。';

@@ -13,6 +13,7 @@ export function DatabaseViewPlugin() {
   const embedding = useDatabaseEmbedding();
   const [picking, setPicking] = useState(false);
   const [filter, setFilter] = useState('');
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => mergeRegister(
     editor.registerCommand(INSERT_DATABASE_VIEW_COMMAND, ({ databaseId, viewId }) => {
@@ -43,6 +44,14 @@ export function DatabaseViewPlugin() {
         editor.update(() => { editor.dispatchCommand(INSERT_DATABASE_VIEW_COMMAND, { databaseId: item.id }); });
       }}><span>{item.icon ?? '🗃️'} {item.title || '未命名数据库'}</span></button>)}
       {!choices.length && <p className="nb-db-empty-note">{embedding.databases?.length ? '没有匹配的数据库。' : '工作区里还没有数据库。'}</p>}
+      {!choices.length && embedding.createDatabase && <button className="nb-db-option nb-db-option-create" disabled={creating} onClick={() => {
+        setCreating(true);
+        void embedding.createDatabase!(filter.trim() || undefined).then(id => {
+          if (!id) return;
+          setPicking(false);
+          editor.update(() => { editor.dispatchCommand(INSERT_DATABASE_VIEW_COMMAND, { databaseId: id }); });
+        }).finally(() => setCreating(false));
+      }}><span>＋ {creating ? '正在创建…' : filter.trim() ? `新建数据库「${filter.trim()}」` : '新建数据库'}</span></button>}
     </div>
   </Modal>;
 }

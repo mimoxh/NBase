@@ -374,6 +374,16 @@ test('isolated PostgreSQL page path protects identity, revisions and retries', {
     assert.equal(contentGet.headers['content-type'], 'image/png');
     assert.equal(contentGet.headers['x-content-type-options'], 'nosniff');
     assert.deepEqual(contentGet.rawPayload, png);
+    const partial = await app.inject({ method: 'GET', url: `${base}/attachments/${attachmentId}/content`,
+      headers: { ...readHeaders, range: 'bytes=0-9' } });
+    assert.equal(partial.statusCode, 206);
+    assert.equal(partial.headers['content-range'], `bytes 0-9/${png.length}`);
+    assert.deepEqual(partial.rawPayload, png.subarray(0, 10));
+    const beyond = await app.inject({ method: 'GET', url: `${base}/attachments/${attachmentId}/content`,
+      headers: { ...readHeaders, range: 'bytes=99999999-' } });
+    assert.equal(beyond.statusCode, 416);
+    assert.equal(beyond.headers['content-range'], `bytes */${png.length}`);
+    assert.deepEqual(beyond.json(), { error: 'RANGE_NOT_SATISFIABLE' });
     const textId = randomUUID();
     const textBytes = Buffer.from('# 本机附件\n这是测试文件。\n');
     const textUpload = await app.inject({ method: 'PUT',

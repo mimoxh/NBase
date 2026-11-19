@@ -383,8 +383,10 @@ export function TemplateManagerDialog({ userId, workspaceId, csrfToken, source, 
   };
 
   return <Modal title="个人模板" wide onClose={close}>
-    <p className="dialog-description">使用 {'{{title}}'} 和 {'{{date}}'} 在应用模板时填入新页面标题和日期。</p>
-    <button type="button" className="nb-btn" disabled={locked} onClick={() => choose(null)}>新建个人模板</button>
+    <div className="nb-tpl-head">
+      <p className="dialog-description">使用 {'{{title}}'} 和 {'{{date}}'} 在应用模板时填入新页面标题和日期。</p>
+      <button type="button" className="nb-btn nb-tpl-new" disabled={locked} onClick={() => choose(null)}><Icon name="plus" size={14} />新建个人模板</button>
+    </div>
     {loading && <p role="status">正在读取模板…</p>}
     {loadError && <p role="alert">{loadError} <button type="button" className="nb-btn" onClick={retry}>重新读取</button></p>}
     {localLoading && <p role="status">正在读取本机模板记录…</p>}
@@ -399,20 +401,23 @@ export function TemplateManagerDialog({ userId, workspaceId, csrfToken, source, 
           onClick={() => restore(record)}>恢复此模板记录</button>
       </li>)}</ul>
     </section>}
-    <ul aria-label="已保存的个人模板">
+    <ul aria-label="已保存的个人模板" className="nb-tpl-list">
       {templates.filter(template => !template.builtin).map(template => <li key={template.id}>
-        <button type="button" className="nb-btn" aria-pressed={template.id === edit?.id} disabled={locked}
-          onClick={() => choose(template)}>{template.name}</button>
+        <button type="button" className="nb-tpl-item" aria-pressed={template.id === edit?.id} disabled={locked}
+          onClick={() => choose(template)}><Icon name="page" size={14} /><span>{template.name}</span></button>
       </li>)}
     </ul>
-    {edit && <>
+    {edit && <div className="nb-tpl-edit">
       <label className="field-label" htmlFor={nameId}>模板名称</label>
       <input id={nameId} type="text" value={name} maxLength={80} disabled={locked}
         onChange={event => setName(event.currentTarget.value)} />
-      <DocumentEditor key={edit.key} ref={editor} documentId={'template-edit:' + edit.key}
-        initialContent={edit.content as DocumentContent} workspaceId={workspaceId} readOnly={locked}
-        onChange={ignoreChange} onNotice={setEditingNotice} />
-    </>}
+      <div className="field-label">模板正文</div>
+      <div className="nb-tpl-editor">
+        <DocumentEditor key={edit.key} ref={editor} documentId={'template-edit:' + edit.key}
+          initialContent={edit.content as DocumentContent} workspaceId={workspaceId} readOnly={locked}
+          onChange={ignoreChange} onNotice={setEditingNotice} />
+      </div>
+    </div>}
     {editingNotice && <p role="status">{editingNotice}</p>}
     {pending && !unsaved && <p role="status" className="dialog-description">模板操作与正文已保留在本机，关闭或刷新后可恢复。</p>}
     {storageError && <p role="alert">本机存储：{storageError}</p>}

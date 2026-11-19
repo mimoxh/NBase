@@ -110,7 +110,7 @@ export class PgAuthRepository implements AuthRepository {
     const result = await this.pool.query<{ id: string; name: string; role: AuthWorkspace['role'] }>(`
       SELECT w.id, w.name, m.role
       FROM workspace_memberships m JOIN workspaces w ON w.id = m.workspace_id
-      WHERE m.user_id = $1
+      WHERE m.user_id = $1 AND m.removed_at IS NULL
       ORDER BY w.created_at, w.id
     `, [userId]);
     return result.rows.map((row) => ({ id: row.id, name: row.name, role: row.role }));

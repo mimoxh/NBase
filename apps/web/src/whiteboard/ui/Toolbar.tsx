@@ -1,11 +1,15 @@
-import { useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { WhiteboardShapeKind } from '@nbase/contracts';
 import { fillColors, highlighterColors, noteColors, strokeColors } from '../model';
 import type { BoardStore, Tool } from '../store';
 import { BoardIcon, type BoardIconName } from './icons';
 
-export function useBoard(store: BoardStore) {
-  useSyncExternalStore(store.subscribe, store.getVersion);
+/**
+ * Re-render on board changes. `key` narrows that to what a component shows: it re-renders only
+ * when the key changes, so chrome that ignores elements stays still while elements are dragged.
+ */
+export function useBoard(store: BoardStore, key?: (store: BoardStore) => string | number) {
+  useSyncExternalStore(store.subscribe, key ? () => key(store) : store.getVersion);
   return store;
 }
 
@@ -25,6 +29,9 @@ const tools: { tool: Tool; icon: BoardIconName; label: string; key: string }[] =
   { tool: 'frame', icon: 'frame', label: '框架', key: 'F' },
   { tool: 'mind', icon: 'mind', label: '思维导图', key: 'M' },
 ];
+
+/** Tools that make one element and then hand back to select; a double-click keeps them picked. */
+const lockable = new Set<Tool>(['shape', 'text', 'note', 'connector', 'frame', 'mind']);
 
 export function Swatches({ colors, value, onPick, label }: { colors: readonly string[]; value: string; onPick: (color: string) => void; label: string }) {
   return <div className="wb-swatches" role="radiogroup" aria-label={label}>
@@ -56,7 +63,7 @@ function ToolStyleStrip({ store }: { store: BoardStore }) {
     <Swatches label="填充" colors={fillColors.slice(0, 8)} value={style.fill} onPick={fill => store.setStyle({ fill })} />
   </div>;
   if (tool === 'eraser') return <div className="wb-strip"><div className="wb-seg" role="radiogroup" aria-label="橡皮擦方式">
-    {([['element', '整个元素', '碰到的元素整个删除'], ['stroke', '局部笔迹', '只擦掉笔迹被碰到的部分，其他元素不受影响']] as const).map(([mode, label, hint]) =>
+    {([['element', '整个元素', '碰到的元素整个删除'], ['stroke', '局部擦除', '只擦掉被碰到的部分；形状和连接线会先转成笔画']] as const).map(([mode, label, hint]) =>
       <button key={mode} type="button" role="radio" aria-checked={style.eraserMode === mode} className={style.eraserMode === mode ? 'on' : ''} title={hint}
         onClick={() => store.setStyle({ eraserMode: mode })}>{label}</button>)}
   </div></div>;
@@ -67,13 +74,47 @@ function ToolStyleStrip({ store }: { store: BoardStore }) {
   return null;
 }
 
+/**
+ * Whether a horizontally scrolling bar has hidden tools on either side, so narrow screens can show
+ * that more tools are there. The active tool is scrolled into view when it changes.
+ */
+function useScrollHints(active: string) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ left: false, right: false });
+  const update = useCallback(() => {
+    const bar = ref.current;
+    if (!bar) return;
+    const left = bar.scrollLeft > 2, right = bar.scrollLeft + bar.clientWidth < bar.scrollWidth - 2;
+    setEdges(old => old.left === left && old.right === right ? old : { left, right });
+  }, []);
+  useLayoutEffect(() => {
+    const bar = ref.current;
+    if (!bar) return;
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(bar);
+    return () => observer.disconnect();
+  }, [update]);
+  useEffect(() => {
+    const bar = ref.current;
+    const on = bar?.querySelector<HTMLElement>('.wb-tool.on');
+    if (!bar || !on || bar.scrollWidth <= bar.clientWidth) return;
+    const { offsetLeft: x, offsetWidth: w } = on;
+    if (x < bar.scrollLeft) bar.scrollTo({ left: x - 32 });
+    else if (x + w > bar.scrollLeft + bar.clientWidth) bar.scrollTo({ left: x + w - bar.clientWidth + 32 });
+  }, [active]);
+  const scroll = (direction: 1 | -1) => ref.current?.scrollBy({ left: direction * Math.max(120, (ref.current.clientWidth ?? 0) * 0.6), behavior: 'smooth' });
+  return { ref, update, scroll, ...edges };
+}
+
 export function Toolbar({ store, onImage, onCard, onDatabase, canUpload }: {
   store: BoardStore; onImage: () => void; onCard: () => void; canUpload: boolean;
   /** Absent where the host cannot show databases. */
   onDatabase?: (() => void) | undefined;
 }) {
-  useBoard(store);
+  useBoard(store, s => `${s.tool}|${s.toolLocked}|${s.readOnly}|${s.styleVersion}`);
   const [collapsed, setCollapsed] = useState(false);
+  const scroller = useScrollHints(store.tool);
   if (store.readOnly) return <div className="wb-toolbar wb-toolbar-ro" role="toolbar" aria-label="白板工具">
     {tools.slice(0, 2).map(item => <button key={item.tool} type="button" className={`wb-tool ${store.tool === item.tool ? 'on' : ''}`} aria-pressed={store.tool === item.tool}
       title={`${item.label} (${item.key})`} aria-label={item.label} onClick={() => store.setTool(item.tool)}><BoardIcon name={item.icon} /></button>)}
@@ -81,16 +122,21 @@ export function Toolbar({ store, onImage, onCard, onDatabase, canUpload }: {
   </div>;
   return <div className="wb-toolbar-wrap">
     {!collapsed && <ToolStyleStrip store={store} />}
-    <div className="wb-toolbar" role="toolbar" aria-label="白板工具">
-      {tools.map(item => <button key={item.tool} type="button" className={`wb-tool ${store.tool === item.tool ? 'on' : ''}`} aria-pressed={store.tool === item.tool}
-        title={`${item.label} (${item.key})`} aria-label={item.label}
-        onClick={() => { store.setTool(item.tool); setCollapsed(false); }}>
+    <div className="wb-toolbar-frame">
+    <div className="wb-toolbar" role="toolbar" aria-label="白板工具" ref={scroller.ref} onScroll={scroller.update}>
+      {tools.map(item => <button key={item.tool} type="button" className={`wb-tool ${store.tool === item.tool ? 'on' : ''} ${store.tool === item.tool && store.toolLocked ? 'locked' : ''}`} aria-pressed={store.tool === item.tool}
+        title={lockable.has(item.tool) ? `${item.label} (${item.key})，双击可连续创建` : `${item.label} (${item.key})`} aria-label={item.label}
+        onClick={() => { store.setTool(item.tool); setCollapsed(false); }}
+        onDoubleClick={() => { if (lockable.has(item.tool)) store.setTool(item.tool, true); }}>
         <BoardIcon name={item.tool === 'shape' ? store.style.shape : item.icon} />
       </button>)}
       <span className="wb-sep" />
       <button type="button" className="wb-tool" title={canUpload ? '插入图片' : '插入图片（需要可写的已登录工作区）'} aria-label="插入图片" disabled={!canUpload} onClick={onImage}><BoardIcon name="image" /></button>
       <button type="button" className="wb-tool" title="插入页面卡片" aria-label="插入页面卡片" onClick={onCard}><BoardIcon name="card" /></button>
       {onDatabase && <button type="button" className="wb-tool" title="插入数据库视图" aria-label="插入数据库视图" onClick={onDatabase}><BoardIcon name="table" /></button>}
+    </div>
+    {scroller.left && <button type="button" className="wb-scroll-hint left" tabIndex={-1} aria-label="向左滚动工具栏" onClick={() => scroller.scroll(-1)}>‹</button>}
+    {scroller.right && <button type="button" className="wb-scroll-hint right" tabIndex={-1} aria-label="向右滚动工具栏" onClick={() => scroller.scroll(1)}>›</button>}
     </div>
   </div>;
 }

@@ -665,4 +665,204 @@ ALTER TABLE page_versions
 CREATE INDEX page_versions_named_idx ON page_versions (workspace_id, page_id, revision) WHERE label IS NOT NULL;
 `,
   },
+  {
+    version: 26,
+    name: 'workspace_members',
+    sql: `
+-- Members and invitation links (docs/architecture/members.md). Personal rows reference memberships with
+-- ON DELETE RESTRICT, so a removed member keeps the row with removed_at set and every authorization path skips it.
+ALTER TABLE workspace_memberships ADD COLUMN removed_at timestamptz;
+ALTER TABLE workspace_memberships ADD CONSTRAINT workspace_memberships_owner_stays CHECK (role <> 'owner' OR removed_at IS NULL);
+
+-- One-time invitation links. Only the SHA-256 digest of the token is stored; the token itself is shown once.
+CREATE TABLE workspace_invitations (
+  id uuid PRIMARY KEY,
+  workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE RESTRICT,
+  token_hash bytea NOT NULL UNIQUE CHECK (octet_length(token_hash) = 32),
+  role text NOT NULL CHECK (role IN ('editor', 'viewer')),
+  created_by uuid NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL,
+  revoked_at timestamptz,
+  accepted_at timestamptz,
+  accepted_user_id uuid REFERENCES users (id) ON DELETE RESTRICT,
+  CONSTRAINT workspace_invitations_expiry CHECK (expires_at > created_at),
+  CONSTRAINT workspace_invitations_accepted CHECK ((accepted_at IS NULL) = (accepted_user_id IS NULL)),
+  CONSTRAINT workspace_invitations_single_end CHECK (revoked_at IS NULL OR accepted_at IS NULL)
+);
+CREATE INDEX workspace_invitations_workspace_idx ON workspace_invitations (workspace_id, created_at DESC, id);
+`,
+  },
+  {
+    version: 27,
+    name: 'database_schema_versions',
+    sql: `
+-- Schema history of databases (docs/architecture/databases.md). Every write of fields or views leaves the state it
+-- produced; restoring a version writes a new one. Versions are never cleaned up automatically.
+CREATE TABLE database_schema_versions (
+  workspace_id uuid NOT NULL,
+  database_id uuid NOT NULL,
+  revision bigint NOT NULL CHECK (revision > 0),
+  properties_json jsonb NOT NULL CHECK (jsonb_typeof(properties_json) = 'array'),
+  views_json jsonb NOT NULL CHECK (jsonb_typeof(views_json) = 'array'),
+  saved_at timestamptz NOT NULL,
+  actor_user_id uuid REFERENCES users (id) ON DELETE RESTRICT,
+  operation text NOT NULL CHECK (operation IN ('baseline', 'create', 'update', 'relation', 'restore')),
+  restored_from bigint CHECK (restored_from IS NULL OR restored_from > 0),
+  PRIMARY KEY (workspace_id, database_id, revision),
+  FOREIGN KEY (workspace_id, database_id) REFERENCES databases (workspace_id, page_id) ON DELETE RESTRICT,
+  CONSTRAINT database_schema_versions_restore CHECK ((operation = 'restore') = (restored_from IS NOT NULL))
+);
+INSERT INTO database_schema_versions (workspace_id, database_id, revision, properties_json, views_json, saved_at, actor_user_id, operation)
+SELECT workspace_id, page_id, revision, properties_json, views_json, updated_at, NULL, 'baseline' FROM databases;
+
+-- The computed worker takes queued rows a database at a time, upstream databases first.
+CREATE INDEX database_computed_dirty_database_idx ON database_computed_dirty (workspace_id, database_id);
+`,
+  },
+  {
+    version: 28,
+    name: 'page_comments_and_shares',
+    sql: `
+-- Comments and read-only share links (docs/architecture/collaboration.md). Neither touches page content or revisions.
+CREATE TABLE page_comment_threads (
+  id uuid PRIMARY KEY,
+  workspace_id uuid NOT NULL,
+  page_id uuid NOT NULL,
+  anchor_block_id text CHECK (anchor_block_id IS NULL OR anchor_block_id ~ '^[a-z0-9]{8}$'),
+  anchor_path integer[] NOT NULL CHECK (cardinality(anchor_path) BETWEEN 1 AND 16 AND 0 <= ALL (anchor_path)),
+  quote text NOT NULL CHECK (char_length(quote) <= 500),
+  created_by uuid NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  resolved_at timestamptz,
+  resolved_by uuid REFERENCES users (id) ON DELETE RESTRICT,
+  CONSTRAINT page_comment_threads_resolved CHECK ((resolved_at IS NULL) = (resolved_by IS NULL)),
+  FOREIGN KEY (workspace_id, page_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT
+);
+CREATE INDEX page_comment_threads_page_idx ON page_comment_threads (workspace_id, page_id, created_at, id);
+
+CREATE TABLE page_comments (
+  id uuid PRIMARY KEY,
+  workspace_id uuid NOT NULL REFERENCES workspaces (id) ON DELETE RESTRICT,
+  thread_id uuid NOT NULL REFERENCES page_comment_threads (id) ON DELETE RESTRICT,
+  author_user_id uuid NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
+  body text NOT NULL CHECK (char_length(body) BETWEEN 1 AND 4000),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  edited_at timestamptz,
+  deleted_at timestamptz
+);
+CREATE INDEX page_comments_thread_idx ON page_comments (thread_id, created_at, id);
+
+-- Only the SHA-256 digest of a share token is stored; the token itself is shown once.
+CREATE TABLE page_share_links (
+  id uuid PRIMARY KEY,
+  workspace_id uuid NOT NULL,
+  page_id uuid NOT NULL,
+  token_hash bytea NOT NULL UNIQUE CHECK (octet_length(token_hash) = 32),
+  include_children boolean NOT NULL,
+  created_by uuid NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL,
+  revoked_at timestamptz,
+  view_count integer NOT NULL DEFAULT 0 CHECK (view_count >= 0),
+  last_viewed_at timestamptz,
+  CONSTRAINT page_share_links_expiry CHECK (expires_at > created_at),
+  FOREIGN KEY (workspace_id, page_id) REFERENCES pages (workspace_id, id) ON DELETE RESTRICT
+);
+CREATE INDEX page_share_links_page_idx ON page_share_links (workspace_id, page_id, created_at DESC, id);
+`,
+  },
+  {
+    version: 29,
+    name: 'page_version_search_text',
+    sql: `
+-- Search text of page versions (docs/architecture/search.md). Derived and rebuildable from content_json; NULL means not
+-- derived yet, and such a version matches by title only until the background indexer fills it. New snapshots copy
+-- pages.search_text, so only versions saved before this migration wait for the indexer.
+ALTER TABLE page_versions ADD COLUMN search_text text;
+-- The current revision of every page already has its text in pages.
+UPDATE page_versions h SET search_text = p.search_text FROM pages p
+  WHERE p.workspace_id = h.workspace_id AND p.id = h.page_id AND p.revision = h.revision;
+CREATE INDEX page_versions_search_pending_idx ON page_versions (workspace_id, page_id, revision) WHERE search_text IS NULL;
+`,
+  },
+  {
+    version: 30,
+    name: 'page_collab_rooms',
+    sql: `
+-- Real-time co-editing rooms (docs/architecture/realtime.md). Revisions stay the authoritative content; a room holds the
+-- Yjs state built on top of base_revision. A new epoch is a fresh random value so an old offline client never mixes
+-- its updates into a rebuilt room.
+CREATE TABLE page_collab_rooms (
+  workspace_id uuid NOT NULL,
+  page_id uuid NOT NULL,
+  epoch bigint NOT NULL CHECK (epoch BETWEEN 1 AND 4294967295),
+  base_revision bigint NOT NULL,
+  saved_revision bigint,
+  saved_state_vector bytea CHECK (octet_length(saved_state_vector) <= 65536),
+  snapshot bytea,
+  snapshot_seq bigint NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, page_id),
+  CONSTRAINT page_collab_rooms_saved CHECK ((saved_revision IS NULL) = (saved_state_vector IS NULL)),
+  FOREIGN KEY (workspace_id, page_id) REFERENCES pages (workspace_id, id) ON DELETE CASCADE
+);
+
+CREATE TABLE page_collab_updates (
+  workspace_id uuid NOT NULL,
+  page_id uuid NOT NULL,
+  epoch bigint NOT NULL,
+  seq bigint NOT NULL CHECK (seq > 0),
+  "update" bytea NOT NULL CHECK (octet_length("update") <= 262144),
+  user_id uuid REFERENCES users (id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, page_id, epoch, seq),
+  FOREIGN KEY (workspace_id, page_id) REFERENCES page_collab_rooms (workspace_id, page_id) ON DELETE CASCADE
+);
+
+-- Every content write that did not come from the room's saver starts the room again from the new revision; a title-only
+-- write is pushed into the room; trashing a page ends its room. The notification is delivered only after commit.
+CREATE FUNCTION page_collab_external_write() RETURNS trigger LANGUAGE plpgsql AS $fn$
+DECLARE
+  room_epoch bigint;
+  next_epoch bigint;
+BEGIN
+  SELECT epoch INTO room_epoch FROM page_collab_rooms WHERE workspace_id = NEW.workspace_id AND page_id = NEW.id FOR UPDATE;
+  IF NOT FOUND THEN RETURN NEW; END IF;
+  IF NEW.deleted_at IS NOT NULL AND OLD.deleted_at IS NULL THEN
+    DELETE FROM page_collab_rooms WHERE workspace_id = NEW.workspace_id AND page_id = NEW.id;
+    PERFORM pg_notify('nbase_rooms', json_build_object('k', 'closed', 'w', NEW.workspace_id, 'p', NEW.id)::text);
+    RETURN NEW;
+  END IF;
+  IF current_setting('nbase.collab_epoch', true) IS NOT DISTINCT FROM room_epoch::text THEN RETURN NEW; END IF;
+  IF NEW.content_json IS DISTINCT FROM OLD.content_json THEN
+    next_epoch := floor(random() * 4294967294)::bigint + 1;
+    UPDATE page_collab_rooms SET epoch = next_epoch, base_revision = NEW.revision, saved_revision = NULL, saved_state_vector = NULL,
+      snapshot = NULL, snapshot_seq = 0, updated_at = now()
+      WHERE workspace_id = NEW.workspace_id AND page_id = NEW.id;
+    DELETE FROM page_collab_updates WHERE workspace_id = NEW.workspace_id AND page_id = NEW.id;
+    PERFORM pg_notify('nbase_rooms', json_build_object('k', 'reset', 'w', NEW.workspace_id, 'p', NEW.id, 'e', next_epoch,
+      'r', NEW.revision::text, 'why', current_setting('nbase.write_reason', true), 'a', current_setting('nbase.actor', true))::text);
+  ELSIF NEW.title IS DISTINCT FROM OLD.title THEN
+    PERFORM pg_notify('nbase_rooms', json_build_object('k', 'title', 'w', NEW.workspace_id, 'p', NEW.id, 'title', NEW.title)::text);
+  END IF;
+  RETURN NEW;
+END
+$fn$;
+CREATE TRIGGER pages_collab_external_write AFTER UPDATE OF content_json, title, deleted_at ON pages
+  FOR EACH ROW EXECUTE FUNCTION page_collab_external_write();`,
+  },
+  {
+    version: 31,
+    name: 'page_properties',
+    sql: `
+-- Properties an ordinary page defines for itself (docs/architecture/page-properties.md): an ordered JSON array of
+-- fields, each carrying its value. Rows keep using row_properties and the schema of their database.
+ALTER TABLE pages ADD COLUMN page_properties jsonb;
+ALTER TABLE pages ADD CONSTRAINT pages_page_properties CHECK (
+  page_properties IS NULL OR (kind = 'document' AND jsonb_typeof(page_properties) = 'array'));
+ALTER TABLE page_versions ADD COLUMN page_properties jsonb;
+ALTER TABLE page_versions ADD CONSTRAINT page_versions_page_properties
+  CHECK (page_properties IS NULL OR jsonb_typeof(page_properties) = 'array');`,
+  },
 ];

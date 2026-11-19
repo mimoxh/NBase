@@ -8,6 +8,7 @@ export type {
   LoginRequest,
 } from './auth.js';
 export { pageCoverIds } from './pages.js';
+export * from './pageProperties.js';
 export { calloutKinds, calloutTitleMaxLength, isCalloutKind, isCalloutTitle } from './callouts.js';
 export type { CalloutKind } from './callouts.js';
 export { builtinTemplateIds, defaultNoteTimeZone, pageTagLimit, quickCaptureLimit, quickCaptureMarker, tagNameLimit } from './notes.js';
@@ -30,8 +31,10 @@ export * from './databases.js';
 export * from './dateCells.js';
 export * from './calendar.js';
 export * from './whiteboards.js';
-export { computeRow, formulaFromDisplay, formulaFunctionNames, formulaLengthLimit, formulaToDisplay, parseFormula } from './formula.js';
-export type { FormulaResult, FormulaType, FormulaValue, RollupSource } from './formula.js';
+export { computeRow, computedDependencies, computedDependencyProblem, formulaDepthLimit, formulaFromDisplay, formulaFunctionNames, formulaLengthLimit,
+  formulaReferences, formulaToDisplay, parseFormula, rollupSourceDatabases } from './formula.js';
+export type { ComputedDependencyError, ComputedDependencyNode, ComputedDependencyProblem, FormulaResult, FormulaType, FormulaValue, RollupSource } from './formula.js';
+export * from './databaseHistory.js';
 export type { FavoriteListResponse } from './favorites.js';
 export { pageBacklinkLimit, pageIdFromReferenceUrl, pageReferenceLabelLimit, pageReferenceUrl } from './pageReferences.js';
 export type { PageBacklink, PageBacklinksResponse, SerializedPageReference } from './pageReferences.js';
@@ -44,7 +47,9 @@ export type { SerializedMermaidNode } from './mermaid.js';
 export { isFootnoteId, isMarkdownDate, isMarkdownFrontMatter, isMarkdownMetadataKey, markdownFrontMatterKey,
   markdownFrontMatterMaxBytes, markdownFrontMatterMaxDepth, markdownFrontMatterMaxNodes } from './markdownMetadata.js';
 export type { MarkdownFrontMatter, MarkdownMetadataValue } from './markdownMetadata.js';
-export type { SearchResponse, SearchResult } from './search.js';
+export { historySearchLimit, historySearchPendingCap } from './search.js';
+export type { HistorySearchMatch, PageHistorySearchResponse, SearchResponse, SearchResult, WorkspaceHistorySearchResponse,
+  WorkspaceHistorySearchResult } from './search.js';
 export { pageVersionLabelLimit, pageVersionNoteLimit } from './history.js';
 export type { PageHistoryResponse, PageVersion, PageVersionLabelRequest, PageVersionOperation, PageVersionSummary,
   RestorePageVersionRequest, TrashedPageDocument, TrashedPageSummary, TrashListResponse } from './history.js';
@@ -66,6 +71,9 @@ export function isHealthResponse(value: unknown): value is HealthResponse {
     && (data.persistence === 'not-configured' || data.persistence === 'accounts-only' || data.persistence === 'page-api');
 }
 export { tagNameKey } from './tagNameKey.js';
+export * from './members.js';
+export * from './collaboration.js';
+export * from './realtime.js';
 export * from './attachmentPresentation.js';
 export { blockAlignments, isTextStyle, parseTextStyle, textColorHex, textColorIds, textStyleCss } from './textStyle.js';
 export type { BlockAlignment, TextColorId, TextStyle } from './textStyle.js';

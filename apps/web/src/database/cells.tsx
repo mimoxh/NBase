@@ -133,8 +133,10 @@ export function SelectEditor({ def, value, multiple, onChange, onCreateOption, o
  * types open a picker; dates open the date editor. Values reach `onChange` already typed; null clears the cell.
  * A `locked` cell is written by a calendar subscription and only shows its value.
  */
-export function EditableCell({ row, def, editable, locked = false, onChange, onTitle, onCreateOption, onNavigate, relationHost }: {
+export function EditableCell({ row, def, editable, locked = false, onChange, onTitle, onCreateOption, onNavigate, relationHost, plainDates = false }: {
   row: DatabaseRow; def: PropertyDefinition; editable: boolean; locked?: boolean | undefined;
+  /** Date values that no calendar or reminder reads: the editor offers no repetition or reminders. */
+  plainDates?: boolean | undefined;
   relationHost?: RelationHost | undefined;
   onChange: (value: PropertyValue | null) => void;
   onTitle: (title: string) => void;
@@ -190,7 +192,7 @@ export function EditableCell({ row, def, editable, locked = false, onChange, onT
         {invalid && <span className="nb-db-invalid" role="alert">{invalid}</span>}
       </button>
       {editing && <DateEditor value={value === undefined || value === null || value === '' ? null : String(value)} label={def.name}
-        className="nb-db-pop nb-cal-pop" seed={takeCellEditSeed} onCommit={onChange} onInvalid={setInvalid}
+        className="nb-db-pop nb-cal-pop" plain={plainDates} seed={takeCellEditSeed} onCommit={onChange} onInvalid={setInvalid}
         onClose={() => { setEditing(false); onNavigate?.('stay'); }} />}
     </>;
   }

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="nb_bg">#FFFFFFFF</color>
+    <color name="nb_text">#FF1F2328</color>
+    <color name="nb_muted">#FF656D76</color>
+    <color name="nb_accent">#FF3E63DD</color>
+    <color name="nb_danger">#FFCF222E</color>
+    <color name="nb_launcher_bg">#FF3E63DD</color>
+</resources>

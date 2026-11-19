@@ -1,8 +1,9 @@
 import { isAlias, isMap, parseDocument, stringify, visit } from 'yaml';
 import {
-  isMarkdownFrontMatter, isMarkdownMetadataKey, markdownFrontMatterKey, markdownFrontMatterMaxBytes,
-  markdownFrontMatterMaxDepth, markdownFrontMatterMaxNodes, pageTagLimit, tagNameKey, tagNameLimit,
-  type MarkdownFrontMatter, type MarkdownMetadataValue, type StoredDocumentContent,
+  activeProperties, databaseTextValueLimit, isDateCellValue, isMarkdownFrontMatter, isMarkdownMetadataKey, isPagePropertyName,
+  markdownFrontMatterKey, markdownFrontMatterMaxBytes, markdownFrontMatterMaxDepth, markdownFrontMatterMaxNodes, pagePropertyDisplayValue,
+  pagePropertyLimit, pagePropertyNameKey, pagePropertyReservedNames, pageTagLimit, tagNameKey, tagNameLimit,
+  type MarkdownFrontMatter, type MarkdownMetadataValue, type PageProperty, type PropertyDefinition, type RowProperties, type StoredDocumentContent,
 } from '@nbase/contracts';
 
 export interface MarkdownFrontMatterResult {
@@ -92,7 +93,89 @@ export function getMarkdownFrontMatter(content: StoredDocumentContent): Markdown
   return isMarkdownFrontMatter(metadata) ? metadata : {};
 }
 
-export function addMarkdownFrontMatter(markdown: string, content: StoredDocumentContent, title: string, tags: readonly string[]): string {
-  const fields = { title, ...(tags.length ? { tags: [...tags] } : {}), ...getMarkdownFrontMatter(content) };
+/** Properties come after the tags; a metadata key that a property also uses is left out, so the property wins. */
+export function addMarkdownFrontMatter(markdown: string, content: StoredDocumentContent, title: string, tags: readonly string[],
+  properties: Readonly<Record<string, FrontMatterPropertyValue>> = {}): string {
+  const taken = new Set(Object.keys(properties).map(pagePropertyNameKey));
+  const metadata = Object.fromEntries(Object.entries(getMarkdownFrontMatter(content))
+    .filter(([key]) => key === 'date' || !taken.has(pagePropertyNameKey(key))));
+  const fields = { title, ...(tags.length ? { tags: [...tags] } : {}), ...properties, ...metadata };
   return `---\n${stringify(fields, { lineWidth: 0, aliasDuplicateObjects: false }).trimEnd()}\n---\n\n${markdown}`;
+}
+
+/** Not a type guard, so a string that is no date value still reads as a string afterwards. */
+const isDateText = (value: string): boolean => isDateCellValue(value);
+
+/** Values a page or row property takes in a Markdown header. */
+export type FrontMatterPropertyValue = string | number | boolean | string[];
+
+/**
+ * Header fields of a page's own properties, keyed by name. Empty values are left out; a select writes its option name.
+ */
+export function pagePropertiesFrontMatter(properties: readonly PageProperty[]): Record<string, FrontMatterPropertyValue> {
+  const fields: Record<string, FrontMatterPropertyValue> = {};
+  for (const property of properties) {
+    const value = pagePropertyDisplayValue(property);
+    if (value !== null && isMarkdownMetadataKey(property.name)) fields[property.name] = value;
+  }
+  return fields;
+}
+
+/**
+ * Header fields of a row's values in its database. Names that the header uses itself (title, tags, date) or that
+ * repeat without case are skipped, so a row exports like a page and imports back as one.
+ */
+export function rowPropertiesFrontMatter(definitions: readonly PropertyDefinition[], values: RowProperties): Record<string, FrontMatterPropertyValue> {
+  const fields: Record<string, FrontMatterPropertyValue> = {};
+  const used = new Set<string>(pagePropertyReservedNames);
+  for (const def of activeProperties([...definitions])) {
+    const key = pagePropertyNameKey(def.name);
+    if (used.has(key) || !isMarkdownMetadataKey(def.name)) continue;
+    const value = values[def.id];
+    if (value === undefined || value === null) continue;
+    let field: FrontMatterPropertyValue | undefined;
+    switch (def.type) {
+      case 'text': case 'url': case 'date': case 'number': field = value as string | number; break;
+      case 'checkbox': field = value === true; break;
+      case 'select': field = def.options?.find(option => option.id === value)?.name; break;
+      case 'multi_select': {
+        const names = (Array.isArray(value) ? value : []).map(id => def.options?.find(option => option.id === id)?.name)
+          .filter((name): name is string => name !== undefined);
+        field = names.length ? names : undefined;
+        break;
+      }
+      default: field = undefined;
+    }
+    if (field === undefined) continue;
+    used.add(key);
+    fields[def.name] = field;
+  }
+  return fields;
+}
+
+/**
+ * Turns the unknown top-level keys of an imported header into page properties: numbers become numbers, date values
+ * dates, and other scalars text. Lists, maps, `date` and names a property cannot take stay as metadata.
+ */
+export function propertiesFromFrontMatter(metadata: MarkdownFrontMatter): { properties: PageProperty[]; metadata: MarkdownFrontMatter } {
+  const properties: PageProperty[] = [];
+  const rest: MarkdownFrontMatter = {};
+  const used = new Set<string>();
+  for (const [key, value] of Object.entries(metadata)) {
+    const name = key.trim();
+    const nameKey = pagePropertyNameKey(name);
+    let property: PageProperty | null = null;
+    if (key !== 'date' && isPagePropertyName(name) && !used.has(nameKey) && properties.length < pagePropertyLimit) {
+      const id = crypto.randomUUID();
+      const text: string | null = typeof value === 'string' ? value : null;
+      if (typeof value === 'number' && Number.isFinite(value)) property = { id, name, type: 'number', value };
+      else if (text !== null && isDateText(text)) property = { id, name, type: 'date', value: text };
+      else if (text !== null && text.length <= databaseTextValueLimit && !/[\u0000\p{Cs}]/u.test(text)) {
+        property = { id, name, type: 'text', value: text || null };
+      } else if (typeof value === 'boolean') property = { id, name, type: 'text', value: String(value) };
+      else if (value === null) property = { id, name, type: 'text', value: null };
+    }
+    if (property) { properties.push(property); used.add(nameKey); } else rest[key] = value;
+  }
+  return { properties, metadata: rest };
 }

@@ -1,10 +1,13 @@
 import type { WhiteboardArrowhead, WhiteboardBoxElement, WhiteboardCard, WhiteboardConnector, WhiteboardDatabase, WhiteboardConnectorEnd, WhiteboardConnectorMode,
-  WhiteboardElement, WhiteboardShape, WhiteboardShapeKind, WhiteboardStrokeStyle, WhiteboardTextAlign } from '@nbase/contracts';
+  WhiteboardElement, WhiteboardPoint, WhiteboardShape, WhiteboardShapeKind, WhiteboardStrokeStyle, WhiteboardText, WhiteboardTextAlign } from '@nbase/contracts';
 import { whiteboardLimits } from '@nbase/contracts';
-import { aabb, boundsOfPoints, centerOf, clamp, distance, distanceToPolyline, dominantSide, elbowPath, exitPoint, expandRect, outlinePolygon,
-  pointInPolygon, pointInRect, rectsIntersect, rotatePoint, round, sampleCubic, sideVector, simplifyStroke, toLocal, toWorld, unionRects,
+import { aabb, boundsOfPoints, centerOf, clamp, dedupe, distance, distanceToPolyline, dominantSide, elbowPath, ellipseDistance, ellipseExit, exitPoint, expandRect,
+  outlinePolygon, pointInPolygon, pointInRect, rectsIntersect, rotatePoint, round, sampleCubic, sideVector, simplifyStroke, toLocal, toWorld, unionRects,
   type Box, type Point, type Rect, type Side } from './geometry';
-import { lineHeightOf, textBlockSize, type Measure } from './text';
+import { arrowheadPoints, roundRadius } from './render/paths';
+import { routeClear, routeElbow, routeRegion, routeThrough } from './route';
+import { clearRunFields, normalizeRuns } from './runs';
+import { layoutText, lineHeightOf, type Measure } from './text';
 
 /**
  * Pure board model. Elements are immutable values and every operation returns a new array that
@@ -57,8 +60,13 @@ export interface ConnectorPath {
   /** Unit vectors pointing out of the path at each end, for arrowheads. */
   startDirection: Point;
   endDirection: Point;
-  /** Elbow routes with a middle segment that can be dragged: where its handle sits, the axis it moves on and the shift in effect. */
-  bend?: { point: Point; axis: 'x' | 'y'; shift: number };
+  /**
+   * Elbow and straight connectors: the route as its handles address it, ends included. It is not
+   * simplified, so bend points the user just added stay addressable even before they bend anything.
+   */
+  route?: Point[];
+  /** Whether the route follows the user's bend points rather than the automatic router. */
+  manual?: boolean;
 }
 
 const isEdgeAnchor = (ax: number, ay: number) => ax === 0 || ax === 1 || ay === 0 || ay === 1;
@@ -96,22 +104,25 @@ function resolveEnd(end: WhiteboardConnectorEnd, other: Point, mode: WhiteboardC
   const { ax, ay } = end.bind!;
   const anchor = anchorPoint(target, ax, ay);
   const center = centerOf(target);
-  const outline = outlineOf(target);
+  const ellipse = target.type === 'shape' && target.shape === 'ellipse';
+  const outline = ellipse ? null : outlineOf(target);
+  const exit = (from: Point, to: Point) => ellipse ? ellipseExit(from, to, target) : exitPoint(from, to, outline!);
+  const contains = (point: Point) => ellipse ? ellipseDistance(toLocal(point, target), target) < 0 : pointInPolygon(point, outline!);
   const reach = target.w + target.h + 10;
   if (isEdgeAnchor(ax, ay)) {
     // Side anchors of non-rectangular shapes are pulled onto the real outline.
     const far = { x: center.x + (anchor.x - center.x) * 4, y: center.y + (anchor.y - center.y) * 4 };
-    const point = distance(anchor, center) < 0.01 ? anchor : exitPoint(center, far, outline);
+    const point = distance(anchor, center) < 0.01 ? anchor : exit(center, far);
     return { point, side: rotateSide(anchorSide(ax, ay), target.angle) };
   }
   if (mode === 'straight') {
-    return { point: pointInPolygon(other, outline) ? anchor : exitPoint(anchor, other, outline), side: dominantSide(other.x - anchor.x, other.y - anchor.y) };
+    return { point: contains(other) ? anchor : exit(anchor, other), side: dominantSide(other.x - anchor.x, other.y - anchor.y) };
   }
   // Interior anchors pick the side that faces the other end.
   const local = toLocal(other, target);
   const side = dominantSide((local.x - center.x) / Math.max(target.w, 1), (local.y - center.y) / Math.max(target.h, 1));
   const direction = rotatePoint(sideVector[side], { x: 0, y: 0 }, target.angle);
-  const point = exitPoint(center, { x: center.x + direction.x * reach, y: center.y + direction.y * reach }, outline);
+  const point = exit(center, { x: center.x + direction.x * reach, y: center.y + direction.y * reach });
   return { point, side: rotateSide(side, target.angle) };
 }
 
@@ -120,14 +131,166 @@ const unit = (from: Point, to: Point): Point => {
   return length < 1e-6 ? { x: 1, y: 0 } : { x: (to.x - from.x) / length, y: (to.y - from.y) / length };
 };
 
+/** Element kinds an automatic route goes around; frames are containers and freehand strokes are drawn over. */
+const obstacleTypes = new Set<El['type']>(['shape', 'note', 'text', 'image', 'card', 'database']);
+const gridCell = 512;
+/** Packs a cell position into one number; boards stay well inside ±16M units, and a collision would only add candidates. */
+const cellKey = (cx: number, cy: number) => (cx + 32768) * 65536 + (cy + 32768);
+
+interface Obstacle { el: BoxEl; rect: Rect; order: number }
+interface ObstacleGrid { cells: Map<number, Obstacle[]> }
+const obstacleGrids = new WeakMap<Index, ObstacleGrid>();
+
+/** Boxes that routes avoid, bucketed on a coarse grid; built once per board state. */
+function obstacleGrid(index: Index): ObstacleGrid {
+  const known = obstacleGrids.get(index);
+  if (known) return known;
+  const cells = new Map<number, Obstacle[]>();
+  const hidden = (el: BoxEl) => {
+    if (el.type !== 'shape' || !el.mindParentId) return false;
+    let cursor: El | undefined = index.get(el.mindParentId);
+    for (let steps = 0; cursor?.type === 'shape' && steps < 10_000; steps += 1) {
+      if (cursor.mindCollapsed) return true;
+      cursor = cursor.mindParentId ? index.get(cursor.mindParentId) : undefined;
+    }
+    return false;
+  };
+  let order = 0;
+  for (const el of index.values()) {
+    order += 1;
+    if (!isBox(el) || !obstacleTypes.has(el.type) || hidden(el)) continue;
+    const rect = aabb(el);
+    const item = { el, rect, order };
+    for (let cx = Math.floor(rect.x / gridCell); cx <= Math.floor((rect.x + rect.w) / gridCell); cx += 1) {
+      for (let cy = Math.floor(rect.y / gridCell); cy <= Math.floor((rect.y + rect.h) / gridCell); cy += 1) {
+        const key = cellKey(cx, cy);
+        const list = cells.get(key);
+        if (list) list.push(item); else cells.set(key, [item]);
+      }
+    }
+  }
+  const grid = { cells };
+  obstacleGrids.set(index, grid);
+  return grid;
+}
+
+/** Obstacles touching the region in board order, without the two bound ends. */
+function obstaclesIn(region: Rect, index: Index, skipA: string | undefined, skipB: string | undefined): Obstacle[] {
+  const { cells } = obstacleGrid(index);
+  const found: Obstacle[] = [];
+  const x0 = Math.floor(region.x / gridCell), x1 = Math.floor((region.x + region.w) / gridCell);
+  const y0 = Math.floor(region.y / gridCell), y1 = Math.floor((region.y + region.h) / gridCell);
+  const take = (item: Obstacle) => { if (item.el.id !== skipA && item.el.id !== skipB && rectsIntersect(region, item.rect)) found.push(item); };
+  // A huge region spans more cells than there are elements; scanning them all is then cheaper.
+  if ((x1 - x0 + 1) * (y1 - y0 + 1) > cells.size) for (const list of cells.values()) for (const item of list) take(item);
+  else for (let cx = x0; cx <= x1; cx += 1) for (let cy = y0; cy <= y1; cy += 1) for (const item of cells.get(cellKey(cx, cy)) ?? []) take(item);
+  // Elements spanning several cells are found once per cell.
+  found.sort((a, b) => a.order - b.order);
+  let kept = 0;
+  for (let i = 0; i < found.length; i += 1) if (!kept || found[kept - 1] !== found[i]) found[kept++] = found[i]!;
+  found.length = kept;
+  return found;
+}
+
+/**
+ * A box that contains everything the connector can draw, worked out without routing it, so
+ * drawing can skip connectors outside the view before paying for their routes.
+ */
+export function connectorRegion(connector: Connector, index: Index): Rect {
+  const source = boundTarget(connector.source, index), target = boundTarget(connector.target, index);
+  const region = routeRegion(rawEnd(connector.source, index), rawEnd(connector.target, index), [source && aabb(source), target && aabb(target)]);
+  // Curves reach out up to 240 units past their ends.
+  const grown = connector.mode === 'curve' ? expandRect(region, 240) : connector.bend ? expandRect(region, Math.abs(connector.bend)) : region;
+  return connector.waypoints?.length ? unionRects([grown, expandRect(boundsOfPoints(connector.waypoints), 40)])! : grown;
+}
+
+interface RouteEntry { connector: Connector; source: BoxEl | null; target: BoxEl | null; obstacles: readonly Rect[] | null; path: ConnectorPath }
+/**
+ * Last route per connector id. A route depends only on the connector's ends and bend points, the
+ * geometry of the elements it is bound to and the boxes around it, so it is compared by those
+ * values: saving, undoing and copying rebuild elements as new objects without moving them.
+ */
+const routeCache = new Map<string, RouteEntry>();
+const routeCacheLimit = 50_000;
+/** Routes already worked out for one board state. */
+const routeMemo = new WeakMap<Index, Map<string, { connector: Connector; path: ConnectorPath }>>();
+
+const sameBoxGeometry = (a: BoxEl | null, b: BoxEl | null) => a === b || (!!a && !!b && a.type === b.type && a.x === b.x && a.y === b.y
+  && a.w === b.w && a.h === b.h && a.angle === b.angle && (a.type !== 'shape' || a.shape === (b as WhiteboardShape).shape));
+const sameRects = (a: readonly Rect[] | null, b: readonly Rect[] | null) => a === b || (!!a && !!b && a.length === b.length
+  && a.every((r, i) => { const s = b[i]!; return r.x === s.x && r.y === s.y && r.w === s.w && r.h === s.h; }));
+const samePointList = (a: readonly WhiteboardPoint[] | undefined, b: readonly WhiteboardPoint[] | undefined) => a === b
+  || ((a?.length ?? 0) === (b?.length ?? 0) && (a ?? []).every((p, i) => p.x === b![i]!.x && p.y === b![i]!.y));
+/** Whether two ends resolve alike; a bound end ignores its stored position while its element exists. */
+const sameEnd = (a: WhiteboardConnectorEnd, b: WhiteboardConnectorEnd, bound: boolean) => bound
+  ? a.bind!.elementId === b.bind?.elementId && a.bind!.ax === b.bind.ax && a.bind!.ay === b.bind.ay
+  : !a.bind === !b.bind && a.x === b.x && a.y === b.y && (!a.bind || a.bind.elementId === b.bind?.elementId);
+/** Whether everything but the surrounding boxes is as when the entry was routed. */
+function sameRouteEnds(entry: RouteEntry, connector: Connector, source: BoxEl | null, target: BoxEl | null): boolean {
+  const old = entry.connector;
+  if (old !== connector && (old.mode !== connector.mode || old.bend !== connector.bend || !samePointList(old.waypoints, connector.waypoints)
+    || !sameEnd(old.source, connector.source, !!source && !!entry.source) || !sameEnd(old.target, connector.target, !!target && !!entry.target))) return false;
+  return sameBoxGeometry(entry.source, source) && sameBoxGeometry(entry.target, target);
+}
+
+/** Board states that are steps of a running gesture rather than settled states. */
+const provisionalStates = new WeakSet<Index>();
+/**
+ * Mark a board state as an in-between step of a gesture. Connectors in it whose own ends did not
+ * move keep their last route while the moving elements stay clear of it, instead of searching
+ * again on every pointer move; the settled state after the gesture is routed exactly as usual.
+ */
+export function markProvisional(index: Index) { provisionalStates.add(index); }
+
 export function connectorPath(connector: Connector, index: Index): ConnectorPath {
+  let memo = routeMemo.get(index);
+  if (!memo) { memo = new Map(); routeMemo.set(index, memo); }
+  const known = memo.get(connector.id);
+  if (known?.connector === connector) return known.path;
+  const source = boundTarget(connector.source, index), target = boundTarget(connector.target, index);
+  const automatic = connector.mode === 'elbow' && !connector.waypoints?.length && !connector.bend;
+  const obstacles = automatic ? obstaclesIn(connectorRegion(connector, index), index, source?.id, target?.id).map(item => item.rect) : null;
+  const cached = routeCache.get(connector.id);
+  let path: ConnectorPath;
+  const sameEnds = cached ? sameRouteEnds(cached, connector, source, target) : false;
+  if (cached && sameEnds && sameRects(cached.obstacles, obstacles)) {
+    path = cached.path;
+    cached.connector = connector; cached.source = source; cached.target = target;
+  } else if (cached && sameEnds && obstacles && provisionalStates.has(index) && routeClear(cached.path.points, obstacles)) {
+    // The entry keeps the boxes it was routed around, so the settled state compares against those and routes afresh.
+    path = cached.path;
+  } else {
+    path = computePath(connector, index, source, target, obstacles);
+    if (routeCache.size >= routeCacheLimit) routeCache.clear();
+    routeCache.set(connector.id, { connector, source, target, obstacles, path });
+  }
+  memo.set(connector.id, { connector, path });
+  return path;
+}
+
+const pointsOf = (list: readonly WhiteboardPoint[] | undefined): Point[] => list?.map(point => ({ x: point.x, y: point.y })) ?? [];
+
+function computePath(connector: Connector, index: Index, source: BoxEl | null, target: BoxEl | null, obstacles: readonly Rect[] | null): ConnectorPath {
   const rawSource = rawEnd(connector.source, index), rawTarget = rawEnd(connector.target, index);
-  const start = resolveEnd(connector.source, rawTarget, connector.mode, index);
-  const end = resolveEnd(connector.target, rawSource, connector.mode, index);
+  const waypoints = connector.mode === 'curve' ? [] : pointsOf(connector.waypoints);
+  // With bend points, each end faces its nearest bend point instead of the far end.
+  const start = resolveEnd(connector.source, waypoints[0] ?? rawTarget, connector.mode, index);
+  const end = resolveEnd(connector.target, waypoints.at(-1) ?? rawSource, connector.mode, index);
+  const ends = (points: Point[]) => ({ startDirection: unit(points[1] ?? end.point, points[0]!), endDirection: unit(points.at(-2) ?? start.point, points.at(-1)!) });
   if (connector.mode === 'elbow') {
-    const { points, free } = elbowPath(start.point, start.side, end.point, end.side, connector.bend ?? 0);
-    return { points, startDirection: unit(points[1] ?? end.point, points[0]!), endDirection: unit(points.at(-2) ?? start.point, points.at(-1)!),
-      ...(free ? { bend: { point: { x: (free.from.x + free.to.x) / 2, y: (free.from.y + free.to.y) / 2 }, axis: free.axis, shift: free.shift } } : {}) };
+    const from = { point: start.point, side: start.side, own: source && aabb(source) }, to = { point: end.point, side: end.side, own: target && aabb(target) };
+    if (waypoints.length) {
+      const route = routeThrough(from, waypoints, to);
+      const points = dedupe(route);
+      return { points, route, manual: true, ...ends(points) };
+    }
+    if (connector.bend) {
+      // Boards from before bend points keep their shifted middle segment until the route is edited.
+      const points = elbowPath(start.point, start.side, end.point, end.side, connector.bend).points;
+      return { points, route: points, manual: true, ...ends(points) };
+    }
+    const points = routeElbow(from, to, obstacles ?? []).points;
+    return { points, route: points, ...ends(points) };
   }
   if (connector.mode === 'curve') {
     const reach = clamp(distance(start.point, end.point) * 0.4, 20, 240);
@@ -136,7 +299,57 @@ export function connectorPath(connector: Connector, index: Index): ConnectorPath
     return { points: sampleCubic(start.point, c0, c1, end.point), curve: [start.point, c0, c1, end.point],
       startDirection: unit(c0, start.point), endDirection: unit(c1, end.point) };
   }
-  return { points: [start.point, end.point], startDirection: unit(end.point, start.point), endDirection: unit(start.point, end.point) };
+  const points = [start.point, ...waypoints, end.point];
+  return { points, route: points, manual: waypoints.length > 0, ...ends(points) };
+}
+
+/** Where a connector's label sits: halfway along its drawn length. */
+export function connectorLabelPoint(path: ConnectorPath): Point {
+  if (path.curve) return path.points[Math.floor(path.points.length / 2)]!;
+  let total = 0;
+  for (let i = 1; i < path.points.length; i += 1) total += distance(path.points[i]!, path.points[i - 1]!);
+  let walked = 0;
+  for (let i = 1; i < path.points.length; i += 1) {
+    const a = path.points[i - 1]!, b = path.points[i]!;
+    const segment = distance(a, b);
+    if (walked + segment >= total / 2 && segment > 0) { const t = (total / 2 - walked) / segment; return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }; }
+    walked += segment;
+  }
+  return path.points[0]!;
+}
+
+const samePoints = (a: readonly Point[], b: readonly Point[]) => a.length === b.length && a.every((p, i) => Math.abs(p.x - b[i]!.x) < 0.01 && Math.abs(p.y - b[i]!.y) < 0.01);
+
+/**
+ * A connector following the given bend points, rounded for storage. Elbow routes drop leading and
+ * trailing points that only repeat what the ends would do anyway, so a later move of a bound
+ * element re-plans the stretch next to it instead of dragging a stale stub along; when nothing is
+ * left the route is automatic again.
+ */
+export function withWaypoints(connector: Connector, points: readonly Point[], index: Index): Connector {
+  const { waypoints: _old, bend: _bend, ...rest } = connector;
+  void _old; void _bend;
+  const make = (list: readonly Point[]): Connector => list.length ? { ...rest, waypoints: list.map(p => ({ x: round(p.x), y: round(p.y) })) } : rest;
+  let list = points.slice(0, whiteboardLimits.maxWaypoints);
+  if (connector.mode === 'elbow' && list.length) {
+    const wanted = dedupe(connectorPath(make(list), index).points);
+    const same = (candidate: readonly Point[]) => samePoints(dedupe(connectorPath(make(candidate), index).points), wanted);
+    while (list.length && same(list.slice(1))) list = list.slice(1);
+    while (list.length && same(list.slice(0, -1))) list = list.slice(0, -1);
+  }
+  const next = make(list);
+  const key = (el: Connector) => JSON.stringify([el.waypoints ?? null, el.bend ?? null]);
+  return key(next) === key(connector) ? connector : next;
+}
+
+/** The two resolved ends only; cheaper than a full route when nothing in between matters. */
+export function connectorEnds(connector: Connector, index: Index): [Point, Point] {
+  const known = routeMemo.get(index)?.get(connector.id);
+  if (known?.connector === connector) return [known.path.points[0]!, known.path.points.at(-1)!];
+  const waypoints = connector.mode === 'curve' ? [] : pointsOf(connector.waypoints);
+  const rawSource = rawEnd(connector.source, index), rawTarget = rawEnd(connector.target, index);
+  return [resolveEnd(connector.source, waypoints[0] ?? rawTarget, connector.mode, index).point,
+    resolveEnd(connector.target, waypoints.at(-1) ?? rawSource, connector.mode, index).point];
 }
 
 // ── Bounds and hit testing ──────────────────────────────────────────────────
@@ -172,6 +385,10 @@ export function hitTest(el: El, point: Point, tolerance: number, index: Index): 
     return !pointInRect(local, expandRect(el, -Math.max(tolerance, 6)));
   }
   if (el.type !== 'shape') return true;
+  if (el.shape === 'ellipse') {
+    const d = ellipseDistance(local, el);
+    return Math.abs(d) <= el.strokeWidth / 2 + tolerance || (d < 0 && (el.fill !== 'transparent' || Boolean(el.text)));
+  }
   const outline = outlinePolygon(el.shape, { ...el, angle: 0 });
   const nearEdge = distanceToPolyline(local, outline, true) <= el.strokeWidth / 2 + tolerance;
   if (el.fill !== 'transparent' || el.text) return nearEdge || pointInPolygon(local, outline);
@@ -334,13 +551,24 @@ const replace = (elements: Elements, change: (el: El) => El): El[] => {
 const moveEnd = (end: WhiteboardConnectorEnd, dx: number, dy: number): WhiteboardConnectorEnd =>
   end.bind ? end : { ...end, x: end.x + dx, y: end.y + dy };
 
+/** Bend points mapped through a transform; absent stays absent. */
+function mapWaypoints(el: Connector, map: (point: Point) => Point): Connector {
+  return el.waypoints?.length ? { ...el, waypoints: el.waypoints.map(point => { const p = map(point); return { x: p.x, y: p.y }; }) } : el;
+}
+
 export function translate(elements: Elements, ids: ReadonlySet<string>, dx: number, dy: number): El[] {
   if (!dx && !dy) return elements as El[];
+  const shift = (point: Point) => ({ x: point.x + dx, y: point.y + dy });
   return replace(elements, el => {
-    if (!ids.has(el.id)) return el;
+    if (!ids.has(el.id)) {
+      // Bend points travel with a connector whose two bound ends both move, so the drawn shape moves as one piece.
+      if (el.type === 'connector' && el.waypoints?.length && el.source.bind && el.target.bind
+        && ids.has(el.source.bind.elementId) && ids.has(el.target.bind.elementId)) return mapWaypoints(el, shift);
+      return el;
+    }
     if (isBox(el)) return { ...el, x: el.x + dx, y: el.y + dy };
     // A connector dragged together with both of its targets keeps its bindings; free ends follow the drag.
-    return { ...el, source: moveEnd(el.source, dx, dy), target: moveEnd(el.target, dx, dy) };
+    return mapWaypoints({ ...el, source: moveEnd(el.source, dx, dy), target: moveEnd(el.target, dx, dy) }, shift);
   });
 }
 
@@ -396,7 +624,7 @@ export function scaleElements(elements: Elements, ids: ReadonlySet<string>, from
     if (!ids.has(el.id)) return el;
     if (!isBox(el)) {
       const end = (value: WhiteboardConnectorEnd) => value.bind ? value : { ...value, ...map(value) };
-      return { ...el, source: end(el.source), target: end(el.target) };
+      return mapWaypoints({ ...el, source: end(el.source), target: end(el.target) }, map);
     }
     const c = map(centerOf(el));
     // Rotated elements cannot shear, so they take the dominant factor on both axes.
@@ -414,7 +642,11 @@ export function rotateElements(elements: Elements, ids: ReadonlySet<string>, ori
     if (!ids.has(el.id)) return el;
     if (!isBox(el)) {
       const end = (value: WhiteboardConnectorEnd) => value.bind ? value : { ...value, ...rotatePoint(value, origin, delta) };
-      return { ...el, source: end(el.source), target: end(el.target) };
+      // Orthogonal routes stay orthogonal only through quarter turns; otherwise the bend points go back to automatic.
+      const quarter = Math.abs(Math.sin(delta * 2)) < 1e-6;
+      const turned = { ...el, source: end(el.source), target: end(el.target) };
+      if (el.mode === 'elbow' && !quarter) { const { waypoints: _drop, ...rest } = turned; void _drop; return rest; }
+      return mapWaypoints(turned, point => rotatePoint(point, origin, delta));
     }
     const c = rotatePoint(centerOf(el), origin, delta);
     return { ...el, x: c.x - el.w / 2, y: c.y - el.h / 2, angle: normalizeAngle(el.angle + delta) };
@@ -431,8 +663,8 @@ export function normalizeAngle(angle: number): number {
 
 /** Freeze a bound end at its current position, for when its target goes away. */
 function detached(connector: Connector, which: 'source' | 'target', index: Index): WhiteboardConnectorEnd {
-  const path = connectorPath(connector, index).points;
-  const point = which === 'source' ? path[0]! : path.at(-1)!;
+  const ends = connectorEnds(connector, index);
+  const point = which === 'source' ? ends[0] : ends[1];
   return { x: round(point.x), y: round(point.y) };
 }
 
@@ -471,12 +703,13 @@ export function cloneElements(source: Elements, index: Index, offset: Point, new
         const free = value.bind ? detached(original, which, index) : value;
         return { x: free.x + offset.x, y: free.y + offset.y };
       };
-      return { ...base, source: end(base.source, 'source'), target: end(base.target, 'target') };
+      return mapWaypoints({ ...base, source: end(base.source, 'source'), target: end(base.target, 'target') } as Connector,
+        point => ({ x: point.x + offset.x, y: point.y + offset.y }));
     }
     const moved = { ...base, x: base.x + offset.x, y: base.y + offset.y };
     if (moved.type === 'shape' && moved.mindParentId !== undefined) {
       if (moved.mindParentId && ids.has(moved.mindParentId)) return { ...moved, mindParentId: ids.get(moved.mindParentId)! };
-      // The copied top of a branch becomes a root, and a root has no side.
+      // The copied top of a branch becomes a root, and a root has no side; it keeps the direction of the map it came from.
       const { mindSide: _side, ...root } = moved;
       void _side;
       return { ...root, mindParentId: null };
@@ -605,11 +838,20 @@ export function applyStyle(elements: Elements, ids: ReadonlySet<string>, patch: 
     else if (el.type === 'pen') changes = { ...(patch.stroke && patch.stroke !== 'transparent' ? { color: patch.stroke } : {}), ...(patch.strokeWidth ? { strokeWidth: Math.max(0.5, patch.strokeWidth) } : {}) };
     else if (el.type === 'connector') changes = { ...pick(patch, ['strokeStyle', 'mode', 'startArrow', 'endArrow']),
       ...(patch.stroke && patch.stroke !== 'transparent' ? { stroke: patch.stroke } : {}), ...(patch.strokeWidth ? { strokeWidth: Math.max(0.5, patch.strokeWidth) } : {}) };
+    // An element-wide bold, size or colour covers the whole text, so the runs give up that field.
+    const runFields = (el.type === 'shape' || el.type === 'text' || el.type === 'note') && el.runs?.length
+      ? ([...(patch.bold !== undefined ? ['bold'] : []), ...(patch.fontSize !== undefined ? ['fontSize'] : []),
+        ...(patch.textColor !== undefined && el.type !== 'note' ? ['color'] : [])] as ('bold' | 'fontSize' | 'color')[]) : [];
     // An absent flag and `false` are the same style.
     const same = (a: unknown, b: unknown) => a === b || (typeof b === 'boolean' && Boolean(a) === b);
-    if (!Object.keys(changes).some(key => !same((el as unknown as Record<string, unknown>)[key], (changes as Record<string, unknown>)[key]))) return el;
-    const next = { ...el, ...changes } as El & { bold?: boolean };
+    const runsChange = runFields.some(key => (el as { runs?: { [k: string]: unknown }[] }).runs!.some(run => run[key] !== undefined));
+    if (!runsChange && !Object.keys(changes).some(key => !same((el as unknown as Record<string, unknown>)[key], (changes as Record<string, unknown>)[key]))) return el;
+    const next = { ...el, ...changes } as El & { bold?: boolean; runs?: WhiteboardText['runs']; fontSize?: number };
     if (next.bold === false) delete next.bold;
+    if (runsChange && 'runs' in next) {
+      const runs = clearRunFields(next.runs, runFields, { bold: next.bold, fontSize: next.fontSize! });
+      if (runs) next.runs = runs; else delete next.runs;
+    }
     return next;
   });
 }
@@ -626,11 +868,11 @@ export function shapeTextBox(el: WhiteboardShape): Rect {
 
 /** Height an element needs to show all of its text at its current width. */
 export function fittedHeight(el: BoxEl, measure: Measure): number {
-  if (el.type === 'text') return Math.max(lineHeightOf(el.fontSize), textBlockSize(el.text, el.w, el.fontSize, Boolean(el.bold), measure).height);
-  if (el.type === 'note') return textBlockSize(el.text, el.w - notePadding * 2, el.fontSize, Boolean(el.bold), measure).height + notePadding * 2;
+  if (el.type === 'text') return Math.max(lineHeightOf(el.fontSize), layoutText(el, el.w, measure).height);
+  if (el.type === 'note') return layoutText(el, el.w - notePadding * 2, measure).height + notePadding * 2;
   if (el.type === 'shape' && el.text) {
     const area = shapeTextBox(el);
-    const needed = textBlockSize(el.text, area.w, el.fontSize, Boolean(el.bold), measure).height + textPadding * 2;
+    const needed = layoutText(el, area.w, measure).height + textPadding * 2;
     // Curved and pointed shapes need extra height so the label clears their slanted edges.
     const factor = el.shape === 'rect' || el.shape === 'roundRect' ? 1 : el.shape === 'triangle' ? 1 / 0.65 * 1.2 : 1.35;
     return needed * factor;
@@ -641,7 +883,7 @@ export function fittedHeight(el: BoxEl, measure: Measure): number {
 /** Grow (never shrink, except free text) an element so its text fits; `autoWidth` lets free text follow its longest line. */
 export function fitText(el: BoxEl, measure: Measure, autoWidth = false): BoxEl {
   if (el.type === 'text') {
-    const w = autoWidth ? Math.max(24, Math.ceil(textBlockSize(el.text, Infinity, el.fontSize, Boolean(el.bold), measure).width) + 2) : el.w;
+    const w = autoWidth ? Math.max(24, Math.ceil(layoutText(el, Infinity, measure).width) + 2) : el.w;
     const next = { ...el, w };
     const h = fittedHeight(next, measure);
     return w === el.w && h === el.h ? el : { ...next, h };
@@ -661,26 +903,69 @@ const num = (value: number, limit: number = whiteboardLimits.maxCoordinate) => r
  */
 export function normalizeForSave(elements: Elements): El[] {
   const index = indexElements(elements);
-  return elements.map(el => {
+  const normalized = elements.map(el => {
     if (el.type === 'connector') {
-      const path = connectorPath(el, index).points;
+      const [first, last] = connectorEnds(el, index);
       const end = (value: WhiteboardConnectorEnd, point: Point): WhiteboardConnectorEnd => {
         const target = boundTarget(value, index);
         return target ? { x: num(point.x), y: num(point.y), bind: { elementId: target.id, ax: round(clamp(value.bind!.ax, 0, 1), 4), ay: round(clamp(value.bind!.ay, 0, 1), 4) } }
           : { x: num(value.x), y: num(value.y) };
       };
-      const { bend, ...rest } = el;
-      // A shift only means something on an elbow route; zero is the default and is not stored.
-      const shift = el.mode === 'elbow' && bend ? num(bend) : 0;
-      return { ...rest, source: end(el.source, path[0]!), target: end(el.target, path.at(-1)!), ...(shift ? { bend: shift } : {}) };
+      const { bend, waypoints, ...rest } = el;
+      const points = waypoints?.slice(0, whiteboardLimits.maxWaypoints).map(point => ({ x: num(point.x), y: num(point.y) })) ?? [];
+      // A shift only means something on an elbow route without bend points; zero is the default and is not stored.
+      const shift = el.mode === 'elbow' && bend && !points.length ? num(bend) : 0;
+      return { ...rest, source: end(el.source, first), target: end(el.target, last), ...(shift ? { bend: shift } : {}), ...(points.length ? { waypoints: points } : {}) };
     }
     const box = { x: num(el.x), y: num(el.y), w: num(Math.max(0, el.w), whiteboardLimits.maxSize), h: num(Math.max(0, el.h), whiteboardLimits.maxSize), angle: round(normalizeAngle(el.angle), 5) };
-    if (el.type === 'shape' && el.mindParentId && index.get(el.mindParentId)?.type !== 'shape') {
-      const { mindSide: _side, ...root } = el;
-      void _side;
-      return { ...root, ...box, mindParentId: null };
+    let next: El = { ...el, ...box };
+    if (next.type === 'shape' || next.type === 'text' || next.type === 'note') {
+      const { runs: _runs, ...rest } = next;
+      void _runs;
+      const runs = next.text ? normalizeRuns(next.runs, next) : undefined;
+      next = runs ? { ...rest, runs } as El : rest as El;
     }
-    return { ...el, ...box };
+    if (next.type === 'shape' && next.mindParentId && index.get(next.mindParentId)?.type !== 'shape') {
+      const { mindSide: _side, ...root } = next;
+      void _side;
+      return { ...root, mindParentId: null };
+    }
+    if (next.type === 'shape' && next.mindLayout && next.mindParentId !== null) {
+      const { mindLayout: _layout, ...rest } = next;
+      void _layout;
+      return rest;
+    }
+    return next;
+  });
+  // Concurrent reparenting can make a cycle even though each individual move was valid. Detach one
+  // deterministic node from each cycle so every replica normalizes to the same forest.
+  const byId = indexElements(normalized);
+  const detach = new Set<string>();
+  for (const element of normalized) {
+    if (element.type !== 'shape' || !element.mindParentId) continue;
+    const path: string[] = [];
+    const positions = new Map<string, number>();
+    let cursor: WhiteboardShape = element;
+    while (cursor.mindParentId) {
+      const repeated = positions.get(cursor.id);
+      if (repeated !== undefined) {
+        const cycle = path.slice(repeated);
+        detach.add(cycle.sort()[0]!);
+        break;
+      }
+      if (detach.has(cursor.id)) break;
+      positions.set(cursor.id, path.length);
+      path.push(cursor.id);
+      const parent: El | undefined = byId.get(cursor.mindParentId);
+      if (parent?.type !== 'shape') break;
+      cursor = parent;
+    }
+  }
+  return normalized.map(element => {
+    if (element.type !== 'shape' || !detach.has(element.id)) return element;
+    const { mindSide: _side, ...rest } = element;
+    void _side;
+    return { ...rest, mindParentId: null };
   });
 }
 
@@ -718,13 +1003,111 @@ export function erasePen(el: Pen, eraser: readonly Point[], radius: number, newI
     // Crumbs shorter than the stroke is wide read as dirt, not as ink.
     if (length < Math.max(1, el.strokeWidth / 2)) return;
     const flat = simplifyStroke(kept.flatMap(p => [p.x, p.y]), 0.2);
-    const bounds = boundsOfPoints(kept);
+    const sharp = sharpenCorners(pairsOf(flat));
+    const bounds = boundsOfPoints(sharp);
     pieces.push({ ...el, id: pieces.length ? newId() : el.id, x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, angle: 0,
-      points: flat.map((value, i) => round(value - (i % 2 ? bounds.y : bounds.x))) });
+      points: sharp.flatMap(p => [round(p.x - bounds.x), round(p.y - bounds.y)]) });
   };
   dense.forEach((point, i) => { if (gone[i]) flush(); else run.push(point); });
   flush();
   return pieces;
+}
+
+const pairsOf = (flat: readonly number[]): Point[] => {
+  const points: Point[] = [];
+  for (let i = 0; i + 1 < flat.length; i += 2) points.push({ x: flat[i]!, y: flat[i + 1]! });
+  return points;
+};
+
+/**
+ * Freehand strokes are drawn smoothed through the midpoints of their samples, which rounds off any
+ * corner made of one point. Two close neighbours around each sharp turn keep it a corner.
+ */
+export function sharpenCorners(points: readonly Point[]): Point[] {
+  if (points.length < 3) return [...points];
+  const out: Point[] = [points[0]!];
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const a = points[i - 1]!, c = points[i]!, b = points[i + 1]!;
+    const la = distance(a, c), lb = distance(c, b);
+    if (la < 1e-6 || lb < 1e-6) { out.push(c); continue; }
+    const ua = { x: (c.x - a.x) / la, y: (c.y - a.y) / la }, ub = { x: (b.x - c.x) / lb, y: (b.y - c.y) / lb };
+    const turn = Math.acos(clamp(ua.x * ub.x + ua.y * ub.y, -1, 1));
+    if (turn < Math.PI * 50 / 180) { out.push(c); continue; }
+    const da = Math.min(0.75, la / 3), db = Math.min(0.75, lb / 3);
+    out.push({ x: c.x - ua.x * da, y: c.y - ua.y * da }, c, { x: c.x + ub.x * db, y: c.y + ub.y * db });
+  }
+  out.push(points.at(-1)!);
+  return out;
+}
+
+function penFrom(id: string, points: readonly Point[], color: string, strokeWidth: number): Pen {
+  const sharp = sharpenCorners(points);
+  const bounds = boundsOfPoints(sharp);
+  return { id, type: 'pen', x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h, angle: 0,
+    points: sharp.flatMap(p => [round(p.x - bounds.x), round(p.y - bounds.y)]), color, strokeWidth };
+}
+
+/** A shape's outline as one closed polyline in world coordinates, starting halfway along its top. */
+export function shapeOutlinePoints(el: WhiteboardShape): Point[] {
+  const { w, h } = el;
+  let local: Point[];
+  if (el.shape === 'ellipse') {
+    local = Array.from({ length: 73 }, (_, i) => { const t = -Math.PI / 2 + i / 72 * Math.PI * 2; return { x: w / 2 + w / 2 * Math.cos(t), y: h / 2 + h / 2 * Math.sin(t) }; });
+  } else if (el.shape === 'roundRect') {
+    const r = Math.max(0, Math.min(roundRadius(w, h), w / 2, h / 2));
+    const arc = (cx: number, cy: number, from: number) => Array.from({ length: 9 }, (_, i) => {
+      const t = from + i / 8 * Math.PI / 2;
+      return { x: cx + r * Math.cos(t), y: cy + r * Math.sin(t) };
+    });
+    local = [{ x: w / 2, y: 0 }, ...arc(w - r, r, -Math.PI / 2), ...arc(w - r, h - r, 0), ...arc(r, h - r, Math.PI / 2), ...arc(r, r, Math.PI), { x: w / 2, y: 0 }];
+  } else {
+    const corners = outlinePolygon(el.shape, { x: 0, y: 0, w, h, angle: 0 });
+    const start = { x: (corners[0]!.x + corners[1]!.x) / 2, y: (corners[0]!.y + corners[1]!.y) / 2 };
+    local = [start, ...corners.slice(1), corners[0]!, start];
+  }
+  return local.map(p => toWorld({ x: el.x + p.x, y: el.y + p.y }, el));
+}
+
+/** Free text placed where a box draws its text, so the words stay put when the box is gone. */
+function textFrom(id: string, source: { text: string; runs?: WhiteboardText['runs']; fontSize: number; bold?: boolean; textAlign: WhiteboardTextAlign },
+  color: string, owner: Box, area: Rect, measure: Measure): WhiteboardText {
+  const layout = layoutText(source, area.w, measure);
+  const h = Math.max(lineHeightOf(source.fontSize), layout.height);
+  const top = area.y + Math.max(0, (area.h - h) / 2);
+  const center = toWorld({ x: owner.x + area.x + area.w / 2, y: owner.y + top + h / 2 }, owner);
+  return { id, type: 'text', x: center.x - area.w / 2, y: center.y - h / 2, w: area.w, h, angle: owner.angle, text: source.text,
+    ...(source.runs?.length ? { runs: source.runs } : {}), color, fontSize: source.fontSize, textAlign: source.textAlign, ...(source.bold ? { bold: true } : {}) };
+}
+
+/**
+ * A shape or connector redrawn as freehand strokes, so the eraser can take parts of it away. The
+ * outline (or line) keeps the element's id, colour and width, which keeps connectors bound to a
+ * shape attached; arrowheads become strokes of their own and any text becomes a free text element.
+ * Fills and dash patterns have no stroke form and are not carried over.
+ */
+export function elementToStrokes(el: El, index: Index, newId: () => string, measure: Measure): El[] | null {
+  if (el.type === 'shape') {
+    const color = el.strokeWidth > 0 ? el.stroke : el.fill === 'transparent' ? palette.ink : el.fill;
+    const result: El[] = [penFrom(el.id, shapeOutlinePoints(el), color, Math.max(0.5, el.strokeWidth || 2))];
+    if (el.text.trim()) result.push(textFrom(newId(), el, el.textColor, el, shapeTextBox(el), measure));
+    return result;
+  }
+  if (el.type === 'connector') {
+    const path = connectorPath(el, index);
+    const result: El[] = [penFrom(el.id, path.points, el.stroke, el.strokeWidth)];
+    for (const [kind, tip, direction] of [[el.startArrow, path.points[0]!, path.startDirection], [el.endArrow, path.points.at(-1)!, path.endDirection]] as const) {
+      const head = arrowheadPoints(kind, tip, direction, el.strokeWidth);
+      if (head) result.push(penFrom(newId(), head, el.stroke, el.strokeWidth));
+    }
+    if (el.text.trim()) {
+      const at = connectorLabelPoint(path);
+      const width = Math.ceil(layoutText({ text: el.text, fontSize: 14 }, Infinity, measure).width) + 2;
+      const label = { text: el.text, fontSize: 14, textAlign: 'center' as const };
+      result.push(textFrom(newId(), label, palette.ink, { x: at.x - width / 2, y: at.y - 20, w: width, h: 40, angle: 0 }, { x: 0, y: 0, w: width, h: 40 }, measure));
+    }
+    return result;
+  }
+  return null;
 }
 
 export interface BoardLocate {

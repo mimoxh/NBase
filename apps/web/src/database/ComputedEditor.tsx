@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { activeProperties, effectiveType, formulaFromDisplay, formulaToDisplay, isComputedProperty, parseFormula, rollupFunctions, type ComputedResultType, type PropertyDefinition, type RollupFunction } from '@nbase/contracts';
+import { activeProperties, computedDependencyProblem, effectiveType, formulaDepthLimit, formulaFromDisplay, formulaToDisplay, isComputedProperty, parseFormula, rollupFunctions, type ComputedResultType, type PropertyDefinition, type RollupFunction } from '@nbase/contracts';
 import { rollupLabels, typeLabels } from './labels';
 import type { DatabaseDataSource } from './source';
 
@@ -8,18 +8,26 @@ const resultNames: Record<ComputedResultType, string> = { number: '数字', text
 /** Edits a formula as text with field names, and saves it only when it parses. */
 export function FormulaEditor({ def, properties, onSave }: { def: PropertyDefinition; properties: PropertyDefinition[]; onSave: (next: NonNullable<PropertyDefinition['formula']>) => void }) {
   const [text, setText] = useState(() => formulaToDisplay(def.formula!.expression, properties));
-  const fields = activeProperties(properties).filter(p => !isComputedProperty(p) && p.type !== 'relation');
+  const fields = activeProperties(properties).filter(p => p.id !== def.id && p.type !== 'relation');
   const expression = useMemo(() => formulaFromDisplay(text, properties), [text, properties]);
   const parsed = useMemo(() => parseFormula(expression, properties), [expression, properties]);
   const blank = !text.trim();
+  // Only this database is known here; a loop through a rollup into another database is caught when saving.
+  const loop = useMemo(() => {
+    if (!parsed.ok) return null;
+    const draft = properties.map(p => p.id === def.id ? { ...p, formula: { expression, resultType: parsed.type } } : p);
+    return computedDependencyProblem('this', new Map([['this', draft]]));
+  }, [parsed, properties, def.id, expression]);
+  const loopText = loop && (loop.kind === 'cycle' ? '会形成循环引用：' : `引用层级超过 ${formulaDepthLimit} 层：`)
+    + loop.path.map(node => `“${node.name}”`).join(' → ');
   return <div className="nb-db-formula">
     <textarea className="nb-db-input" aria-label="公式" rows={3} spellCheck={false} value={text} onChange={event => setText(event.target.value)}
       placeholder={'例如 prop("单价") * prop("数量")'} />
-    <p className={parsed.ok || blank ? 'nb-db-empty-note' : 'nb-db-invalid-note'} role="status">
-      {parsed.ok ? `结果是${resultNames[parsed.type]}` : blank ? '可用 if、concat、round、sum、dateAdd 等函数' : parsed.error}</p>
+    <p className={(parsed.ok && !loop) || blank ? 'nb-db-empty-note' : 'nb-db-invalid-note'} role="status">
+      {loopText && !blank ? loopText : parsed.ok ? `结果是${resultNames[parsed.type]}` : blank ? '可用 if、concat、round、sum、dateAdd 等函数' : parsed.error}</p>
     <div className="nb-db-formula-fields" aria-label="插入字段">{fields.map(field => <button key={field.id} className="nb-db-tag nb-db-color-default"
       onClick={() => setText(`${text}prop("${field.name}")`)}>{field.name}</button>)}</div>
-    <button className="nb-btn nb-btn-primary" disabled={!parsed.ok && !blank} onClick={() => onSave({ expression: blank ? '' : expression, resultType: parsed.ok ? parsed.type : 'text' })}>保存公式</button>
+    <button className="nb-btn nb-btn-primary" disabled={!blank && (!parsed.ok || !!loop)} onClick={() => onSave({ expression: blank ? '' : expression, resultType: parsed.ok ? parsed.type : 'text' })}>保存公式</button>
   </div>;
 }
 
@@ -41,7 +49,7 @@ export function RollupEditor({ def, properties, source, onSave }: { def: Propert
     if (!relation?.relation) return;
     let cancelled = false;
     source.load(relation.relation.databaseId)
-      .then(doc => { if (!cancelled) { setTargets(activeProperties(doc.properties).filter(p => p.type !== 'rollup')); setProblem(''); } })
+      .then(doc => { if (!cancelled) { setTargets(activeProperties(doc.properties)); setProblem(''); } })
       .catch(() => { if (!cancelled) setProblem('关联的数据库暂时无法读取。'); });
     return () => { cancelled = true; };
   }, [source, relation?.relation?.databaseId, relation?.relation]);

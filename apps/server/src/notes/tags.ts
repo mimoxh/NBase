@@ -48,7 +48,7 @@ export function registerTagRoutes(app: FastifyInstance, pool: Pool, pages: PgPag
       const { workspaceId } = request.params;
       const actorId = await authorize(request, workspaceId, false);
       const result = await pool.query<TagRow>(`SELECT ${tagColumns} FROM workspace_tags t
-        JOIN workspace_memberships m ON m.workspace_id = t.workspace_id AND m.user_id = $2
+        JOIN workspace_memberships m ON m.workspace_id = t.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
         WHERE t.workspace_id = $1 ORDER BY t.name_key, t.id`, [workspaceId, actorId]);
       return reply.send({ tags: result.rows.map(toTag) });
     } catch (error) { return sendError(request, reply, error, secure); }

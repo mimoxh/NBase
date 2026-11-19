@@ -133,4 +133,14 @@ describe('date editor', () => {
     await act(() => { typed.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })); });
     expect(onCommit).toHaveBeenCalledWith('2026-11-20T01:15:00Z|tz=Asia/Shanghai');
   });
+
+  it('offers only dates and times when plain', async () => {
+    const onCommit = vi.fn();
+    await act(() => root.render(<DateEditor value="2026-11-16" label="日期" timeZone={tz} plain onCommit={onCommit} onClose={() => undefined} />));
+    expect(document.body.querySelector('[aria-label="重复"]')).toBeNull();
+    expect(document.body.querySelector('[aria-label="添加提醒"]')).toBeNull();
+    await act(() => setValue(document.body.querySelector<HTMLInputElement>('[aria-label="开始日期"]')!, '2026-11-18'));
+    await act(() => { [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === '完成')!.click(); });
+    expect(onCommit).toHaveBeenCalledWith('2026-11-18');
+  });
 });

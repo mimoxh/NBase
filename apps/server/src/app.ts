@@ -17,6 +17,11 @@ import { registerGraphRoutes } from './graph/routes.js';
 import { registerLinkPreviewRoutes } from './linkPreview/routes.js';
 import { registerPinyinIndexWorker } from './search/worker.js';
 import { registerCalendarRoutes, type CalendarOptions } from './calendar/routes.js';
+import { registerMemberRoutes } from './members/routes.js';
+import { registerCommentRoutes } from './comments/routes.js';
+import { registerShareRoutes } from './shares/routes.js';
+import { LiveHub } from './live/hub.js';
+import type { RouteOptions } from 'fastify';
 
 interface AuthOptions {
   repository: AuthRepository;
@@ -33,6 +38,12 @@ interface AppOptions {
   /** Defaults to fetching subscriptions and CalDAV calendars unless NBASE_CALENDAR_FETCH=off; no credential key. */
   calendar?: Partial<CalendarOptions>;
   readyCheck?: () => Promise<void>;
+  /** Public read-only share links; defaults to on unless NBASE_SHARE_LINKS=off. */
+  shareLinks?: boolean;
+  /** Receives the live hub, so tests can watch connections. */
+  onLive?: (hub: LiveHub) => void;
+  /** Sees every route as it is registered; the route audit test uses it to find write routes. */
+  onRoute?: (route: RouteOptions) => void;
 }
 
 export async function buildApp(options: AppOptions = {}) {
@@ -40,6 +51,7 @@ export async function buildApp(options: AppOptions = {}) {
   if (options.attachments && !options.auth) throw new Error('Attachment routes require authentication');
   if (options.notesPool && (!options.auth || !options.pages)) throw new Error('Note routes require authentication and pages');
   const app = Fastify({ logger: options.logger ?? false, bodyLimit: 2 * 1024 * 1024 });
+  if (options.onRoute) app.addHook('onRoute', options.onRoute);
   app.get('/api/health', async (): Promise<HealthResponse> => ({
     service: 'nbase',
     status: 'ok',
@@ -61,7 +73,13 @@ export async function buildApp(options: AppOptions = {}) {
 
   if (options.auth) {
     registerAuthRoutes(app, options.auth.repository, options.auth.publicOrigin);
-    if (options.pages) registerPageRoutes(app, options.pages, options.auth.repository, options.auth.publicOrigin);
+    const live = options.pages && options.notesPool ? new LiveHub(options.notesPool, options.auth.repository) : undefined;
+    if (live) {
+      await live.register(app, options.auth.publicOrigin);
+      options.pages!.collabRooms = live.rooms;
+      options.onLive?.(live);
+    }
+    if (options.pages) registerPageRoutes(app, options.pages, options.auth.repository, options.auth.publicOrigin, live);
     if (options.pages) registerLinkPreviewRoutes(app, options.auth.repository, options.auth.publicOrigin);
     if (options.pages && options.notesPool) {
       registerTagRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin);
@@ -73,6 +91,10 @@ export async function buildApp(options: AppOptions = {}) {
       registerCalendarRoutes(app, options.notesPool, options.pages, options.auth.repository, options.auth.publicOrigin, {
         fetchEnabled: process.env.NBASE_CALENDAR_FETCH !== 'off', ...options.calendar });
       registerPinyinIndexWorker(app, options.notesPool);
+      registerMemberRoutes(app, options.notesPool, options.auth.repository, options.auth.publicOrigin);
+      registerCommentRoutes(app, options.notesPool, options.auth.repository, options.auth.publicOrigin, live);
+      registerShareRoutes(app, options.notesPool, options.auth.repository, options.auth.publicOrigin, options.attachments,
+        options.shareLinks ?? process.env.NBASE_SHARE_LINKS !== 'off');
     }
     if (options.attachments) registerAttachmentRoutes(app, options.attachments,
       options.auth.repository, options.auth.publicOrigin);

@@ -36,6 +36,7 @@ export function ImportMarkdownDialog({ pendingImport, importResolving, createBus
   return <Modal title="导入 Markdown" onClose={() => { if (!importResolving) onClose(); }}>
     <p className="dialog-description">创建页面「{pendingImport.title || '未命名页面'}」。</p>
     {pendingImport.parsed.tagNames.length > 0 && <p>标签 {pendingImport.parsed.tagNames.join('、')}</p>}
+    {pendingImport.parsed.pageProperties.length > 0 && <p>属性 {pendingImport.parsed.pageProperties.map(property => property.name).join('、')}</p>}
     {pendingImport.parsed.warnings.length > 0 && <div className="import-warning"><strong>转换提示</strong><ul>
       {pendingImport.parsed.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div>}
     {error && <p role="alert">{error}</p>}

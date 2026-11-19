@@ -1,6 +1,7 @@
-import type { AuthSessionResponse, LoginRequest } from '@nbase/contracts';
+import { loginNamePattern, type AuthSessionResponse, type LoginRequest } from '@nbase/contracts';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { hashPassword, verifyPassword } from './password.js';
+import { FailureLimiter } from './limiter.js';
 import type { AuthRepository, StoredSession } from './repository.js';
 import {
   clearSessionCookie,
@@ -13,7 +14,6 @@ import {
   verifyCsrf,
 } from './session.js';
 
-const loginNamePattern = /^[a-z0-9][a-z0-9._-]{2,63}$/;
 const maxLoginPasswordBytes = 1024;
 const loginWindowMs = 15 * 60 * 1000;
 const maxFailedLogins = 5;
@@ -25,27 +25,9 @@ function isLoginRequest(value: unknown): value is LoginRequest {
     && typeof body.password === 'string' && Buffer.byteLength(body.password, 'utf8') <= maxLoginPasswordBytes;
 }
 
-function isJsonRequest(request: FastifyRequest): boolean {
+export function isJsonRequest(request: FastifyRequest): boolean {
   const contentType = request.headers['content-type'];
   return typeof contentType === 'string' && contentType.split(';', 1)[0]?.trim().toLowerCase() === 'application/json';
-}
-
-class LoginLimiter {
-  private readonly failures = new Map<string, { count: number; resetsAt: number }>();
-
-  blocked(ip: string, now = Date.now()): boolean {
-    const state = this.failures.get(ip);
-    if (state && state.resetsAt <= now) this.failures.delete(ip);
-    return (this.failures.get(ip)?.count ?? 0) >= maxFailedLogins || (this.failures.size >= 10000 && !this.failures.has(ip));
-  }
-
-  fail(ip: string, now = Date.now()): void {
-    const state = this.failures.get(ip);
-    if (!state || state.resetsAt <= now) this.failures.set(ip, { count: 1, resetsAt: now + loginWindowMs });
-    else state.count += 1;
-  }
-
-  succeed(ip: string): void { this.failures.delete(ip); }
 }
 
 function identityStatus(session: StoredSession | null): 'valid' | 'missing' | 'expired' {
@@ -56,7 +38,7 @@ function identityStatus(session: StoredSession | null): 'valid' | 'missing' | 'e
 
 export function registerAuthRoutes(app: FastifyInstance, repository: AuthRepository, publicOrigin: string): void {
   const { origin, secure } = publicOriginConfig(publicOrigin);
-  const limiter = new LoginLimiter();
+  const limiter = new FailureLimiter(maxFailedLogins, loginWindowMs);
   let dummyHashPromise: Promise<string> | undefined;
   const dummyHash = () => dummyHashPromise ??= hashPassword('nbase invalid user timing placeholder');
 
@@ -76,7 +58,11 @@ export function registerAuthRoutes(app: FastifyInstance, repository: AuthReposit
       }
 
       const workspaces = await repository.workspacesForUser(account.id);
-      if (workspaces.length === 0) return reply.code(503).send({ error: 'SERVICE_UNAVAILABLE' });
+      // A removed member looks exactly like a wrong password, so the response does not reveal the account.
+      if (workspaces.length === 0) {
+        limiter.fail(request.ip);
+        return reply.code(401).send({ error: 'AUTH_INVALID' });
+      }
       const tokens = createSessionTokens();
       if (!await repository.createSession(account, tokens)) {
         return reply.code(401).send({ error: 'AUTH_INVALID' });
@@ -109,6 +95,7 @@ export function registerAuthRoutes(app: FastifyInstance, repository: AuthReposit
       const csrfToken = csrfTokenForSession(token);
       if (!verifyCsrf(session.csrfHash, csrfToken)) return reply.code(401).send({ error: 'AUTH_REQUIRED' });
       const workspaces = await repository.workspacesForUser(session.userId);
+      if (workspaces.length === 0) return reply.header('Set-Cookie', clearSessionCookie(secure)).code(401).send({ error: 'AUTH_REQUIRED' });
       const response: AuthSessionResponse = {
         user: { id: session.userId, loginName: session.loginName },
         workspaces,

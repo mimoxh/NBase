@@ -1,10 +1,10 @@
 import type { WhiteboardTextAlign } from '@nbase/contracts';
 import { centerOf, expandRect, type Box, type Rect } from '../geometry';
 import { boundsOfIds, connectorPath, indexElements, isBox, mindVisibility, notePadding, penPoints, shapeTextBox, visibleElements, type El, type Elements } from '../model';
-import { isMindNode, mindChildSide, mindEdgeEnds, mindTogglePoint, mindToggleRadius } from '../mind';
-import { fontFamily, lineHeightOf, type Measure } from '../text';
-import { cardTitle, connectorLabelPoint, drawScene, wrapped, type ImageSource, type PageInfo } from './canvas';
-import { lightTheme, noteInk, themed, type Theme } from './colors';
+import { isMindNode, mindChildSide, mindEdgeEnds, mindSideOf, mindTogglePoint, mindToggleRadius } from '../mind';
+import { fontFamily, lineHeightOf, type Measure, type StyledText } from '../text';
+import { cardTitle, connectorLabelPoint, drawScene, layoutOf, type ImageSource, type PageInfo } from './canvas';
+import { lightTheme, noteInk, runColor, themed, type Theme } from './colors';
 import { arrowheadPath, connectorLinePath, dashArray, mindEdgePath, roundedRectPath, shapePath, strokePath } from './paths';
 
 export interface ExportOptions {
@@ -49,6 +49,32 @@ function textLines(lines: string[], area: Rect, fontSize: number, bold: boolean,
   return `<text font-size="${num(fontSize)}"${bold ? ' font-weight="600"' : ''} fill="${color}" text-anchor="${anchor}" dominant-baseline="central" xml:space="preserve">${spans}</text>`;
 }
 
+/** An element's text as SVG; styled pieces become tspans sharing each line's baseline. */
+function styledText(source: StyledText, area: Rect, align: WhiteboardTextAlign, color: string, vertical: 'top' | 'middle', dark: boolean, measure: Measure): string {
+  const layout = layoutOf(source, area.w, measure);
+  if (!source.runs?.length) {
+    const lines = layout.lines.map(line => line.segments.map(segment => segment.text).join(''));
+    return textLines(lines, area, source.fontSize, Boolean(source.bold), align, color, vertical);
+  }
+  const x = align === 'left' ? area.x : align === 'right' ? area.x + area.w : area.x + area.w / 2;
+  const anchor = align === 'left' ? 'start' : align === 'right' ? 'end' : 'middle';
+  let y = vertical === 'middle' ? area.y + (area.h - layout.height) / 2 : area.y;
+  const out: string[] = [];
+  for (const line of layout.lines) {
+    // The canvas centres each piece slightly below the line middle by size; an alphabetic baseline at the same spot matches it.
+    const baseline = y + line.height / 2 + line.size * 0.34;
+    const spans = line.segments.map(segment => {
+      const s = segment.style;
+      const attrs = [s.fontSize !== source.fontSize ? ` font-size="${num(s.fontSize)}"` : '', s.bold !== Boolean(source.bold) ? ` font-weight="${s.bold ? 600 : 400}"` : '',
+        s.italic ? ' font-style="italic"' : '', s.color ? ` fill="${runColor(s.color, dark)}"` : ''].join('');
+      return `<tspan${attrs}>${escape(segment.text)}</tspan>`;
+    }).join('');
+    out.push(`<text x="${num(x)}" y="${num(baseline)}" font-size="${num(source.fontSize)}"${source.bold ? ' font-weight="600"' : ''} fill="${color}" text-anchor="${anchor}" xml:space="preserve">${spans || ' '}</text>`);
+    y += line.height;
+  }
+  return out.join('');
+}
+
 const strokeAttrs = (color: string, width: number, style: 'solid' | 'dashed' | 'dotted') => {
   const dash = dashArray(style, width);
   return `stroke="${color}" stroke-width="${num(width)}" stroke-linecap="round" stroke-linejoin="round"${dash.length ? ` stroke-dasharray="${dash.map(num).join(' ')}"` : ''}`;
@@ -69,8 +95,9 @@ export function boardToSvg(elements: Elements, images: ReadonlyMap<string, strin
     if (!isMindNode(el) || !el.mindParentId || hidden.has(el.id)) continue;
     const parent = index.get(el.mindParentId);
     if (!parent || !isBox(parent)) continue;
-    const { from, to } = mindEdgeEnds(parent, el);
-    parts.push(`<path d="${mindEdgePath(from, to)}" fill="none" ${strokeAttrs(themed(el.stroke, dark), 2, 'solid')}/>`);
+    const side = mindSideOf(el, index);
+    const { from, to } = mindEdgeEnds(parent, el, side);
+    parts.push(`<path d="${mindEdgePath(from, to, side === 'down')}" fill="none" ${strokeAttrs(themed(el.stroke, dark), 2, 'solid')}/>`);
   }
   const titles: string[] = [];
   for (const el of elements) {
@@ -103,18 +130,18 @@ export function boardToSvg(elements: Elements, images: ReadonlyMap<string, strin
         body.push(`<path d="${shapePath(el.shape, el.w, el.h)}" fill="${el.fill === 'transparent' ? 'none' : themed(el.fill, dark)}" ${el.strokeWidth > 0 ? strokeAttrs(themed(el.stroke, dark), el.strokeWidth, el.strokeStyle) : 'stroke="none"'}/>`);
         if (el.text) {
           const area = shapeTextBox(el);
-          body.push(textLines(wrapped(el.text, area.w, el.fontSize, Boolean(el.bold), options.measure), area, el.fontSize, Boolean(el.bold), el.textAlign, themed(el.textColor, dark), 'middle'));
+          body.push(styledText(el, area, el.textAlign, themed(el.textColor, dark), 'middle', dark, options.measure));
         }
         break;
       }
       case 'note': {
         body.push(`<path d="${roundedRectPath(0, 0, el.w, el.h, 6)}" fill="${themed(el.color, dark)}"/>`);
         const area = { x: notePadding, y: notePadding, w: el.w - notePadding * 2, h: el.h - notePadding * 2 };
-        if (el.text) body.push(textLines(wrapped(el.text, area.w, el.fontSize, Boolean(el.bold), options.measure), area, el.fontSize, Boolean(el.bold), el.textAlign, noteInk(dark), 'top'));
+        if (el.text) body.push(styledText(el, area, el.textAlign, noteInk(dark), 'top', dark, options.measure));
         break;
       }
       case 'text':
-        body.push(textLines(wrapped(el.text, el.w, el.fontSize, Boolean(el.bold), options.measure), { x: 0, y: 0, w: el.w, h: el.h }, el.fontSize, Boolean(el.bold), el.textAlign, themed(el.color, dark), 'top'));
+        body.push(styledText(el, { x: 0, y: 0, w: el.w, h: el.h }, el.textAlign, themed(el.color, dark), 'top', dark, options.measure));
         break;
       case 'frame':
         body.push(`<rect width="${num(el.w)}" height="${num(el.h)}" fill="${theme.frameFill}" stroke="${theme.frameStroke}"/>`);

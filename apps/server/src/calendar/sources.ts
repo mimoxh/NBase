@@ -4,6 +4,7 @@ import type { CalendarAccountProvider, CalendarImportWarning, CalendarSyncCounts
 import type { Pool, PoolClient } from 'pg';
 import { WorkspaceRouteError } from '../auth/workspace.js';
 import { PageError, type PgPageRepository } from '../pages/repository.js';
+import { recordSchemaVersion } from '../databases/history.js';
 import { hrefKey } from './caldav/client.js';
 import { keptPropertyIds } from './locks.js';
 
@@ -150,6 +151,7 @@ export async function createSyncDatabase(client: PoolClient, pages: PgPageReposi
   await client.query(`INSERT INTO databases (workspace_id, page_id, properties_json, views_json, calendar_hidden)
     VALUES ($1, $2, $3::jsonb, $4::jsonb, true)`,
     [workspaceId, created.body.id, JSON.stringify(schema.properties), JSON.stringify(schema.views)]);
+  await recordSchemaVersion(client, workspaceId, created.body.id, actorId, 'create');
   return { databaseId: created.body.id, fields: schema.fields };
 }
 
@@ -202,7 +204,7 @@ export async function withWorkspaceLock<T>(pool: Pool, workspaceId: string, acto
   try {
     await client.query('BEGIN');
     const membership = await client.query<{ role: string }>(`SELECT m.role FROM workspaces w
-      JOIN workspace_memberships m ON m.workspace_id = w.id AND m.user_id = $2 WHERE w.id = $1 FOR UPDATE OF w`, [workspaceId, actorId]);
+      JOIN workspace_memberships m ON m.workspace_id = w.id AND m.user_id = $2 AND m.removed_at IS NULL WHERE w.id = $1 FOR UPDATE OF w`, [workspaceId, actorId]);
     if (!membership.rows[0]) throw new PageError(404, 'NOT_FOUND');
     if (membership.rows[0].role === 'viewer') throw new PageError(403, 'FORBIDDEN');
     const result = await action(client);

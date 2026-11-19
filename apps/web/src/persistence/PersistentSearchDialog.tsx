@@ -1,32 +1,36 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import type { PageSummary, SearchResult, WorkspaceTag } from '@nbase/contracts';
+import { useEffect, useRef, useState } from 'react';
+import type { PageSummary, SearchResult, WorkspaceHistorySearchResult, WorkspaceTag } from '@nbase/contracts';
 import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { ApiError, pageClient } from './client';
 import { PageIcon } from '../shell/PageTree';
 import { TagFilter } from './PageTags';
+import { invalidPhraseMessage, marked, pendingHistoryNotice, searchPhraseInvalid } from './searchText';
 
-export type PaletteCommand = 'new' | 'import' | 'trash' | 'theme';
+export type PaletteCommand = 'new' | 'import' | 'trash' | 'theme' | 'settings';
 
-const commands: { key: PaletteCommand; label: string; icon: 'plus' | 'upload' | 'trash' | 'moon' }[] = [
+const commands: { key: PaletteCommand; label: string; icon: 'plus' | 'upload' | 'trash' | 'moon' | 'settings' }[] = [
   { key: 'new', label: '新建页面', icon: 'plus' },
   { key: 'import', label: '导入 Markdown', icon: 'upload' },
   { key: 'trash', label: '打开回收站', icon: 'trash' },
   { key: 'theme', label: '切换深色模式', icon: 'moon' },
+  { key: 'settings', label: '打开设置', icon: 'settings' },
 ];
 
-function marked(text: string, phrase: string): ReactNode {
-  const at = text.toLocaleLowerCase().indexOf(phrase.toLocaleLowerCase());
-  if (at < 0 || !phrase) return text;
-  return <>{text.slice(0, at)}<mark>{text.slice(at, at + phrase.length)}</mark>{text.slice(at + phrase.length)}</>;
-}
+type HistoryState = { phase: 'idle' | 'loading' | 'ready' | 'error'; results: WorkspaceHistorySearchResult[]; truncated: boolean;
+  pending: number; error: string };
+const idleHistory: HistoryState = { phase: 'idle', results: [], truncated: false, pending: 0, error: '' };
 
-export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags = [], onOpen, onCommand, onClose, onAuthError }: {
+const savedAt = (iso: string) => new Date(iso).toLocaleString([], { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags = [], onOpen, onOpenHistory, onCommand, onClose, onAuthError }: {
   workspaceId: string;
   pages: PageSummary[];
   recentPages: PageSummary[];
   tags?: WorkspaceTag[] | undefined;
   onOpen: (result: SearchResult, phrase: string) => void;
+  /** Offers the history search; a result opens the page's history at the matching version. */
+  onOpenHistory?: ((result: WorkspaceHistorySearchResult, phrase: string) => void) | undefined;
   onCommand: (command: PaletteCommand) => void;
   onClose: () => void;
   onAuthError: () => void;
@@ -38,6 +42,9 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
   const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
+  const [withHistory, setWithHistory] = useState(false);
+  const [history, setHistory] = useState<HistoryState>(idleHistory);
+  const [historyRetry, setHistoryRetry] = useState(0);
   const [selected, setSelected] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const composingRef = useRef(false);
@@ -47,6 +54,7 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
   authErrorRef.current = onAuthError;
   const phrase = query.trim();
   const searching = Boolean(phrase || tagIds.length);
+  const historyOn = Boolean(onOpenHistory) && withHistory && Boolean(phrase);
 
   const pathOf = (pageId: string): string => {
     const names: string[] = [];
@@ -64,17 +72,21 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
 
   const titleResults = results.filter(item => item.matchField === 'title');
   const bodyResults = results.filter(item => item.matchField !== 'title');
-  const flat: ({ type: 'result'; result: SearchResult } | { type: 'recent'; page: PageSummary } | { type: 'command'; key: PaletteCommand })[] =
+  const historyResults = historyOn && history.phase === 'ready' ? history.results : [];
+  const flat: ({ type: 'result'; result: SearchResult } | { type: 'history'; history: WorkspaceHistorySearchResult }
+    | { type: 'recent'; page: PageSummary } | { type: 'command'; key: PaletteCommand })[] =
     searching
-      ? results.map(result => ({ type: 'result' as const, result }))
+      ? [...(phase === 'ready' ? results : []).map(result => ({ type: 'result' as const, result })),
+        ...historyResults.map(item => ({ type: 'history' as const, history: item }))]
       : [...recentPages.map(page => ({ type: 'recent' as const, page })), ...commands.map(item => ({ type: 'command' as const, key: item.key }))];
   const active = Math.min(selected, Math.max(0, flat.length - 1));
 
   const activate = (index: number) => {
     const item = flat[index];
     if (!item) return;
-    if ('result' in item) onOpen(item.result, item.result.highlight ?? phrase);
-    else if ('page' in item) {
+    if (item.type === 'history') onOpenHistory?.(item.history, item.history.version.highlight ?? phrase);
+    else if (item.type === 'result') onOpen(item.result, item.result.highlight ?? phrase);
+    else if (item.type === 'recent') {
       const summary = item.page;
       onOpen({ pageId: summary.id, title: summary.title, icon: summary.icon, parentId: summary.parentId,
         revision: summary.revision, updatedAt: summary.updatedAt, snippet: '', matchField: 'title' }, '');
@@ -89,9 +101,9 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
       setPhase('idle'); setResults([]); setTruncated(false);
       return;
     }
-    if (phrase.length > 100 || new TextEncoder().encode(phrase).length > 256 || /[\u0000-\u001f\u007f]/.test(phrase)) {
+    if (searchPhraseInvalid(phrase)) {
       setPhase('error'); setResults([]); setTruncated(false);
-      setError('关键词过长或含控制字符，请缩短后重试。');
+      setError(invalidPhraseMessage);
       return;
     }
     setPhase('loading'); setError(''); setResults([]); setTruncated(false);
@@ -112,8 +124,30 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
   }, [workspaceId, phrase, searching, tagIds, composing, retry]);
 
   useEffect(() => {
+    if (!historyOn || composing || searchPhraseInvalid(phrase)) { setHistory(idleHistory); return; }
+    setHistory({ ...idleHistory, phase: 'loading' });
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void pageClient.historySearch(workspaceId, phrase, controller.signal, tagIds).then(response => {
+        if (controller.signal.aborted) return;
+        setHistory({ phase: 'ready', results: response.results, truncated: response.truncated, pending: response.pendingVersions, error: '' });
+      }).catch(cause => {
+        if (controller.signal.aborted) return;
+        if (cause instanceof ApiError && cause.status === 401) authErrorRef.current();
+        setHistory({ ...idleHistory, phase: 'error', error: cause instanceof ApiError && cause.status === 401
+          ? '登录已失效，请重新登录。' : '历史版本搜索暂时不可用，请重试。' });
+      });
+    }, 250);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [workspaceId, phrase, historyOn, tagIds, composing, historyRetry]);
+
+  useEffect(() => {
     document.getElementById(`persistent-search-result-${active}`)?.scrollIntoView({ block: 'nearest' });
   }, [active, flat.length]);
+
+  const option = (position: number) => ({ role: 'option' as const, 'aria-selected': position === active,
+    id: `persistent-search-result-${position}`, className: `nb-pal-item ${position === active ? 'sel' : ''}`,
+    onMouseEnter: () => setSelected(position), onClick: () => activate(position) });
 
   return <Modal title="搜索" variant="palette" hideHeader onClose={onClose}>
     <div className="nb-pal-input"><Icon name="search" />
@@ -136,40 +170,31 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
         }} />
     </div>
     <TagFilter tags={tags} value={tagIds} onChange={setTagIds} />
+    {onOpenHistory && <label className="nb-pal-option"><input type="checkbox" checked={withHistory}
+      onChange={event => setWithHistory(event.target.checked)} />同时搜索历史版本</label>}
     <div id="persistent-search-results" className="nb-pal-list" role="listbox" aria-label="搜索结果">
       {!searching && <>
         {recentPages.length > 0 && <div className="nb-pal-group">最近访问</div>}
-        {recentPages.map((page, index) => {
-          const position = index;
-          return <button role="option" aria-selected={position === active} id={`persistent-search-result-${position}`}
-            className={`nb-pal-item ${position === active ? 'sel' : ''}`} key={page.id}
-            onMouseEnter={() => setSelected(position)} onClick={() => activate(position)}>
-            <PageIcon page={page} /><span className="nb-pal-main">
-              <span className="nb-pal-title">{page.title || '未命名页面'}</span>
-              <span className="nb-pal-path">{pathOf(page.id)}</span></span>
-          </button>;
-        })}
+        {recentPages.map((page, index) => <button key={page.id} {...option(index)}>
+          <PageIcon page={page} /><span className="nb-pal-main">
+            <span className="nb-pal-title">{page.title || '未命名页面'}</span>
+            <span className="nb-pal-path">{pathOf(page.id)}</span></span>
+        </button>)}
         <div className="nb-pal-group">命令</div>
-        {commands.map((command, order) => {
-          const position = recentPages.length + order;
-          return <button role="option" aria-selected={position === active} id={`persistent-search-result-${position}`}
-            className={`nb-pal-item ${position === active ? 'sel' : ''}`} key={command.key}
-            onMouseEnter={() => setSelected(position)} onClick={() => activate(position)}>
-            <Icon name={command.icon} size={15} /><span className="nb-pal-main"><span className="nb-pal-title">{command.label}</span></span>
-          </button>;
-        })}
+        {commands.map((command, order) => <button key={command.key} {...option(recentPages.length + order)}>
+          <Icon name={command.icon} size={15} /><span className="nb-pal-main"><span className="nb-pal-title">{command.label}</span></span>
+        </button>)}
       </>}
       {searching && phase === 'loading' && <p className="nb-pal-msg" role="status">正在搜索…</p>}
       {searching && phase === 'error' && <div className="nb-pal-msg" role="alert">{error}
         <button onClick={() => setRetry(value => value + 1)}>重试</button></div>}
-      {searching && phase === 'ready' && !results.length && <p className="nb-pal-msg" role="status">没有符合当前筛选的页面。</p>}
+      {searching && phase === 'ready' && !results.length && <p className="nb-pal-msg" role="status">{historyOn
+        ? '当前页面中没有匹配的内容。' : '没有符合当前筛选的页面。'}</p>}
       {searching && phase === 'ready' && <>
         {titleResults.length > 0 && <div className="nb-pal-group">{phrase ? '标题' : '符合标签'}</div>}
         {titleResults.map(result => {
-          const position = flat.findIndex(item => 'result' in item && item.result === result);
-          return <button role="option" aria-selected={position === active} id={`persistent-search-result-${position}`}
-            className={`nb-pal-item ${position === active ? 'sel' : ''}`} key={result.pageId}
-            onMouseEnter={() => setSelected(position)} onClick={() => activate(position)}>
+          const position = flat.findIndex(item => item.type === 'result' && item.result === result);
+          return <button key={result.pageId} {...option(position)}>
             <PageIcon page={result} /><span className="nb-pal-main">
               <span className="nb-pal-title">{marked(result.title || '未命名页面', result.highlight ?? phrase)}</span>
               <span className="nb-pal-path">{pathOf(result.pageId)}</span>
@@ -179,10 +204,8 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
         })}
         {bodyResults.length > 0 && <div className="nb-pal-group">正文</div>}
         {bodyResults.map(result => {
-          const position = flat.findIndex(item => 'result' in item && item.result === result);
-          return <button role="option" aria-selected={position === active} id={`persistent-search-result-${position}`}
-            className={`nb-pal-item ${position === active ? 'sel' : ''}`} key={result.pageId}
-            onMouseEnter={() => setSelected(position)} onClick={() => activate(position)}>
+          const position = flat.findIndex(item => item.type === 'result' && item.result === result);
+          return <button key={result.pageId} {...option(position)}>
             <PageIcon page={result} /><span className="nb-pal-main">
               <span className="nb-pal-title">{result.title || '未命名页面'}</span>
               <span className="nb-pal-path">{pathOf(result.pageId)}</span>
@@ -192,7 +215,30 @@ export function PersistentSearchDialog({ workspaceId, pages, recentPages, tags =
         })}
         {truncated && <p className="nb-pal-msg">仅显示前 30 条，请缩小搜索范围。</p>}
       </>}
+      {historyOn && <>
+        <div className="nb-pal-group">历史版本</div>
+        {history.phase === 'loading' && <p className="nb-pal-msg" role="status">正在搜索历史版本…</p>}
+        {history.phase === 'error' && <div className="nb-pal-msg" role="alert">{history.error}
+          <button onClick={() => setHistoryRetry(value => value + 1)}>重试</button></div>}
+        {history.phase === 'ready' && history.pending > 0 && <p className="nb-pal-note" role="note">{pendingHistoryNotice(history.pending)}</p>}
+        {history.phase === 'ready' && !history.results.length && <p className="nb-pal-msg" role="status">历史版本中没有匹配的内容。</p>}
+        {historyResults.map(item => {
+          const position = flat.findIndex(entry => entry.type === 'history' && entry.history === item);
+          const { version } = item;
+          const mark = version.highlight ?? phrase;
+          return <button key={item.pageId} {...option(position)}>
+            <PageIcon page={item} /><span className="nb-pal-main">
+              <span className="nb-pal-title">{item.title || '未命名页面'}</span>
+              <span className="nb-pal-path">修订 {version.revision} · {savedAt(version.savedAt)}{version.actor ? ` · ${version.actor.loginName}` : ''}
+                {' · '}{item.currentMatches ? '当前版本仍包含' : '仅在历史版本中'}{item.matchingVersions > 1 ? ` · ${item.matchingVersions} 个版本匹配` : ''}</span>
+              <span className="nb-pal-snip">{version.matchField === 'title' || version.snippet === '仅标题匹配'
+                ? marked(`标题：${version.title || '未命名页面'}`, mark) : marked(version.snippet, mark)}</span>
+            </span>
+          </button>;
+        })}
+        {history.phase === 'ready' && history.truncated && <p className="nb-pal-msg">历史版本仅显示前 20 个页面，请缩小搜索范围。</p>}
+      </>}
     </div>
-    <div className="modal-footnote">↑↓ 选择 · ↵ 打开 · Esc 关闭 · 只搜索已保存的页面</div>
+    <div className="modal-footnote">↑↓ 选择 · ↵ 打开 · Esc 关闭 · 只搜索已保存的页面{historyOn ? '与历史版本' : ''}</div>
   </Modal>;
 }

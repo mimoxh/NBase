@@ -12,7 +12,7 @@ const paths = {
   undo: 'M9 14 4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3', redo: 'm15 14 5-5-5-5M20 9H9a5 5 0 0 0 0 10h3',
   zoomIn: 'M11 8v6M8 11h6M20 20l-4.5-4.5M18 11a7 7 0 1 1-14 0 7 7 0 0 1 14 0', zoomOut: 'M8 11h6M20 20l-4.5-4.5M18 11a7 7 0 1 1-14 0 7 7 0 0 1 14 0',
   fit: 'M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5', minimap: 'M3 5h18v14H3zM13 11h6v6h-6z', grid: 'M4 4h16v16H4zM4 12h16M12 4v16',
-  play: 'M7 4l13 8-13 8z', download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5', more: 'M5 12h.01M12 12h.01M19 12h.01',
+  play: 'M7 4l13 8-13 8z', download: 'M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5', more: 'M5 12h.01M12 12h.01M19 12h.01', plus: 'M12 5v14M5 12h14',
   lock: 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3', unlock: 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 7.5-2',
   group: 'M3 3h7v7H3zM14 14h7v7h-7zM14 6h4v4M10 18H6v-4', ungroup: 'M3 3h7v7H3zM14 14h7v7h-7z',
   alignLeft: 'M4 3v18M8 7h10v4H8zM8 14h6v4H8z', alignHCenter: 'M12 3v18M6 7h12v4H6zM8 14h8v4H8z', alignRight: 'M20 3v18M6 7h10v4H6zM10 14h6v4h-6z',

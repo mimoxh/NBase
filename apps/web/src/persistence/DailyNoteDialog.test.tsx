@@ -25,9 +25,9 @@ const initial: DailyNoteStatus = {
 };
 
 const props = {
-  workspaceId: 'workspace', templates: [], parents: [],
+  workspaceId: 'workspace', templates: [],
   onClose: () => {}, onOpenPage: () => {}, onRestorePage: () => {},
-  onCreate: async () => {}, onCapture: async () => {}, onSaveSettings: async () => {},
+  onCreate: async () => {}, onCapture: async () => {},
 };
 
 it('retains record text and pins the target date across connection failure and retry', async () => {

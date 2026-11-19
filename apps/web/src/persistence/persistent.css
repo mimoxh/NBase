@@ -20,3 +20,6 @@
 .nbase-backlinks p,.nbase-backlinks small { color:var(--nb-muted); }
 .nbase-backlinks ul { list-style:none; margin:6px 0; padding:0; }
 .nbase-backlinks li button { display:grid; text-align:left; width:100%; padding:6px 8px; }
+.wb-host-head .nbase-backlinks { position:relative; margin:0 0 0 auto; padding:0; border:0; flex:none; font-size:13px; }
+.wb-host-head .nbase-backlinks > div { position:absolute; right:0; top:calc(100% + 6px); z-index:30; width:min(320px, calc(100vw - 24px)); max-height:50vh; overflow:auto;
+  padding:8px; background:var(--nb-bg); border:1px solid var(--nb-line); border-radius:var(--nb-radius); box-shadow:var(--nb-shadow); }

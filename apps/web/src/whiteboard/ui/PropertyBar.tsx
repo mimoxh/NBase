@@ -24,7 +24,8 @@ export function PropertyBar({ store, controller, onMore, onPresentFrame, onFitCa
   /** Present where page previews can be shown; resizes a preview card to its content. */
   onFitCard?: ((id: string) => void) | undefined;
 }) {
-  useBoard(store);
+  // Hidden during gestures, so dragging and resizing never re-render it frame by frame.
+  useBoard(store, s => !s.selection.size || s.editingId || s.activeEmbedId || s.inGesture || s.readOnly ? 'hidden' : s.version);
   const [panel, setPanel] = useState<Panel>(null);
   const selectionKey = [...store.selection].join(',');
   useEffect(() => { setPanel(null); }, [selectionKey]);
@@ -51,7 +52,7 @@ export function PropertyBar({ store, controller, onMore, onPresentFrame, onFitCa
   const { canGroup, canUngroup } = controller.groupState();
   const multi = selected.length > 1;
   const mind = controller.mindInfo();
-  const bent = connectors.some(el => el.mode === 'elbow' && el.bend !== undefined);
+  const routed = connectors.some(el => el.mode !== 'curve' && (el.bend !== undefined || el.waypoints !== undefined));
 
   const items: ReactNode[] = [];
   if (locked) items.push(<Btn key="unlock" icon="unlock" label="解锁 (Ctrl+Shift+L)" onClick={() => controller.toggleLock()} />);
@@ -66,7 +67,7 @@ export function PropertyBar({ store, controller, onMore, onPresentFrame, onFitCa
         onClick={() => controller.style({ mode: c.mode === 'straight' ? 'elbow' : c.mode === 'elbow' ? 'curve' : 'straight' })} />);
       items.push(<Btn key="arrows" icon={c.startArrow !== 'none' && c.endArrow !== 'none' ? 'arrowBoth' : c.endArrow !== 'none' ? 'arrowEnd' : c.startArrow !== 'none' ? 'arrowStart' : 'arrowNone'}
         label="箭头" on={panel === 'arrows'} onClick={() => toggle('arrows')} />);
-      if (bent) items.push(<Btn key="bend" label="折线中段恢复默认位置" onClick={() => controller.resetBend()}><span className="wb-fs">复位</span></Btn>);
+      if (routed) items.push(<Btn key="bend" label="去掉手动拐点，恢复自动路由" onClick={() => controller.resetRoute()}><span className="wb-fs">复位</span></Btn>);
     }
     if (mind) {
       if (mind.hasChildren) items.push(<Btn key="fold" label={mind.collapsed ? '展开分支' : '收起分支'} on={mind.collapsed}
@@ -121,7 +122,7 @@ export function PropertyBar({ store, controller, onMore, onPresentFrame, onFitCa
             onClick={() => controller.style({ [which]: value })}>{label}</button>)}</div></div>)}
       </div>}
       {panel === 'mind' && mind && <div className="wb-seg" role="radiogroup" aria-label="分支方向">
-        {([['right', '向右'], ['left', '向左'], ['both', '两侧']] as const).map(([layout, label]) => <button key={layout} type="button" role="radio"
+        {([['right', '向右'], ['left', '向左'], ['both', '两侧'], ['down', '向下']] as const).map(([layout, label]) => <button key={layout} type="button" role="radio"
           aria-checked={mind.layout === layout} className={mind.layout === layout ? 'on' : ''} onClick={() => controller.setMindLayout(layout)}>{label}</button>)}
       </div>}
       {panel === 'font' && <div className="wb-seg">{fontSizes.map(size => <button key={size} type="button" className={fontSize === size ? 'on' : ''} onClick={() => controller.style({ fontSize: size })}>{size}</button>)}</div>}

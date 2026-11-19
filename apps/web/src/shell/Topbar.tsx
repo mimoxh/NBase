@@ -36,6 +36,14 @@ export interface TopbarProps {
   pageMenuItems: (MenuItem | 'divider')[];
   hideHistory?: boolean;
   demo?: boolean;
+  /** Account that saved the shown revision. */
+  editedBy?: string | null;
+  /** Other members with this page open. */
+  presence?: { userId: string; loginName: string; editing: boolean }[];
+  /** Opens the comment panel; absent where pages cannot be commented on. */
+  onComments?: () => void;
+  commentsOpen?: boolean;
+  commentCount?: number;
 }
 
 export function Topbar(props: TopbarProps) {
@@ -52,13 +60,23 @@ export function Topbar(props: TopbarProps) {
       <span className="nb-crumb"><span className="nb-crumb-sep">/</span>
         <strong>{props.currentTitle || '未命名页面'}</strong></span>
     </nav>
-    {props.updatedAt && <span className="nb-edited">{relativeTime(props.updatedAt)}</span>}
+    {props.updatedAt && <span className="nb-edited">{relativeTime(props.updatedAt)}{props.editedBy ? ` · ${props.editedBy}` : ''}</span>}
     <div className="nb-top-actions">
+      {Boolean(props.presence?.length) && <ul className="nb-presence" aria-label="正在查看此页的成员">
+        {props.presence!.slice(0, 4).map(member => <li key={member.userId} className={member.editing ? 'nb-presence-editing' : ''}
+          title={`${member.loginName} ${member.editing ? '正在编辑' : '正在查看'}`}>
+          <span aria-hidden="true">{[...member.loginName][0]?.toUpperCase() ?? '?'}</span>
+          <span className="visually-hidden">{member.loginName} {member.editing ? '正在编辑' : '正在查看'}</span></li>)}
+        {props.presence!.length > 4 && <li title={props.presence!.slice(4).map(member => member.loginName).join('、')}>+{props.presence!.length - 4}</li>}
+      </ul>}
       <SavePill status={props.status} hasDraft={props.hasDraft} onRetry={props.onRetrySave} onDownload={props.onDownload} demo={Boolean(props.demo)} />
       <button className={`icon-button nb-star ${props.favorite ? 'nb-star-on' : ''}`}
         aria-label={props.favorite ? '取消收藏' : '收藏'} aria-pressed={props.favorite}
         disabled={props.disabled} onClick={props.onFavorite}>
         <Icon name={props.favorite ? 'star-filled' : 'star'} size={17} /></button>
+      {props.onComments && <button className={`icon-button nb-comment-toggle ${props.commentsOpen ? 'is-active' : ''}`} aria-label="评论"
+        title="评论" aria-pressed={Boolean(props.commentsOpen)} onClick={props.onComments}>
+        <Icon name="comment" size={17} />{Boolean(props.commentCount) && <span className="nb-comment-count">{props.commentCount}</span>}</button>}
       {!props.hideHistory && <button className="icon-button" aria-label="历史版本" title="历史版本" onClick={props.onHistory}>
         <Icon name="history" size={17} /></button>}
       <Menu label="页面操作" align="end" trigger={<Icon name="more" size={17} />} items={props.pageMenuItems} />

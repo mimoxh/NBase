@@ -1,3 +1,5 @@
+import { textColorHex, type TextColorId } from '@nbase/contracts';
+
 /**
  * Colours are stored as chosen in the light theme. The dark theme maps them at draw time instead
  * of storing a second palette: neutrals invert, pale fills become deep tints, mid tones stay.
@@ -44,6 +46,15 @@ export function themed(color: string, dark: boolean): string {
 
 /** Text drawn on a note stays readable on its (themed) paper. */
 export const noteInk = (dark: boolean) => dark ? '#e6e7e9' : '#1f2328';
+
+/** Dark-theme values of the editor's --nb-c-* palette (see formats.css); the stored run only names the token. */
+const darkRunColors: Record<TextColorId, string> = {
+  gray: '#9b9b9b', brown: '#ba856f', orange: '#c77d48', yellow: '#ca9849', green: '#529e72',
+  blue: '#5e9fd0', purple: '#9d68d3', pink: '#d15796', red: '#df5452',
+};
+
+/** Palette colour of a text run, matching the document editor's tokens in both themes. */
+export const runColor = (id: TextColorId, dark: boolean) => dark ? darkRunColors[id] : textColorHex[id].text;
 
 export interface Theme {
   dark: boolean;

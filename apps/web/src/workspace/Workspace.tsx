@@ -21,6 +21,7 @@ import { Modal } from '../components/Modal';
 import { initialWorkspace } from './fixtures';
 import { ancestors, canMove, descendants, workspaceReducer, type Action, type Page } from './model';
 import { useTheme } from '../shell/theme';
+import { AppearanceSettings, SettingsDialog } from '../shell/SettingsDialog';
 import { Sidebar } from '../shell/Sidebar';
 import { Topbar } from '../shell/Topbar';
 import { PageHeader } from '../shell/PageHeader';
@@ -28,6 +29,7 @@ import { Toc } from '../shell/Toc';
 import { Toast } from '../shell/Toast';
 import { NoticeBar } from '../shell/NoticeBar';
 import type { MenuItem } from '../shell/Menu';
+import { ExportDialog, printPage } from '../shell/ExportDialog';
 import type { TreeRowActions } from '../shell/PageTree';
 import type { PagePlacement } from '../shell/pageOrder';
 import { readingMenuItems, useReadingPrefs } from '../shell/readingPrefs';
@@ -86,6 +88,7 @@ function DemoSearch({ pages, recentIds, onOpen, onCommand, onClose }: {
     { kind: 'command', key: 'import', icon: 'upload', label: '导入 Markdown' },
     { kind: 'command', key: 'trash', icon: 'trash', label: '打开回收站' },
     { kind: 'command', key: 'theme', icon: 'moon', label: '切换深色模式' },
+    { kind: 'command', key: 'settings', icon: 'settings', label: '打开设置' },
   ];
   const flat: PalItem[] = q ? [...titleItems, ...bodyItems]
     : [...recentIds.flatMap(id => pages.filter(p => p.id === id && !p.deleted).map(p => ({ kind: 'recent' as const, page: p }))), ...commands];
@@ -174,7 +177,7 @@ function DemoTrash({ pages, onRestore, onClose }: { pages: Page[]; onRestore: (i
   </Modal>;
 }
 
-type Dialog = 'search' | 'source' | 'move' | 'delete' | 'import' | 'trash' | 'graph' | null;
+type Dialog = 'search' | 'source' | 'move' | 'delete' | 'import' | 'trash' | 'graph' | 'settings' | 'export' | null;
 
 export function WorkspaceApp() {
   const [state, dispatch] = useReducer(workspaceReducer, undefined, initialWorkspace);
@@ -257,9 +260,9 @@ export function WorkspaceApp() {
   const databaseEmbedding = useMemo(() => ({
     source: demoSource, databases: databaseChoices,
     // Inline creation keeps the current document open; the new database goes under it.
-    createDatabase: async () => {
+    createDatabase: async (title?: string) => {
       const parent = stateRef.current.pages.find(p => p.id === stateRef.current.currentId);
-      const page: Page = { id: crypto.randomUUID(), title: '未命名数据库', parentId: parent && (parent.kind ?? 'document') === 'document'
+      const page: Page = { id: crypto.randomUUID(), title: title || '未命名数据库', parentId: parent && (parent.kind ?? 'document') === 'document'
         ? parent.id : null, markdown: '', starred: false, deleted: false, dirty: true, icon: null, cover: null,
         kind: 'database', database: defaultDatabase() };
       stateRef.current = { ...stateRef.current, pages: [...stateRef.current.pages, page] };
@@ -326,6 +329,7 @@ export function WorkspaceApp() {
     else if (key === 'import') fileRef.current?.click();
     else if (key === 'trash') setDialog('trash');
     else if (key === 'theme') setTheme(theme === 'dark' ? 'light' : 'dark');
+    else if (key === 'settings') setDialog('settings');
   };
   const summaries = useMemo(() => state.pages.filter(p => !p.deleted && p.kind !== 'row').map(toSummary), [state.pages]);
   /** Pages shown inside the open page; like every demo change they live in the session only. */
@@ -355,6 +359,14 @@ export function WorkspaceApp() {
       const page: Page = { id: crypto.randomUUID(), title: '未命名白板', parentId: parent && (parent.kind ?? 'document') === 'document'
         ? parent.id : null, markdown: '', starred: false, deleted: false, dirty: true, icon: null, cover: null,
         kind: 'whiteboard', board: whiteboardContent([]) };
+      stateRef.current = { ...stateRef.current, pages: [...stateRef.current.pages, page] };
+      dispatch({ type: 'insert', page });
+      return page.id;
+    },
+    createPage: async (title: string) => {
+      const parent = stateRef.current.pages.find(p => p.id === stateRef.current.currentId);
+      const page: Page = { id: crypto.randomUUID(), title: title || '未命名页面', parentId: parent && (parent.kind ?? 'document') === 'document'
+        ? parent.id : null, markdown: '', starred: false, deleted: false, dirty: true, icon: null, cover: null };
       stateRef.current = { ...stateRef.current, pages: [...stateRef.current.pages, page] };
       dispatch({ type: 'insert', page });
       return page.id;
@@ -398,16 +410,12 @@ export function WorkspaceApp() {
       const snapshot = flush();
       if (snapshot) { setSourceSession({ pageId: current.id, instanceId: crypto.randomUUID(), content: snapshot.content }); setDialog('source'); }
     } },
-    { key: 'download', label: '下载页面', icon: 'download', onSelect: exportCurrent },
-    { key: 'download-html', label: '下载为 HTML', icon: 'download', onSelect: () => void exportCurrentAs('html') },
-    { key: 'download-docx', label: '下载为 Word', icon: 'download', onSelect: () => void exportCurrentAs('docx') },
-    ...(current.originalMarkdown !== undefined ? [{ key: 'raw', label: '下载导入原文', icon: 'download' as const, onSelect: () => download(`${current.title}-原始文件`, current.originalMarkdown ?? '') }] : []),
+    { key: 'export', label: '导出…', icon: 'download', onSelect: () => { flush(); setDialog('export'); } },
     'divider',
     ...(current.kind === 'row' ? [
       { key: 'database', label: '返回数据库', icon: 'table' as const, onSelect: () => { if (current.parentId) openPage(current.parentId); } },
     ] : [
       { key: 'child', label: '添加子页面', icon: 'plus' as const, onSelect: () => newPage(current.id) },
-      { key: 'child-database', label: '添加数据库', icon: 'table' as const, onSelect: () => newDatabase(current.id) },
       { key: 'move', label: '移动到…', icon: 'folder' as const, onSelect: () => { setMoveTarget(current.parentId ?? ''); setDialogFor(current.id); setDialog('move'); } },
     ]),
     'divider',
@@ -416,7 +424,7 @@ export function WorkspaceApp() {
   const subtreeCount = target ? state.pages.filter(p => !p.deleted && p.id !== target.id && descendants(state.pages, target.id).has(p.id)).length : 0;
 
   return <div className={`nb-app demo-workspace ${sidebarHidden ? 'nb-sidebar-collapsed' : ''}`}>
-    <Sidebar workspaceName="演示空间" loginName="演示会话" accountLabel="演示模式 · 未登录" theme={theme} onTheme={setTheme}
+    <Sidebar workspaceName="演示空间" loginName="演示会话" accountLabel="演示模式 · 未登录" onSettings={() => { flush(); setDialog('settings'); }}
       onLogout={() => notice('演示模式没有账号；刷新页面即可重置。')}
       onSearch={() => { flush(); setDialog('search'); }} onTrash={() => setDialog('trash')}
       noteActions={<>
@@ -515,6 +523,18 @@ export function WorkspaceApp() {
     {dialog === 'search' && <DemoSearch pages={state.pages} recentIds={state.recent} onOpen={openSearchHit} onCommand={onCommand} onClose={() => setDialog(null)} />}
     {dialog === 'graph' && <LazyGraphDialog source={graphSource} currentPageId={isDocument ? current.id : null} defaultTreeEdges
       onOpen={openPage} onClose={() => setDialog(null)} />}
+    {dialog === 'settings' && <SettingsDialog onClose={() => setDialog(null)} sections={[
+      { key: 'appearance', label: '外观与阅读', icon: 'sun',
+        content: <AppearanceSettings theme={theme} onTheme={setTheme} reading={readingPrefs} onReading={setReadingPrefs} /> },
+    ]} />}
+    {dialog === 'export' && current && <ExportDialog onClose={() => setDialog(null)} options={[
+      { key: 'markdown', label: 'Markdown', description: '.md 文件，可在其他 Markdown 编辑器中打开', onSelect: exportCurrent },
+      { key: 'html', label: 'HTML', description: '单个网页文件，可直接用浏览器打开', onSelect: () => void exportCurrentAs('html') },
+      { key: 'docx', label: 'Word', description: '.docx 文档，可在 Word 或 WPS 中编辑', onSelect: () => void exportCurrentAs('docx') },
+      { key: 'pdf', label: 'PDF', description: '打开浏览器打印，选择“另存为 PDF”', icon: 'page', onSelect: printPage },
+      ...(current.originalMarkdown !== undefined ? [{ key: 'raw', label: '导入原文', description: '导入时的原始 Markdown 文本',
+        onSelect: () => download(`${current.title}-原始文件`, current.originalMarkdown ?? '') }] : []),
+    ]} />}
     {dialog === 'trash' && <DemoTrash pages={state.pages} onRestore={restorePage} onClose={() => setDialog(null)} />}
     {dialog === 'source' && sourceSession && <SourceEditorDialog key={sourceSession.instanceId}
       scope={{ userId: 'demo', workspaceId: 'demo', pageId: sourceSession.pageId, instanceId: sourceSession.instanceId, baseRevision: 'session' }}

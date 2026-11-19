@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { attachmentPreviewKind } from '@nbase/contracts';
+import { attachmentPreviewKind, type AttachmentMetadata } from '@nbase/contracts';
 import type { AuthRepository } from '../auth/repository.js';
 import { clearSessionCookie, publicOriginConfig } from '../auth/session.js';
 import { authorizeWorkspace, WorkspaceRouteError } from '../auth/workspace.js';
@@ -42,6 +42,32 @@ export function parseRange(header: string | undefined, size: number): { start: n
 function contentDisposition(name: string, inline: boolean): string {
   const ascii = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\;]/g, '_');
   return `${inline ? 'inline' : 'attachment'}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+}
+
+/** Sends a stored file, whole or as one byte range; shared by workspace and share-link reads. */
+export async function sendAttachmentContent(request: FastifyRequest, reply: FastifyReply, attachments: PgAttachmentRepository,
+  workspaceId: string, attachment: AttachmentMetadata, download: boolean) {
+  const inline = attachmentPreviewKind(attachment.mediaType) !== null && !download;
+  reply.header('Content-Type', inline ? attachment.mediaType : 'application/octet-stream');
+  reply.header('Content-Disposition', contentDisposition(attachment.fileName, inline));
+  // Only this page may frame a PDF preview; previews never run scripts of their own.
+  reply.header('X-Frame-Options', 'SAMEORIGIN');
+  reply.header('Accept-Ranges', 'bytes');
+  const range = parseRange(request.headers.range, attachment.byteSize);
+  if (range === 'invalid') {
+    reply.header('Content-Range', `bytes */${attachment.byteSize}`);
+    // The attachment's own Content-Type is already set; Fastify serializes objects only as JSON.
+    return reply.code(416).type('application/json; charset=utf-8').send({ error: 'RANGE_NOT_SATISFIABLE' });
+  }
+  if (range) {
+    const stream = await attachments.range(workspaceId, attachment, range.start, range.end);
+    reply.header('Content-Range', `bytes ${range.start}-${range.end}/${attachment.byteSize}`);
+    reply.header('Content-Length', range.end - range.start + 1);
+    return reply.code(206).send(stream);
+  }
+  const bytes = await attachments.bytes(workspaceId, attachment);
+  reply.header('Content-Length', bytes.length);
+  return reply.send(bytes);
 }
 
 export function registerAttachmentRoutes(app: FastifyInstance, attachments: PgAttachmentRepository,
@@ -97,26 +123,8 @@ export function registerAttachmentRoutes(app: FastifyInstance, attachments: PgAt
         await authorizeWorkspace(request, auth, origin, secure, request.params.workspaceId, false);
         const attachment = await attachments.get(request.params.workspaceId, request.params.attachmentId);
         if (!attachment) return reply.code(404).send({ error: 'NOT_FOUND' });
-        const inline = attachmentPreviewKind(attachment.mediaType) !== null && request.query.download !== '1';
-        reply.header('Content-Type', inline ? attachment.mediaType : 'application/octet-stream');
-        reply.header('Content-Disposition', contentDisposition(attachment.fileName, inline));
-        // Only this page may frame a PDF preview; previews never run scripts of their own.
-        reply.header('X-Frame-Options', 'SAMEORIGIN');
-        reply.header('Accept-Ranges', 'bytes');
-        const range = parseRange(request.headers.range, attachment.byteSize);
-        if (range === 'invalid') {
-          reply.header('Content-Range', `bytes */${attachment.byteSize}`);
-          return reply.code(416).send({ error: 'RANGE_NOT_SATISFIABLE' });
-        }
-        if (range) {
-          const stream = await attachments.range(request.params.workspaceId, attachment, range.start, range.end);
-          reply.header('Content-Range', `bytes ${range.start}-${range.end}/${attachment.byteSize}`);
-          reply.header('Content-Length', range.end - range.start + 1);
-          return reply.code(206).send(stream);
-        }
-        const bytes = await attachments.bytes(request.params.workspaceId, attachment);
-        reply.header('Content-Length', bytes.length);
-        return reply.send(bytes);
+        return await sendAttachmentContent(request, reply, attachments, request.params.workspaceId, attachment,
+          request.query.download === '1');
       } catch (error) { return failure(request, reply, error, secure); }
     });
 }

@@ -62,7 +62,7 @@ async function settings(db: Db, workspaceId: string, actorId: string): Promise<D
       CASE WHEN m.role = 'owner' OR w.daily_template_id = ANY($3::text[])
         THEN w.daily_template_id ELSE NULL END AS "templateId"
     FROM workspaces w
-    JOIN workspace_memberships m ON m.workspace_id = w.id AND m.user_id = $2
+    JOIN workspace_memberships m ON m.workspace_id = w.id AND m.user_id = $2 AND m.removed_at IS NULL
     WHERE w.id = $1
   `, [workspaceId, actorId, builtinTemplateIds]);
   const row = result.rows[0];
@@ -74,7 +74,7 @@ async function findDaily(db: Db, workspaceId: string, actorId: string, date: str
   const result = await db.query<DailyPage>(`
     SELECT p.id, p.revision::text AS revision, p.deleted_at IS NOT NULL AS deleted
     FROM pages p
-    JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2
+    JOIN workspace_memberships m ON m.workspace_id = p.workspace_id AND m.user_id = $2 AND m.removed_at IS NULL
     WHERE p.workspace_id = $1 AND p.daily_note_date = $3::date
   `, [workspaceId, actorId, date]);
   return result.rows[0] ?? null;

@@ -3,7 +3,7 @@ import { createEditor, $getRoot } from 'lexical';
 import { markdownFrontMatterKey } from '@nbase/contracts';
 import {
   $createSnapshot, addMarkdownFrontMatter, createContentFromMarkdown, getMarkdownFrontMatter, markdownFromContent,
-  parseMarkdownImport, readMarkdownFrontMatter,
+  pagePropertiesFrontMatter, parseMarkdownImport, readMarkdownFrontMatter,
 } from './markdown';
 import { EDITOR_NODES } from './nodes';
 import type { DocumentContent } from './types';
@@ -38,16 +38,19 @@ describe('safe Markdown front matter', () => {
     expect(result.warnings).toEqual([]);
     expect(result.title).toBe('导入标题');
     expect(result.tagNames).toEqual(['中文', 'Work']);
-    const metadata = { date: '2024-02-29', author: '测试者', options: { enabled: true, weight: 1.5, empty: null } };
+    const metadata = { date: '2024-02-29', options: { enabled: true, weight: 1.5, empty: null } };
+    expect(result.pageProperties).toEqual([{ id: expect.any(String), name: 'author', type: 'text', value: '测试者' }]);
     expect(getMarkdownFrontMatter(result.content)).toEqual(metadata);
     const saved = snapshot(result.content);
     expect(getMarkdownFrontMatter(saved.content)).toEqual(metadata);
     expect(saved.plainText).toContain('正文');
     expect(saved.plainText).not.toContain('author');
-    const exported = addMarkdownFrontMatter(saved.markdown, saved.content, '编辑后的标题', ['新标签']);
+    const exported = addMarkdownFrontMatter(saved.markdown, saved.content, '编辑后的标题', ['新标签'],
+      pagePropertiesFrontMatter(result.pageProperties));
     const imported = parseMarkdownImport(exported);
     expect(imported.title).toBe('编辑后的标题');
     expect(imported.tagNames).toEqual(['新标签']);
+    expect(imported.pageProperties.map(({ name, type, value }) => ({ name, type, value }))).toEqual([{ name: 'author', type: 'text', value: '测试者' }]);
     expect(getMarkdownFrontMatter(imported.content)).toEqual(metadata);
     expect(markdownFromContent(imported.content)).toBe(saved.markdown);
     const editor = createEditor({ nodes: EDITOR_NODES, onError: error => { throw error; } });

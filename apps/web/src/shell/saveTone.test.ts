@@ -5,6 +5,7 @@ describe('saveToneFor', () => {
   it('marks only server-confirmed texts as saved', () => {
     expect(saveToneFor('已保存到服务端')).toBe('saved');
     expect(saveToneFor('已从服务端读取')).toBe('saved');
+    expect(saveToneFor('已保存')).toBe('saved');
     for (const tone of ['editing', 'saving', 'loading', 'failed'] as const) {
       expect(saveToneFor(Object.entries(pillLabels).find(([, label]) => label !== '已保存' && true)?.[0] ?? '')).not.toBe(tone === 'loading' ? 'saved' : 'idle');
     }
@@ -23,5 +24,15 @@ describe('saveToneFor', () => {
     expect(saveToneFor('请求超时，正在保留本机草稿。')).toBe('offline');
     expect(saveToneFor('本机草稿写入失败，请立即下载 Markdown')).toBe('failed');
     expect(saveToneFor('服务暂时无法完成操作，请重试。')).toBe('failed');
+  });
+  it('maps the co-editing status sentences', () => {
+    expect(saveToneFor('正在连接协同…')).toBe('loading');
+    expect(saveToneFor('正在等待协同内容…')).toBe('loading');
+    expect(saveToneFor('保存中')).toBe('saving');
+    expect(saveToneFor('已同步，等待保存')).toBe('synced');
+    expect(pillLabels.synced).toBe('已同步，等待保存');
+    expect(saveToneFor('离线，修改保存在本机')).toBe('offline');
+    expect(saveToneFor('离线，正在重新连接')).toBe('offline');
+    expect(saveToneFor('未能保存')).toBe('failed');
   });
 });

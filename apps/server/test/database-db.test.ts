@@ -149,9 +149,16 @@ test('databases keep schema, rows, history and trash consistent', {
     await pool.query(`UPDATE pages SET search_text = 'stale' WHERE id = $1`, [row.id]);
     await pool.query(`UPDATE databases SET search_generation = search_generation + 1 WHERE page_id = $1`, [db.page.id]);
     assert.equal(await runSearchBatch(pool, 1), true);
-    while (await runSearchBatch(pool, 1)) { /* drain */ }
-    const swept = await pool.query<{ search_text: string; revision: string; indexed: string }>(`SELECT p.search_text, p.revision::text AS revision,
+    const sweepPool = pool;
+    const sweep = () => sweepPool.query<{ search_text: string; revision: string; indexed: string }>(`SELECT p.search_text, p.revision::text AS revision,
       (d.search_generation - d.search_indexed_generation)::text AS indexed FROM pages p JOIN databases d ON d.page_id = p.parent_id WHERE p.id = $1`, [row.id]);
+    let swept = await sweep();
+    // The app's own database worker may hold the batch (SKIP LOCKED) while this loop drains.
+    for (let tries = 0; tries < 100 && swept.rows[0]!.indexed !== '0'; tries++) {
+      while (await runSearchBatch(pool, 1)) { /* drain */ }
+      swept = await sweep();
+      if (swept.rows[0]!.indexed !== '0') await new Promise(resolve => setTimeout(resolve, 50));
+    }
     assert.match(swept.rows[0]!.search_text, /已读/);
     assert.equal(swept.rows[0]!.revision, patched.json().revision);
     assert.equal(swept.rows[0]!.indexed, '0');

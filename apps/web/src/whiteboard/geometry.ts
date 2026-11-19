@@ -101,6 +101,31 @@ export function exitPoint(inside: Point, outside: Point, polygon: readonly Point
 
 export type OutlineKind = 'rect' | 'roundRect' | 'ellipse' | 'diamond' | 'triangle';
 
+/** Where the ray from `inside` through `outside` leaves the ellipse inscribed in the (possibly rotated) box. */
+export function ellipseExit(inside: Point, outside: Point, box: Box): Point {
+  const c = centerOf(box), rx = Math.max(box.w / 2, 1e-6), ry = Math.max(box.h / 2, 1e-6);
+  const a = rotatePoint(inside, c, -box.angle), b = rotatePoint(outside, c, -box.angle);
+  const px = (a.x - c.x) / rx, py = (a.y - c.y) / ry, dx = (b.x - a.x) / rx, dy = (b.y - a.y) / ry;
+  const qa = dx * dx + dy * dy, qb = 2 * (px * dx + py * dy), qc = px * px + py * py - 1;
+  if (qa < 1e-12) return inside;
+  const disc = qb * qb - 4 * qa * qc;
+  if (disc < 0) return inside;
+  const t = (-qb + Math.sqrt(disc)) / (2 * qa);
+  if (t < 0 || t > 1) return qc > 0 ? inside : outside;
+  return rotatePoint({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t }, c, box.angle);
+}
+
+/** Distance from a point in the box's local frame to the inscribed ellipse's outline, approximately; negative inside. */
+export function ellipseDistance(local: Point, box: Rect): number {
+  const rx = Math.max(box.w / 2, 1e-6), ry = Math.max(box.h / 2, 1e-6);
+  const dx = local.x - (box.x + rx), dy = local.y - (box.y + ry);
+  const k = Math.hypot(dx / rx, dy / ry);
+  if (k < 1e-9) return -Math.min(rx, ry);
+  // The gradient-scaled implicit value is close to the true distance for the few pixels a hit test cares about.
+  const g = Math.hypot(dx / (rx * rx), dy / (ry * ry));
+  return (k * k - 1) / (2 * Math.max(g, 1e-9));
+}
+
 /** Outline of a shape in world coordinates; curves are approximated closely enough for hit tests and clipping. */
 export function outlinePolygon(kind: OutlineKind, box: Box): Point[] {
   const { x, y, w, h } = box;
@@ -152,7 +177,8 @@ export function dominantSide(dx: number, dy: number): Side {
   return Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? 'right' : 'left') : (dy >= 0 ? 'bottom' : 'top');
 }
 
-function dedupe(points: Point[]): Point[] {
+/** Drop repeated points and the middle of three collinear axis-aligned points. */
+export function dedupe(points: readonly Point[]): Point[] {
   const result: Point[] = [];
   for (const p of points) {
     const last = result.at(-1);
@@ -181,6 +207,12 @@ export interface ElbowPath {
  * `shift` slides the middle segment from its default place, as far as the route's shape allows.
  */
 export function elbowPath(from: Point, fromSide: Side, to: Point, toSide: Side, shift = 0, margin = 20): ElbowPath {
+  const core = elbowCore(from, fromSide, to, toSide, shift, margin);
+  return { points: dedupe(core.points), free: core.free };
+}
+
+/** `elbowPath` before redundant points are dropped: always `[from, stub, ...middle, stub, to]`. */
+export function elbowCore(from: Point, fromSide: Side, to: Point, toSide: Side, shift = 0, margin = 20): ElbowPath {
   const d0 = sideVector[fromSide], d1 = sideVector[toSide];
   const a = { x: from.x + d0.x * margin, y: from.y + d0.y * margin };
   const b = { x: to.x + d1.x * margin, y: to.y + d1.y * margin };
@@ -217,7 +249,7 @@ export function elbowPath(from: Point, fromSide: Side, to: Point, toSide: Side, 
   }
   // A segment without length has nothing to grab.
   if (free && distance(free.from, free.to) < 1) free = null;
-  return { points: dedupe([from, a, ...middle, b, to]), free };
+  return { points: [from, a, ...middle, b, to], free };
 }
 
 export function elbowRoute(from: Point, fromSide: Side, to: Point, toSide: Side, margin = 20): Point[] {

@@ -12,6 +12,11 @@ h1.wb-title { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space:
 .wb-root { position: relative; flex: 1; min-height: 320px; overflow: hidden; outline: none; background: var(--nb-bg); touch-action: none; user-select: none; -webkit-user-select: none; }
 .wb-root:focus-visible { box-shadow: inset 0 0 0 2px var(--nb-accent-soft); }
 .wb-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.wb-remote-layer { position: absolute; inset: 0; z-index: 3; overflow: hidden; pointer-events: none; }
+.wb-remote-outline, .wb-remote-preview { position: absolute; border: 2px solid; border-radius: 3px; box-sizing: border-box; }
+.wb-remote-outline > span { position: absolute; left: -2px; bottom: 100%; padding: 2px 5px; border-radius: 4px 4px 4px 0; color: #fff; font-size: 11px; line-height: 1.4; white-space: nowrap; }
+.wb-remote-preview { border-style: dashed; opacity: .85; }
+.wb-collab-editing { position: absolute; left: 50%; top: 12px; z-index: 6; transform: translateX(-50%); max-width: calc(100% - 150px); padding: 6px 10px; border: 1px solid var(--nb-warning, #e0a800); border-radius: 8px; background: var(--nb-bg); color: var(--nb-text); box-shadow: var(--nb-shadow-sm); font-size: 12px; pointer-events: none; }
 .wb-embedded { min-height: 0; }
 
 /* Live pages and databases over the canvas. They ignore the pointer until activated. */
@@ -35,11 +40,17 @@ h1.wb-title { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space:
 .wb-toolbar-wrap { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; max-width: calc(100% - 24px); z-index: 4; }
 .wb-toolbar { display: flex; align-items: center; gap: 2px; padding: 5px; background: var(--nb-bg); border: 1px solid var(--nb-line); border-radius: 12px; box-shadow: var(--nb-shadow-sm); max-width: 100%; overflow-x: auto; scrollbar-width: none; }
 .wb-toolbar::-webkit-scrollbar { display: none; }
+.wb-toolbar-frame { position: relative; display: flex; max-width: 100%; }
+.wb-scroll-hint { position: absolute; top: 1px; bottom: 1px; width: 36px; display: flex; align-items: center; border: 0; padding: 0; color: var(--nb-text); font-size: 22px; line-height: 1; cursor: pointer; z-index: 1; }
+.wb-scroll-hint.left { left: 1px; justify-content: flex-start; padding-left: 7px; border-radius: 11px 0 0 11px; background: linear-gradient(to right, var(--nb-bg) 62%, transparent); }
+.wb-scroll-hint.right { right: 1px; justify-content: flex-end; padding-right: 7px; border-radius: 0 11px 11px 0; background: linear-gradient(to left, var(--nb-bg) 62%, transparent); }
 .wb-toolbar-ro { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 4; }
 .wb-ro-note { font-size: 12px; color: var(--nb-muted); padding: 0 8px 0 4px; }
 .wb-tool { flex: 0 0 auto; display: inline-flex; align-items: center; justify-content: center; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: var(--nb-muted); cursor: pointer; }
 .wb-tool:hover:not(:disabled) { background: var(--nb-hover); color: var(--nb-text); }
 .wb-tool.on { background: var(--nb-accent-soft); color: var(--nb-accent-text); }
+.wb-tool.locked { position: relative; }
+.wb-tool.locked::after { content: ''; position: absolute; right: 4px; bottom: 4px; width: 6px; height: 6px; border-radius: 50%; background: var(--nb-accent); }
 .wb-tool:disabled { opacity: .4; cursor: default; }
 .wb-sep { flex: 0 0 1px; width: 1px; height: 20px; margin: 0 4px; background: var(--nb-line); }
 .wb-strip, .wb-pop { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 6px 8px; background: var(--nb-bg); border: 1px solid var(--nb-line); border-radius: 10px; box-shadow: var(--nb-shadow-sm); }
@@ -83,6 +94,16 @@ h1.wb-title { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space:
 
 .wb-editor { position: absolute; z-index: 2; pointer-events: none; }
 .wb-editor-field { position: absolute; pointer-events: auto; margin: 0; padding: 0; border: 0; outline: none; resize: none; overflow: hidden; background: transparent; caret-color: var(--nb-accent); min-height: 1em; word-break: break-word; overflow-wrap: anywhere; }
+.wb-editor-rich { cursor: text; }
+.wb-text-bar { position: absolute; z-index: 5; display: flex; align-items: center; gap: 2px; padding: 3px; background: var(--nb-bg); border: 1px solid var(--nb-line); border-radius: 10px; box-shadow: var(--nb-shadow-sm); max-width: calc(100% - 16px); white-space: nowrap; }
+.wb-text-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 30px; height: 30px; padding: 0 6px; border: 0; border-radius: 7px; background: transparent; color: var(--nb-text); font: inherit; font-size: 14px; cursor: pointer; }
+.wb-text-btn:hover { background: var(--nb-hover); }
+.wb-text-btn.on { background: var(--nb-accent-soft, var(--nb-hover)); color: var(--nb-accent); }
+.wb-text-size { min-width: 24px; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--nb-muted); }
+.wb-text-sep { width: 1px; height: 18px; margin: 0 3px; background: var(--nb-line); }
+.wb-text-colors { position: relative; display: inline-flex; }
+.wb-text-pop { left: 0; transform: none; z-index: 6; }
+.wb-text-hint { padding: 0 6px 0 4px; font-size: 11px; color: var(--nb-faint); }
 
 .wb-context { position: absolute; top: auto; z-index: 20; max-height: calc(100% - 16px); overflow-y: auto; }
 .wb-context .nb-menu-item { justify-content: space-between; gap: 18px; }
@@ -105,6 +126,7 @@ h1.wb-title { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space:
   .wb-toolbar-wrap { bottom: 64px; }
   .wb-corner { right: 8px; bottom: 10px; }
   .wb-tool { width: 40px; height: 40px; }
+  .wb-text-hint { display: none; }
   .wb-topbar { top: 8px; right: 8px; }
   .wb-labelled span { display: none; }
   .wb-pbar-row { max-width: calc(100vw - 24px); overflow-x: auto; }

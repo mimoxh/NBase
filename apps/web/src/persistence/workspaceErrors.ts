@@ -1,3 +1,4 @@
+import { activeSharesPerPageLimit, commentsPerThreadLimit, commentThreadsPerPageLimit, pendingInvitationLimit } from '@nbase/contracts';
 import { ApiError } from './client';
 
 export function message(error: unknown): string {
@@ -24,6 +25,19 @@ export function message(error: unknown): string {
     DAILY_NOTE_TRASHED: '这一天的笔记在回收站，请先恢复。',
     DAILY_PARENT_UNAVAILABLE: '每日笔记的默认父页不可用，请更新设置。',
     PAGE_REFERENCE_INVALID: '正文引用的页面不在当前工作区，请检查引用或下载本机草稿。',
+    FORBIDDEN: '你的角色不能执行这个操作。', MEMBER_OWNER: '所有者的角色不能修改，也不能被移除。',
+    INVITATION_LIMIT: `待接受的邀请已达 ${pendingInvitationLimit} 个上限，请先撤销不用的链接。`,
+    INVITATION_NOT_FOUND: '邀请链接无效。', INVITATION_EXPIRED: '这个邀请链接已过期。',
+    INVITATION_USED: '这个邀请链接已经被使用过。', INVITATION_REVOKED: '这个邀请链接已被撤销。',
+    LOGIN_TAKEN: '这个账号名已被使用，请换一个。',
+    LOGIN_NAME_INVALID: '账号名需为 3–64 位小写字母、数字、点、下划线或连字符，并以字母或数字开头。',
+    PASSWORD_TOO_SHORT: '密码至少需要 15 个字符。',
+    COMMENT_LIMIT: `评论已达上限：每页最多 ${commentThreadsPerPageLimit} 个讨论，每个讨论最多 ${commentsPerThreadLimit} 条评论。`,
+    COMMENT_CONFLICT: '这条评论的重试内容与已保存的不一致，请刷新评论后重试。',
+    PAGE_KIND_INVALID: '这类页面不支持这个操作。',
+    NOT_FOUND: '内容已不存在，可能已被删除或移入回收站。',
+    SHARE_LIMIT: `这个页面的有效分享链接已达 ${activeSharesPerPageLimit} 个，请先撤销不用的链接。`,
+    SHARE_DISABLED: '服务端已关闭分享链接，只能查看和撤销已有链接。',
   };
   return messages[error.code] ?? '服务暂时无法完成操作，请重试。';
 }

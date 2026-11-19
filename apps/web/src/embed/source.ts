@@ -33,6 +33,8 @@ export interface EmbeddedPages {
   openPage(pageId: string): void;
   /** Creates a whiteboard next to the current page and returns its id, or null when it was not created. */
   createWhiteboard?: (() => Promise<string | null>) | undefined;
+  /** Creates an empty document with this title without opening it, and returns its id or null. */
+  createPage?: ((title: string) => Promise<string | null>) | undefined;
   /** What a document edited on a whiteboard needs from the host: page links, databases, uploads. */
   editor?: Pick<DocumentEditorProps, 'pageReferences' | 'databases' | 'workspaceId' | 'onUploadFiles' | 'onLinkPreview' | 'resolveBlock'> | undefined;
   imageUrl(attachmentId: string): string | null;

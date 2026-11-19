@@ -5,13 +5,15 @@ import { aabb, boundsOfPoints, centerOf, distance, expandRect, normalizeRect, po
 import { addMindChild, createMindRoot, fitMindNode, isMindNode, layoutMindsOf, mindChildSide, mindDropTarget, mindLayoutOf, mindTogglePoint, mindToggleRadius,
   moveMindNode, setMindCollapsed, setMindLayout, type MindDropHint, type MindLayout } from './mind';
 import { align, anchorPoint, applyStyle, boundsOfIds, cloneElements, connectorPath, createConnector, createShape, dependentSet, distribute, elementAt,
-  elementBounds, elementText, embedDefaultSize, erasePen, groupChain, groupToEnter, indexElements, isEmbedElement, fitText, handlePoint, handles, hitTest, isBox,
+  elementBounds, elementText, elementToStrokes, embedDefaultSize, erasePen, groupChain, withWaypoints, groupToEnter, indexElements, isEmbedElement, fitText, handlePoint, handles, hitTest, isBox,
   mindDescendants, mindRootOf, mindVisibility, movingSet, reorder, removeElements, resizeBox, rotateElements,
   scaleElements, setGroup, setLocked, translate, visibleElements, withBox, withGroups, type Alignment, type BoxEl, type Connector, type El, type Handle,
   type Index, type OrderMove, type StylePatch } from './model';
 import { emptyOverlay, handleSize, rotateHandlePoint, toScreen, toWorldPoint, type Overlay } from './render/canvas';
+import { moveCorner, removeCorner, routeCorners, slideSegment, splitSegment } from './route';
+import { editRuns, rangeStyle, styleRange, type Run, type RunPatch } from './runs';
 import { BoardStore, type Tool } from './store';
-import { textBlockSize, type Measure } from './text';
+import { layoutText, type Measure } from './text';
 
 export interface ControllerHost {
   measure: Measure;
@@ -40,7 +42,26 @@ type Gesture =
   | { kind: 'eraser'; points: Point[]; hits: Set<string>; partial: boolean; changed: boolean }
   /** One mind node dragged with its branch, to be dropped on a new parent or a new place among its siblings. */
   | { kind: 'branch'; origin: Point; id: string; ids: Set<string>; index: Index; moved: boolean; delta: Point; drop: MindDropHint | null }
-  | { kind: 'bend'; id: string; axis: 'x' | 'y'; origin: Point; start: number };
+  /** Elbow route: one segment slid sideways, or one corner moved with both of its segments. */
+  | { kind: 'segment'; id: string; index: number; axis: 'x' | 'y'; origin: Point; route: Point[]; moved: boolean }
+  | { kind: 'corner'; id: string; index: number; origin: Point; route: Point[]; moved: boolean }
+  /** Straight connector: one bend point moved, possibly just inserted from a segment's middle. */
+  | { kind: 'vertex'; id: string; index: number; origin: Point; waypoints: Point[]; moved: boolean };
+
+type Textual = WhiteboardShape | WhiteboardText | WhiteboardNote;
+const isTextual = (el: El | undefined): el is Textual => el?.type === 'shape' || el?.type === 'text' || el?.type === 'note';
+const withRuns = <T extends Textual>(el: T, runs: Run[] | undefined): T => {
+  if (runs) return { ...el, runs };
+  if (!el.runs) return el;
+  const { runs: _runs, ...rest } = el;
+  void _runs;
+  return rest as T;
+};
+
+interface RouteHandle { kind: 'segment' | 'corner'; id: string; mode: Connector['mode']; index: number; point: Point; axis: 'x' | 'y' | null; route: Point[] }
+
+/** Converting shapes for the eraser is announced once per session. */
+let eraseHintShown = false;
 
 export type EditFinish = 'none' | 'sibling' | 'child';
 
@@ -100,7 +121,7 @@ export class Controller {
     const transform = this.store.editingId ? null : this.transformBox();
     const outlines: Box[] = [];
     const connectorEnds: Point[] = [];
-    let bend: Point | null = null;
+    let segments: Overlay['segments'] = [], corners: Point[] = [];
     const nodes: WhiteboardShape[] = [];
     // A mind node cannot be resized or rotated, so a box around it would only square off its rounded outline.
     const framed = (el: El | null | undefined): el is BoxEl => Boolean(el) && isBox(el!) && !isMindNode(el!);
@@ -117,14 +138,16 @@ export class Controller {
     if (single?.type === 'connector' && !single.locked && !this.store.readOnly) {
       const path = connectorPath(single, this.index);
       connectorEnds.push(path.points[0]!, path.points.at(-1)!);
-      bend = path.bend?.point ?? null;
+      const handles = this.routeHandles(single);
+      segments = handles.filter(h => h.kind === 'segment').map(h => ({ point: h.point, axis: h.axis }));
+      corners = handles.filter(h => h.kind === 'corner').map(h => h.point);
     }
     const hovered = this.hoverId ? this.index.get(this.hoverId) : undefined;
     const hover = hovered && !this.store.selection.has(hovered.id) ? hovered : undefined;
     // The collapse button belongs to the node under the pointer, or else to the selected one.
     const open = [hovered, single].find((el): el is WhiteboardShape => isMindNode(el) && !el.mindCollapsed && this.hasMindChildren(el.id));
     this.toggleId = open && !this.store.editingId ? open.id : null;
-    this.store.setOverlay({ ...emptyOverlay, outlines, nodes, connectorEnds, bend,
+    this.store.setOverlay({ ...emptyOverlay, outlines, nodes, connectorEnds, segments, corners,
       transform: transform && (!transform.single || framed(transform.single))
         ? { box: transform.box, handles: transform.handles && !this.store.readOnly, rotate: transform.rotate && !this.store.readOnly, locked: transform.locked } : null,
       hover: framed(hover) ? hover : null,
@@ -206,8 +229,8 @@ export class Controller {
       return cursors[Math.round((((base % 180) + 180) % 180) / 45) % 4]!;
     }
     if (this.endpointAt(screen)) return 'move';
-    const bend = this.bendAt(screen);
-    if (bend) return bend.axis === 'x' ? 'ew-resize' : 'ns-resize';
+    const route = this.routeHandleAt(screen);
+    if (route) return route.axis === 'x' ? 'ew-resize' : route.axis === 'y' ? 'ns-resize' : 'move';
     if (this.toggleAt(this.world(screen))) return 'pointer';
     const hit = this.hit(this.world(screen));
     if (hit?.type === 'card') return 'pointer';
@@ -218,13 +241,98 @@ export class Controller {
     return elementAt(this.shown, world, this.tolerance(), this.index);
   }
 
-  /** The handle on the middle segment of the selected elbow connector. */
-  private bendAt(screen: Point): { id: string; axis: 'x' | 'y'; shift: number } | null {
+  /**
+   * Handles on a connector's route: the middle of every segment long enough to grab, and its
+   * corners. Elbow segments slide sideways; on straight connectors the corners are the bend points
+   * and a segment's middle inserts a new one.
+   */
+  private routeHandles(el: Connector): RouteHandle[] {
+    if (el.mode === 'curve') return [];
+    const path = connectorPath(el, this.index);
+    const route = path.route ?? path.points;
+    const zoom = this.store.view.zoom;
+    const result: RouteHandle[] = [];
+    for (let i = 0; i + 1 < route.length; i += 1) {
+      const a = route[i]!, b = route[i + 1]!;
+      if (distance(a, b) * zoom < 28) continue;
+      const axis = el.mode === 'elbow' ? (Math.abs(a.y - b.y) <= Math.abs(a.x - b.x) ? 'y' : 'x') : null;
+      result.push({ kind: 'segment', id: el.id, mode: el.mode, index: i, point: { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }, axis, route });
+    }
+    const corners = el.mode === 'elbow' ? routeCorners(route) : route.slice(1, -1).map((_, i) => i + 1);
+    for (const i of corners) result.push({ kind: 'corner', id: el.id, mode: el.mode, index: i, point: route[i]!, axis: null, route });
+    return result;
+  }
+
+  private selectedConnector(): Connector | null {
     if (this.store.selection.size !== 1 || this.store.readOnly) return null;
     const el = this.index.get([...this.store.selection][0]!);
-    if (el?.type !== 'connector' || el.locked) return null;
-    const bend = connectorPath(el, this.index).bend;
-    return bend && distance(toScreen(bend.point, this.store.view), screen) <= 9 ? { id: el.id, axis: bend.axis, shift: bend.shift } : null;
+    return el?.type === 'connector' && !el.locked ? el : null;
+  }
+
+  /** The route handle of the selected connector under the pointer; corners win over segments. */
+  private routeHandleAt(screen: Point): RouteHandle | null {
+    const el = this.selectedConnector();
+    if (!el) return null;
+    const near = this.routeHandles(el).filter(h => distance(toScreen(h.point, this.store.view), screen) <= 8);
+    return near.find(h => h.kind === 'corner') ?? near[0] ?? null;
+  }
+
+  /**
+   * What a right-click or double-click at this point can do to the selected connector's bend
+   * points: take away the corner under it, or add one on the segment under it.
+   */
+  bendActionAt(screen: Point): { kind: 'add' | 'remove'; run: () => void } | null {
+    const el = this.selectedConnector();
+    if (!el || el.mode === 'curve') return null;
+    const handles = this.routeHandles(el);
+    const corner = handles.find(h => h.kind === 'corner' && distance(toScreen(h.point, this.store.view), screen) <= 10);
+    if (corner) return { kind: 'remove', run: () => this.removeBend(el.id, corner.index) };
+    const route = handles[0]?.route ?? connectorPath(el, this.index).route ?? [];
+    const world = this.world(screen);
+    let best: { index: number; point: Point; gap: number } | null = null;
+    for (let i = 0; i + 1 < route.length; i += 1) {
+      const a = route[i]!, b = route[i + 1]!;
+      const length = distance(a, b);
+      if (length < 1e-6) continue;
+      const t = Math.max(0, Math.min(1, ((world.x - a.x) * (b.x - a.x) + (world.y - a.y) * (b.y - a.y)) / (length * length)));
+      const point = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+      const gap = distance(point, world);
+      if (!best || gap < best.gap) best = { index: i, point, gap };
+    }
+    if (!best || best.gap > this.tolerance(10)) return null;
+    const at = best;
+    return { kind: 'add', run: () => this.addBend(el.id, at.index, at.point) };
+  }
+
+  private setWaypoints(id: string, points: Point[], settle: boolean) {
+    const connector = this.index.get(id);
+    if (connector?.type !== 'connector') return;
+    const { bend: _bend, waypoints: _old, ...rest } = connector;
+    void _bend; void _old;
+    const raw: Connector = points.length ? { ...rest, waypoints: points.map(p => ({ x: round(p.x), y: round(p.y) })) } : rest;
+    const next = settle ? withWaypoints(raw, points, this.index) : raw;
+    this.apply(this.elements.map(el => el.id === id ? next : el));
+  }
+
+  /** Add a bend point on segment `index`; on an elbow route it is a pair, so either half can then be slid apart. */
+  addBend(id: string, index: number, at: Point) {
+    const connector = this.index.get(id);
+    if (connector?.type !== 'connector' || connector.locked || connector.mode === 'curve') return;
+    const route = connectorPath(connector, this.index).route ?? [];
+    if (index < 0 || index + 1 >= route.length) return;
+    if ((connector.waypoints?.length ?? 0) >= whiteboardLimits.maxWaypoints - 1) { this.host.notice(`每条连接线最多 ${whiteboardLimits.maxWaypoints} 个拐点。`); return; }
+    const waypoints = connector.mode === 'elbow' ? splitSegment(route, index, at) : [...route.slice(1, index + 1), at, ...route.slice(index + 1, -1)];
+    this.setWaypoints(id, waypoints, false);
+  }
+
+  /** Take away the corner at route index `index`; an elbow route left with nothing to keep goes back to automatic. */
+  removeBend(id: string, index: number) {
+    const connector = this.index.get(id);
+    if (connector?.type !== 'connector' || connector.locked || connector.mode === 'curve') return;
+    const route = connectorPath(connector, this.index).route ?? [];
+    if (index <= 0 || index >= route.length - 1) return;
+    if (connector.mode === 'elbow') this.setWaypoints(id, removeCorner(route, index), true);
+    else this.setWaypoints(id, route.slice(1, -1).filter((_, i) => i !== index - 1), false);
   }
 
   /** The mind node whose collapse button or hidden-count chip is under the point. */
@@ -286,6 +394,10 @@ export class Controller {
   // ── Pointer events ──
 
   pointerDown(input: PointerInput) {
+    // A mouse cannot be pressed twice without a release, so the last release went missing (it can
+    // happen outside the window or when capture is lost); end that gesture where the pointer last was.
+    const stale = this.gesture && this.gesture.kind !== 'pinch' && input.pointerType === 'mouse' ? this.lastPointer : null;
+    if (stale) this.pointerUp({ ...input, x: stale.x, y: stale.y });
     const screen = { x: input.x, y: input.y };
     this.pointers.set(input.pointerId, screen);
     this.lastPointer = screen;
@@ -355,10 +467,19 @@ export class Controller {
       this.gesture = { kind: 'endpoint', id: [...this.store.selection][0]!, which: endpoint };
       return;
     }
-    const bend = this.bendAt(screen);
-    if (bend) {
+    const route = this.routeHandleAt(screen);
+    if (route) {
       this.store.begin();
-      this.gesture = { kind: 'bend', id: bend.id, axis: bend.axis, origin: world, start: bend.shift };
+      if (route.mode === 'elbow') {
+        this.gesture = route.kind === 'segment'
+          ? { kind: 'segment', id: route.id, index: route.index, axis: route.axis ?? 'y', origin: world, route: route.route, moved: false }
+          : { kind: 'corner', id: route.id, index: route.index, origin: world, route: route.route, moved: false };
+      } else {
+        const waypoints = route.route.slice(1, -1);
+        // Grabbing the middle of a straight segment pulls a new bend point out of it.
+        if (route.kind === 'segment') waypoints.splice(route.index, 0, route.point);
+        this.gesture = { kind: 'vertex', id: route.id, index: route.kind === 'segment' ? route.index : route.index - 1, origin: world, waypoints, moved: false };
+      }
       return;
     }
     const toggle = this.toggleAt(world);
@@ -456,7 +577,7 @@ export class Controller {
       }
       case 'move': return this.moveSelection(gesture, world, input);
       case 'branch': return this.dragBranch(gesture, world);
-      case 'bend': return this.dragBend(gesture, world);
+      case 'segment': case 'corner': case 'vertex': return this.dragRoute(gesture, world);
       case 'resize': return this.resize(gesture, world, input);
       case 'rotate': {
         let delta = Math.atan2(world.y - gesture.center.y, world.x - gesture.center.x) - gesture.start;
@@ -550,17 +671,32 @@ export class Controller {
     this.refreshOverlay({ drop: gesture.drop && (gesture.drop.box || gesture.drop.line) ? { box: gesture.drop.box, line: gesture.drop.line } : null });
   }
 
-  /** Slide the middle segment of an elbow connector; near its default place it snaps back. */
-  private dragBend(gesture: Extract<Gesture, { kind: 'bend' }>, world: Point) {
+  /** Reshape a connector's route by one of its handles. Nothing changes until the pointer has really moved. */
+  private dragRoute(gesture: Extract<Gesture, { kind: 'segment' | 'corner' | 'vertex' }>, world: Point) {
     const base = this.store.base;
     const connector = base.find(el => el.id === gesture.id);
     if (connector?.type !== 'connector') return;
-    const wanted = gesture.start + (gesture.axis === 'x' ? world.x - gesture.origin.x : world.y - gesture.origin.y);
-    const applied = connectorPath({ ...connector, bend: wanted }, this.index).bend?.shift ?? 0;
-    const bend = Math.abs(applied) * this.store.view.zoom < 4 ? 0 : round(applied);
-    // Back at its starting place the connector is the same object again, so nothing is saved.
-    const next = bend === (connector.bend ?? 0) ? connector : { ...connector, bend };
+    if (!gesture.moved && distance(world, gesture.origin) * this.store.view.zoom < 3) return;
+    gesture.moved = true;
+    let waypoints: Point[];
+    if (gesture.kind === 'segment') waypoints = slideSegment(gesture.route, gesture.index, gesture.axis === 'y' ? world.y - gesture.origin.y : world.x - gesture.origin.x);
+    else if (gesture.kind === 'corner') waypoints = moveCorner(gesture.route, gesture.index, world);
+    else waypoints = gesture.waypoints.map((point, i) => i === gesture.index ? world : point);
+    const { bend: _bend, ...rest } = connector;
+    void _bend;
+    const next: Connector = { ...rest, waypoints: waypoints.map(p => ({ x: p.x, y: p.y })) };
     this.store.preview(base.map(el => el === connector ? next : el));
+    this.refreshOverlay();
+  }
+
+  private finishRoute(gesture: Extract<Gesture, { kind: 'segment' | 'corner' | 'vertex' }>) {
+    const original = this.store.base.find(el => el.id === gesture.id);
+    const current = this.index.get(gesture.id);
+    if (!gesture.moved || original?.type !== 'connector' || current?.type !== 'connector') { this.store.cancel(); this.refreshOverlay(); return; }
+    let next = withWaypoints(current, current.waypoints ?? [], this.index);
+    // Dragged back to where it started: the original stays, so nothing is saved.
+    if (JSON.stringify([next.waypoints ?? null, next.bend ?? null]) === JSON.stringify([original.waypoints ?? null, original.bend ?? null])) next = original;
+    this.store.commit(this.elements.map(el => el.id === gesture.id ? next : el));
     this.refreshOverlay();
   }
 
@@ -630,20 +766,46 @@ export class Controller {
     this.refreshOverlay({ eraser: gesture.points });
   }
 
-  /** Rub out the parts of freehand strokes the eraser passed over; other elements are left alone. */
+  /**
+   * Rub out the parts of freehand strokes the eraser passed over. Shapes and connectors it crosses
+   * are first turned into strokes (their text into free text), then rubbed out the same way; the
+   * whole gesture is still a single undo step.
+   */
   private eraseStrokes(gesture: Extract<Gesture, { kind: 'eraser' }>, from: Point, to: Point) {
     const radius = this.tolerance(6);
     const swept = normalizeRect(from, to);
     const next: El[] = [];
     const gone = new Set<string>();
-    let changed = false;
+    const { hidden } = mindVisibility(this.elements);
+    let changed = false, converted = false;
     for (const el of this.elements) {
-      const pieces = el.type === 'pen' && !el.locked && rectsIntersect(expandRect(aabb(el), radius + el.strokeWidth), swept)
-        ? erasePen(el, [from, to], radius, this.host.newId) : null;
-      if (!pieces) { next.push(el); continue; }
-      changed = true;
-      if (pieces.length) next.push(...pieces); else { next.push(el); gone.add(el.id); }
+      if (el.locked || hidden.has(el.id)) { next.push(el); continue; }
+      if (el.type === 'pen') {
+        const pieces = rectsIntersect(expandRect(aabb(el), radius + el.strokeWidth), swept) ? erasePen(el, [from, to], radius, this.host.newId) : null;
+        if (!pieces) { next.push(el); continue; }
+        changed = true;
+        if (pieces.length) next.push(...pieces); else { next.push(el); gone.add(el.id); }
+        continue;
+      }
+      // Mind nodes belong to their map and are left alone.
+      const convertible = (el.type === 'shape' && !isMindNode(el)) || el.type === 'connector';
+      if (!convertible || !rectsIntersect(expandRect(elementBounds(el, this.index), radius + 2), swept)) { next.push(el); continue; }
+      const strokes = elementToStrokes(el, this.index, this.host.newId, this.host.measure) ?? [];
+      const out: El[] = [];
+      let touched = false, lost = false;
+      for (const item of strokes) {
+        const pieces = item.type === 'pen' ? erasePen(item, [from, to], radius, this.host.newId) : null;
+        if (!pieces) { out.push(item); continue; }
+        touched = true;
+        if (pieces.length) out.push(...pieces); else if (item.id === el.id) lost = true;
+      }
+      // Passing through a filled interior without reaching the outline leaves the shape as it is.
+      if (!touched) { next.push(el); continue; }
+      changed = converted = true;
+      if (lost) { next.push(el); gone.add(el.id); }
+      next.push(...out);
     }
+    if (converted && !eraseHintShown) { eraseHintShown = true; this.host.notice('形状和连接线会先转成笔画再局部擦除，可撤销。'); }
     if (changed && next.length - gone.size <= whiteboardLimits.maxElements) {
       // A stroke that is rubbed out completely goes the way of any deleted element, so connectors let go of it.
       this.store.preview(gone.size ? removeElements(next, gone, indexElements(next)) : next);
@@ -681,7 +843,8 @@ export class Controller {
         this.refreshOverlay();
         return;
       }
-      case 'resize': case 'rotate': case 'endpoint': case 'bend':
+      case 'segment': case 'corner': case 'vertex': return this.finishRoute(gesture);
+      case 'resize': case 'rotate': case 'endpoint':
         this.store.commit();
         this.refreshOverlay();
         return;
@@ -692,9 +855,7 @@ export class Controller {
           this.store.preview(gesture.tool === 'frame' ? [el, ...this.elements] : [...this.elements, el]);
         }
         this.store.commit();
-        this.store.setTool('select');
-        this.store.select([gesture.id]);
-        this.refreshOverlay();
+        this.doneCreating([gesture.id]);
         return;
       }
       case 'connector': {
@@ -702,9 +863,7 @@ export class Controller {
         const short = connector?.type === 'connector' && !connector.target.bind && distance(gesture.origin, world) * this.store.view.zoom < 10;
         if (!connector || short) { this.store.cancel(); this.refreshOverlay(); return; }
         this.store.commit();
-        this.store.setTool('select');
-        this.store.select([gesture.id]);
-        this.refreshOverlay();
+        this.doneCreating([gesture.id]);
         return;
       }
       case 'pen': return this.finishStroke(gesture.points);
@@ -752,7 +911,7 @@ export class Controller {
       color: this.store.style.stroke === '#ffffff' ? '#1f2328' : this.store.style.stroke, fontSize: 20, textAlign: 'left' };
     this.store.begin();
     this.store.preview([...this.elements, el]);
-    this.store.setTool('select');
+    if (!this.store.toolLocked) this.store.setTool('select');
     this.startEditing(id);
   }
 
@@ -762,15 +921,20 @@ export class Controller {
       color: this.store.style.noteColor, fontSize: 16, textAlign: 'left' };
     this.store.begin();
     this.store.preview([...this.elements, el]);
-    this.store.setTool('select');
+    if (!this.store.toolLocked) this.store.setTool('select');
     this.startEditing(id);
   }
 
   private createMind(world: Point) {
     const root = createMindRoot(this.host.newId(), world.x, world.y, '中心主题', this.host.measure);
     this.store.commit([...this.elements, root]);
-    this.store.setTool('select');
-    this.store.select([root.id]);
+    this.doneCreating([root.id]);
+  }
+
+  /** Hand back to the select tool after creating something, unless the tool was locked by a double-click. */
+  private doneCreating(ids: string[]) {
+    if (!this.store.toolLocked) this.store.setTool('select');
+    this.store.select(ids);
     this.refreshOverlay();
   }
 
@@ -798,7 +962,7 @@ export class Controller {
     if (!this.canEdit(el)) return;
     this.store.begin();
     if (el!.type === 'text') {
-      const natural = textBlockSize(el!.text, Infinity, el!.fontSize, Boolean(el!.bold), this.host.measure).width + 2;
+      const natural = layoutText(el!, Infinity, this.host.measure).width + 2;
       if (el!.text && Math.abs(natural - el!.w) > 2 && el!.w > natural) this.fixedWidth.add(id);
     }
     this.store.editingId = id;
@@ -824,15 +988,48 @@ export class Controller {
     let next: El;
     if (el.type === 'frame') next = { ...el, name: text.replace(/\n/g, ' ') };
     else if (el.type === 'connector') next = { ...el, text };
-    else if (el.type === 'text') next = fitText({ ...el, text }, this.host.measure, !this.fixedWidth.has(id));
-    else if (el.type === 'shape') next = el.mindParentId !== undefined ? fitMindNode({ ...el, text }, this.host.measure) : fitText({ ...el, text }, this.host.measure);
-    else if (el.type === 'note') next = fitText({ ...el, text }, this.host.measure);
+    // Styled pieces follow the edit: kept text keeps its style, typed text takes the style before it.
+    else if (isTextual(el)) next = this.refit(withRuns({ ...el, text }, editRuns(el.runs, el.text, text, { bold: el.bold, fontSize: el.fontSize })));
     else return;
-    let elements = this.elements.map(item => item.id === id ? next : item);
-    if (isMindNode(next)) elements = layoutMindsOf(elements, [id]);
+    this.showEdit(next);
+  }
+
+  private refit(el: Textual): El {
+    if (el.type === 'text') return fitText(el, this.host.measure, !this.fixedWidth.has(el.id));
+    if (el.type === 'shape' && el.mindParentId !== undefined) return fitMindNode(el, this.host.measure);
+    return fitText(el, this.host.measure);
+  }
+
+  private showEdit(next: El) {
+    let elements = this.elements.map(item => item.id === next.id ? next : item);
+    if (isMindNode(next)) elements = layoutMindsOf(elements, [next.id]);
     this.store.preview(elements);
     this.store.persistPreview();
     this.refreshOverlay();
+  }
+
+  /** The text being edited with its styled pieces, for the editor to draw them. */
+  editingSource(): { text: string; runs?: readonly Run[] | undefined; fontSize: number; bold?: boolean | undefined; styled: boolean } | null {
+    const el = this.store.editingId ? this.index.get(this.store.editingId) : undefined;
+    if (!el) return null;
+    if (isTextual(el)) return { text: el.text, runs: el.runs, fontSize: el.fontSize, bold: el.bold, styled: true };
+    return { text: elementText(el), fontSize: 14, styled: false };
+  }
+
+  /** Style shared by the characters in `[from, to)` of the text being edited. */
+  editingStyle(from: number, to: number) {
+    const el = this.store.editingId ? this.index.get(this.store.editingId) : undefined;
+    return isTextual(el) ? rangeStyle(el.text, el.runs, from, to) : {};
+  }
+
+  /** Bold, italic, colour or size for part of the text being edited; saved like typing. */
+  styleText(from: number, to: number, patch: RunPatch) {
+    const el = this.store.editingId ? this.index.get(this.store.editingId) : undefined;
+    if (!isTextual(el) || from === to) return;
+    const fontSize = patch.fontSize == null ? patch.fontSize : Math.min(whiteboardLimits.maxFontSize, Math.max(whiteboardLimits.minFontSize, Math.round(patch.fontSize)));
+    const runs = styleRange(el.text, el.runs, from, to, { ...patch, ...(patch.fontSize !== undefined ? { fontSize } : {}) }, { bold: el.bold, fontSize: el.fontSize });
+    if (JSON.stringify(runs ?? null) === JSON.stringify(el.runs ?? null)) return;
+    this.showEdit(this.refit(withRuns(el, runs)));
   }
 
   finishEditing(then: EditFinish = 'none') {
@@ -906,6 +1103,12 @@ export class Controller {
     const world = this.world(screen);
     // Two quick clicks on a collapse button fold and unfold; they are not a double-click on the canvas.
     if (this.toggleAt(world)) return;
+    // On a route handle a double-click adds a bend point (segment middle) or takes one away (corner).
+    const route = this.routeHandleAt(screen);
+    if (route) {
+      if (route.kind === 'corner') this.removeBend(route.id, route.index); else this.addBend(route.id, route.index, route.point);
+      return;
+    }
     const hit = this.hit(world) ?? this.frameTitleAt(screen);
     // The first double-click on a grouped element steps into its group; the next one acts on the element.
     if (hit && !this.store.readOnly && this.enterGroup(hit.id)) return;
@@ -1087,13 +1290,13 @@ export class Controller {
     if (info) this.apply(setMindLayout(this.elements, info.rootId, layout));
   }
 
-  /** Put the middle segment of the selected elbow connectors back where the route places it. */
-  resetBend() {
+  /** Drop the bend points of the selected connectors, so their routes are worked out automatically again. */
+  resetRoute() {
     const ids = this.editable();
     this.apply(this.elements.map(el => {
-      if (el.type !== 'connector' || !ids.has(el.id) || el.bend === undefined) return el;
-      const { bend: _bend, ...rest } = el;
-      void _bend;
+      if (el.type !== 'connector' || !ids.has(el.id) || (el.bend === undefined && el.waypoints === undefined)) return el;
+      const { bend: _bend, waypoints: _waypoints, ...rest } = el;
+      void _bend; void _waypoints;
       return rest;
     }));
   }
@@ -1184,7 +1387,7 @@ export class Controller {
   textElement(text: string): WhiteboardText {
     const base: WhiteboardText = { id: this.host.newId(), type: 'text', x: 0, y: 0, w: 400, h: 20, angle: 0,
       text: text.slice(0, whiteboardLimits.maxText), color: '#1f2328', fontSize: 16, textAlign: 'left' };
-    const natural = textBlockSize(base.text, Infinity, 16, false, this.host.measure).width + 2;
+    const natural = layoutText(base, Infinity, this.host.measure).width + 2;
     return fitText({ ...base, w: Math.min(480, Math.max(textMinWidth, natural)) }, this.host.measure) as WhiteboardText;
   }
 

@@ -24,12 +24,10 @@ export function placePage<T extends TreeItem>(pages: readonly T[], id: string, {
   return [...rest.slice(0, index), moved, ...rest.slice(index)];
 }
 
-/** The placement that moves a page one step among its siblings, or null at either end. */
-export function siblingStep(pages: readonly TreeItem[], id: string, direction: -1 | 1): PagePlacement | null {
-  const page = pages.find(item => item.id === id);
+/** The placement that moves `siblings[index]` one step among `siblings`, or null at either end. */
+export function siblingStep(siblings: readonly TreeItem[], index: number, direction: -1 | 1): PagePlacement | null {
+  const page = siblings[index];
   if (!page) return null;
-  const siblings = pages.filter(item => item.parentId === page.parentId);
-  const index = siblings.findIndex(item => item.id === id);
   const target = index + direction;
   if (target < 0 || target >= siblings.length) return null;
   const afterIndex = direction < 0 ? target - 1 : target;

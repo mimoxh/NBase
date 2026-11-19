@@ -127,8 +127,9 @@ test('server query matches evaluateView for every filter and sort', {
     }
     assert.ok(cases > 150, `only ${cases} cases`);
 
-    // Board groups match the in-memory split, including removed options and unchecked rows.
-    for (const def of [f.select, f.done]) {
+    // Board groups match the in-memory split, including removed options, unchecked rows and a multi-select row in
+    // the column of each of its options.
+    for (const def of [f.select, f.done, f.multi]) {
       const response = await instance.inject({ method: 'POST', url: `${base}/databases/${db.page.id}/query`, headers: write,
         payload: { filters: [], sorts: [{ propertyId: f.number.id, direction: 'asc' }], groupBy: def.id, context } });
       assert.equal(response.statusCode, 200, response.body);

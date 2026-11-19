@@ -1,0 +1,45 @@
+/* ── Settings dialog ── */
+.nb-app .modal-large:has(> .nb-settings) { width: min(880px, calc(100vw - 32px)); height: min(640px, 86dvh); }
+.nb-app .modal-large:has(> .nb-settings) > .modal-heading { padding-bottom: 12px; border-bottom: 1px solid var(--nb-line); }
+.nb-app .modal-large > .nb-settings { flex: 1; min-height: 0; padding: 0; display: grid; grid-template-columns: 188px minmax(0, 1fr); }
+.nb-settings-nav { display: flex; flex-direction: column; gap: 2px; padding: 10px 8px; border-right: 1px solid var(--nb-line); background: var(--nb-sidebar); overflow-y: auto; }
+.nb-settings-tab { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: transparent; border-radius: 6px; padding: 6px 10px; min-height: 32px; font-size: 13px; color: var(--nb-text); cursor: pointer; text-align: left; white-space: nowrap; }
+.nb-settings-tab:hover { background: var(--nb-hover); }
+.nb-settings-tab.selected { background: var(--nb-accent-soft); color: var(--nb-accent-text); font-weight: 550; }
+.nb-settings-panel { grid-column: 2; grid-row: 1; min-height: 0; overflow-y: auto; padding: 6px 24px 24px; }
+.nb-settings-title { font-size: 15px; font-weight: 650; margin: 14px 0 6px; }
+.nb-settings-group { margin-top: 14px; }
+.nb-settings-group h4 { font-size: 12px; font-weight: 600; color: var(--nb-muted); margin: 0 0 6px; }
+.nb-settings-hint { font-size: 12px; color: var(--nb-faint); margin: -2px 0 8px; line-height: 1.6; }
+.nb-settings-card { border: 1px solid var(--nb-line); border-radius: var(--nb-radius); }
+.nb-settings-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 14px; flex-wrap: wrap; }
+.nb-settings-row + .nb-settings-row { border-top: 1px solid var(--nb-line); }
+.nb-settings-row-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 200px; }
+.nb-settings-row-label { font-size: 13px; }
+.nb-settings-row-desc { font-size: 12px; color: var(--nb-muted); line-height: 1.5; }
+.nb-settings-row-control { display: flex; align-items: center; gap: 8px; }
+.nb-settings-row-control .nb-btn { display: inline-flex; align-items: center; gap: 5px; }
+.nb-settings-value { font-size: 13px; color: var(--nb-muted); overflow-wrap: anywhere; }
+.nb-segmented { display: inline-flex; padding: 2px; gap: 2px; border-radius: 7px; background: var(--nb-hover); }
+.nb-segmented button { border: 0; background: transparent; border-radius: 5px; padding: 4px 12px; font-size: 12px; color: var(--nb-muted); cursor: pointer; white-space: nowrap; }
+.nb-segmented button:hover { color: var(--nb-text); }
+.nb-segmented button.selected { background: var(--nb-bg); color: var(--nb-text); font-weight: 550; box-shadow: 0 1px 2px rgba(15, 17, 20, .12); }
+.nb-switch { position: relative; display: inline-flex; width: 34px; height: 20px; flex: 0 0 auto; cursor: pointer; }
+.nb-switch input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.nb-switch span { width: 100%; height: 100%; border-radius: 10px; background: var(--nb-line); transition: background .15s; }
+.nb-switch span::after { content: ''; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(15, 17, 20, .25); transition: transform .15s; }
+.nb-switch input:checked + span { background: var(--nb-accent); }
+.nb-switch input:checked + span::after { transform: translateX(14px); }
+.nb-switch input:focus-visible + span { box-shadow: var(--nb-ring); }
+.nb-settings-panel .nb-members { padding-top: 0; }
+.nb-settings-form { max-width: 440px; }
+.nb-settings-form .dialog-actions { justify-content: flex-start; }
+
+@container (max-width: 720px) {
+  .nb-app .modal-large:has(> .nb-settings) { width: 100vw; height: 100dvh; max-width: none; max-height: none; }
+  .nb-app .modal-large > .nb-settings { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .nb-settings-nav { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--nb-line); padding: 6px 8px; }
+  .nb-settings-tab { width: auto; flex: 0 0 auto; min-height: 40px; }
+  .nb-settings-panel { grid-column: 1; grid-row: 2; padding: 4px 16px 20px; }
+  .nb-settings-form { max-width: none; }
+}

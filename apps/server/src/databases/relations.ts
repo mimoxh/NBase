@@ -4,6 +4,7 @@ import { activeProperties, databaseRelationLimit, databaseRelationPreview, type 
 import type { PoolClient } from 'pg';
 import { PageError } from '../pages/repository.js';
 import { markRowsChanged } from './computed.js';
+import { recordSchemaVersion } from './history.js';
 import { databaseRow, loadDatabaseSchema, syncRelationLinks, type RowRecord } from './schema.js';
 
 type Snapshot = (client: PoolClient, workspaceId: string, ids: string[], actorId: string, operation: 'update') => Promise<void>;
@@ -14,7 +15,7 @@ async function activeDatabase(client: PoolClient, workspaceId: string, databaseI
 }
 
 /** Adds the paired fields to both databases in one transaction. Rows are locked in id order, so two pairings cannot deadlock. */
-export async function createRelation(client: PoolClient, workspaceId: string, databaseId: string, body: CreateRelationRequest): Promise<DatabaseSchemaResponse> {
+export async function createRelation(client: PoolClient, workspaceId: string, actorId: string, databaseId: string, body: CreateRelationRequest): Promise<DatabaseSchemaResponse> {
   const target = body.targetDatabaseId.toLowerCase();
   const [first, second] = [databaseId, target].sort() as [string, string];
   const firstSchema = await activeDatabase(client, workspaceId, first);
@@ -26,9 +27,13 @@ export async function createRelation(client: PoolClient, workspaceId: string, da
   const pairedId = randomUUID();
   const owner: PropertyDefinition = { id: ownerId, name: body.name, type: 'relation', relation: { databaseId: target, pairedPropertyId: pairedId, owner: true } };
   const paired: PropertyDefinition = { id: pairedId, name: body.pairedName, type: 'relation', relation: { databaseId, pairedPropertyId: ownerId, owner: false } };
-  const write = async (id: string, properties: PropertyDefinition[]) => (await client.query<{ revision: string }>(`UPDATE databases SET properties_json = $3::jsonb,
-    revision = revision + 1, updated_at = now() WHERE workspace_id = $1 AND page_id = $2 RETURNING revision::text AS revision`,
-  [workspaceId, id, JSON.stringify(properties)])).rows[0]!.revision;
+  const write = async (id: string, properties: PropertyDefinition[]) => {
+    const revision = (await client.query<{ revision: string }>(`UPDATE databases SET properties_json = $3::jsonb,
+      revision = revision + 1, updated_at = now() WHERE workspace_id = $1 AND page_id = $2 RETURNING revision::text AS revision`,
+    [workspaceId, id, JSON.stringify(properties)])).rows[0]!.revision;
+    await recordSchemaVersion(client, workspaceId, id, actorId, 'relation');
+    return revision;
+  };
   if (target === databaseId) {
     const properties = [...source.properties_json, owner, paired];
     return { pageId: databaseId, properties, views: source.views_json as DatabaseSchemaResponse['views'], schemaRevision: await write(databaseId, properties) };
@@ -39,7 +44,7 @@ export async function createRelation(client: PoolClient, workspaceId: string, da
 }
 
 /** A relation field's soft delete or restore applies to its pair, which may live in another database. */
-export async function mirrorRelationDeletion(client: PoolClient, workspaceId: string, before: PropertyDefinition[], after: PropertyDefinition[]): Promise<PropertyDefinition[]> {
+export async function mirrorRelationDeletion(client: PoolClient, workspaceId: string, actorId: string, before: PropertyDefinition[], after: PropertyDefinition[]): Promise<PropertyDefinition[]> {
   let result = after;
   for (const def of after) {
     if (def.type !== 'relation' || !def.relation) continue;
@@ -57,6 +62,7 @@ export async function mirrorRelationDeletion(client: PoolClient, workspaceId: st
     if (other) {
       await client.query(`UPDATE databases SET properties_json = $3::jsonb, revision = revision + 1, updated_at = now() WHERE workspace_id = $1 AND page_id = $2`,
         [workspaceId, def.relation.databaseId, JSON.stringify(other.properties_json.map(apply))]);
+      await recordSchemaVersion(client, workspaceId, def.relation.databaseId, actorId, 'relation');
     }
   }
   return result;

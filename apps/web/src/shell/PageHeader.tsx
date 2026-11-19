@@ -42,6 +42,8 @@ export interface PageHeaderProps {
   editable: boolean;
   onIcon: (icon: string | null) => void;
   onCover: (cover: PageCoverId | null) => void;
+  /** More buttons next to "add icon" and "add cover", shown only when the page is editable. */
+  extraActions?: ReactNode;
 }
 
 export function PageHeader(props: PageHeaderProps) {
@@ -55,6 +57,7 @@ export function PageHeader(props: PageHeaderProps) {
       {props.editable && <div className="nb-ghost-actions">
         {!props.icon && <button onClick={() => setPicker('emoji')}><Icon name="smile" size={14} />添加图标</button>}
         {!props.cover && <button onClick={() => setPicker('cover')}><Icon name="image" size={14} />添加封面</button>}
+        {props.extraActions}
       </div>}
       <div className="nb-doc-title-row">
         {props.icon

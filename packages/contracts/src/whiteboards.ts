@@ -1,4 +1,5 @@
 import type { StoredDocumentContent } from './pages.js';
+import { textColorIds, type TextColorId } from './textStyle.js';
 
 /**
  * A whiteboard page stores its board next to an empty document body, so every consumer of
@@ -21,6 +22,10 @@ export const whiteboardLimits = {
   maxFontSize: 400,
   /** Levels of groups an element can sit in: `groupId` plus `groupParents`. */
   maxGroupDepth: 8,
+  /** Styled pieces of one element's text. */
+  maxRuns: 500,
+  /** User-placed bend points of one connector. */
+  maxWaypoints: 100,
 } as const;
 
 export const whiteboardShapeKinds = ['rect', 'roundRect', 'ellipse', 'diamond', 'triangle'] as const;
@@ -33,6 +38,23 @@ export const whiteboardConnectorModes = ['straight', 'elbow', 'curve'] as const;
 export type WhiteboardConnectorMode = typeof whiteboardConnectorModes[number];
 export const whiteboardArrowheads = ['none', 'arrow', 'triangle', 'dot', 'diamond'] as const;
 export type WhiteboardArrowhead = typeof whiteboardArrowheads[number];
+
+/**
+ * A piece of an element's text with its own style. Absent fields fall back to the element's own
+ * style, so a board written before runs existed reads exactly as before. The runs of an element
+ * always spell out its `text`, which stays the plain form every reader (search, clipboard,
+ * backlinks) uses.
+ */
+export interface WhiteboardTextRun {
+  text: string;
+  bold?: boolean;
+  italic?: boolean;
+  /** A palette entry, resolved per theme when drawn. */
+  color?: TextColorId;
+  fontSize?: number;
+}
+
+export interface WhiteboardPoint { x: number; y: number }
 
 interface BoxElement {
   /** Client-generated UUID; a persistent identity that connectors and mind-map children refer to. */
@@ -63,12 +85,15 @@ export interface WhiteboardShape extends BoxElement {
   fontSize: number;
   textAlign: WhiteboardTextAlign;
   bold?: boolean;
+  runs?: WhiteboardTextRun[];
   /** Present on mind-map nodes: the parent node id, or null on the root. */
   mindParentId?: string | null;
   /** Mind-map nodes only: the node's descendants are hidden until it is expanded again. */
   mindCollapsed?: boolean;
   /** Children of a mind-map root only: the branch grows to the left of the root instead of the right. */
   mindSide?: 'left';
+  /** Mind-map roots only: the map grows downwards as an organisation chart instead of sideways. */
+  mindLayout?: 'down';
 }
 
 export interface WhiteboardText extends BoxElement {
@@ -78,6 +103,7 @@ export interface WhiteboardText extends BoxElement {
   fontSize: number;
   textAlign: WhiteboardTextAlign;
   bold?: boolean;
+  runs?: WhiteboardTextRun[];
 }
 
 export interface WhiteboardNote extends BoxElement {
@@ -88,6 +114,7 @@ export interface WhiteboardNote extends BoxElement {
   fontSize: number;
   textAlign: WhiteboardTextAlign;
   bold?: boolean;
+  runs?: WhiteboardTextRun[];
 }
 
 export interface WhiteboardFrame extends BoxElement {
@@ -148,8 +175,13 @@ export interface WhiteboardConnector {
   startArrow: WhiteboardArrowhead;
   endArrow: WhiteboardArrowhead;
   text: string;
-  /** Elbow mode only: how far the user moved the free middle segment from where the router puts it. */
+  /** Elbow mode, older boards: how far the user moved the free middle segment from where the router puts it. `waypoints` replace it. */
   bend?: number;
+  /**
+   * Bend points the user placed, in world coordinates, between the two ends. Elbow connectors pass
+   * through them orthogonally and straight ones as a polyline; with none the route is automatic.
+   */
+  waypoints?: WhiteboardPoint[];
   locked?: boolean;
   groupId?: string;
   groupParents?: string[];
@@ -178,16 +210,16 @@ const lineBreaks = new RegExp(`[\\n\\r${String.fromCharCode(0x2028, 0x2029)}]`);
 
 const boxKeys = ['id', 'type', 'x', 'y', 'w', 'h', 'angle', 'locked', 'groupId', 'groupParents'];
 const allowedKeys: Record<WhiteboardElementType, ReadonlySet<string>> = {
-  shape: new Set([...boxKeys, 'shape', 'fill', 'stroke', 'strokeWidth', 'strokeStyle', 'text', 'textColor', 'fontSize', 'textAlign', 'bold',
-    'mindParentId', 'mindCollapsed', 'mindSide']),
-  text: new Set([...boxKeys, 'text', 'color', 'fontSize', 'textAlign', 'bold']),
-  note: new Set([...boxKeys, 'text', 'color', 'fontSize', 'textAlign', 'bold']),
+  shape: new Set([...boxKeys, 'shape', 'fill', 'stroke', 'strokeWidth', 'strokeStyle', 'text', 'textColor', 'fontSize', 'textAlign', 'bold', 'runs',
+    'mindParentId', 'mindCollapsed', 'mindSide', 'mindLayout']),
+  text: new Set([...boxKeys, 'text', 'color', 'fontSize', 'textAlign', 'bold', 'runs']),
+  note: new Set([...boxKeys, 'text', 'color', 'fontSize', 'textAlign', 'bold', 'runs']),
   frame: new Set([...boxKeys, 'name']),
   image: new Set([...boxKeys, 'attachmentId', 'fileName', 'mediaType']),
   card: new Set([...boxKeys, 'pageId', 'label', 'view']),
   database: new Set([...boxKeys, 'databaseId', 'viewId']),
   pen: new Set([...boxKeys, 'points', 'color', 'strokeWidth', 'highlighter']),
-  connector: new Set(['id', 'type', 'mode', 'source', 'target', 'stroke', 'strokeWidth', 'strokeStyle', 'startArrow', 'endArrow', 'text', 'bend',
+  connector: new Set(['id', 'type', 'mode', 'source', 'target', 'stroke', 'strokeWidth', 'strokeStyle', 'startArrow', 'endArrow', 'text', 'bend', 'waypoints',
     'locked', 'groupId', 'groupParents']),
 };
 
@@ -214,6 +246,30 @@ function endProblem(end: unknown): string | null {
   if (!record(bind) || Object.keys(bind).some(key => !['elementId', 'ax', 'ay'].includes(key))
     || !uuid(bind.elementId) || !finite(bind.ax, 0, 1) || !finite(bind.ay, 0, 1)) return 'connector binding';
   return null;
+}
+
+const runKeys = new Set(['text', 'bold', 'italic', 'color', 'fontSize']);
+
+/** Runs are optional; when present they are non-empty pieces that spell out the element's text exactly. */
+function runsOk(runs: unknown, plain: unknown): boolean {
+  if (runs === undefined) return true;
+  if (!Array.isArray(runs) || runs.length < 1 || runs.length > whiteboardLimits.maxRuns || typeof plain !== 'string') return false;
+  let joined = '';
+  for (const run of runs) {
+    if (!record(run) || Object.keys(run).some(key => forbiddenKeys.has(key) || !runKeys.has(key))) return false;
+    if (!text(run.text, whiteboardLimits.maxText) || !run.text.length || !optionalFlag(run.bold) || !optionalFlag(run.italic)) return false;
+    if (run.color !== undefined && !oneOf(textColorIds, run.color)) return false;
+    if (run.fontSize !== undefined && !finite(run.fontSize, whiteboardLimits.minFontSize, whiteboardLimits.maxFontSize)) return false;
+    joined += run.text;
+    if (joined.length > plain.length) return false;
+  }
+  return joined === plain;
+}
+
+function waypointsOk(points: unknown): boolean {
+  if (points === undefined) return true;
+  if (!Array.isArray(points) || points.length < 1 || points.length > whiteboardLimits.maxWaypoints) return false;
+  return points.every(point => record(point) && Object.keys(point).length === 2 && coordinate(point.x) && coordinate(point.y));
 }
 
 /** Nested groups name each enclosing group once, and only on elements that are grouped at all. */
@@ -243,12 +299,14 @@ function elementProblem(el: unknown): string | null {
       || !oneOf(whiteboardStrokeStyles, el.strokeStyle) || !oneOf(whiteboardArrowheads, el.startArrow)
       || !oneOf(whiteboardArrowheads, el.endArrow) || !text(el.text, whiteboardLimits.maxLabel)
       || (el.bend !== undefined && !coordinate(el.bend))) return 'connector';
+    if (!waypointsOk(el.waypoints)) return 'connector waypoints';
     return endProblem(el.source) ?? endProblem(el.target);
   }
   if (!coordinate(el.x) || !coordinate(el.y) || !finite(el.w, 0, whiteboardLimits.maxSize)
     || !finite(el.h, 0, whiteboardLimits.maxSize) || !finite(el.angle, -1000, 1000)) return `${type} box`;
   const fontOk = () => finite(el.fontSize, whiteboardLimits.minFontSize, whiteboardLimits.maxFontSize)
     && oneOf(whiteboardTextAligns, el.textAlign) && text(el.text, whiteboardLimits.maxText);
+  if ((type === 'shape' || type === 'text' || type === 'note') && !runsOk(el.runs, el.text)) return `${type} runs`;
   switch (type as WhiteboardBoxElement['type']) {
     case 'shape':
       return oneOf(whiteboardShapeKinds, el.shape) && color(el.fill) && color(el.stroke) && color(el.textColor)
@@ -257,7 +315,8 @@ function elementProblem(el: unknown): string | null {
         && (el.mindParentId === undefined || el.mindParentId === null || uuid(el.mindParentId))
         // Collapsing and sides only mean something inside a mind map; a side needs a parent to be beside.
         && optionalFlag(el.mindCollapsed) && (el.mindCollapsed === undefined || el.mindParentId !== undefined)
-        && (el.mindSide === undefined || (el.mindSide === 'left' && typeof el.mindParentId === 'string')) ? null : 'shape';
+        && (el.mindSide === undefined || (el.mindSide === 'left' && typeof el.mindParentId === 'string'))
+        && (el.mindLayout === undefined || (el.mindLayout === 'down' && el.mindParentId === null)) ? null : 'shape';
     case 'text': return color(el.color) && fontOk() && optionalFlag(el.bold) ? null : 'text';
     case 'note': return color(el.color) && fontOk() && optionalFlag(el.bold) ? null : 'note';
     case 'frame': return text(el.name, whiteboardLimits.maxName) ? null : 'frame';

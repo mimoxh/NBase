@@ -1,4 +1,4 @@
-import type { AttachmentMetadata, UpdatePageRequest } from '@nbase/contracts';
+import type { AttachmentMetadata, PageKind, UpdatePageRequest } from '@nbase/contracts';
 import type { FolderImportPlan, FolderSourceFile } from './folderPlan';
 
 export type FolderItemStatus = 'pending' | 'success' | 'failed' | 'cancelled';
@@ -11,7 +11,8 @@ export interface FolderBatchScope {
 export interface FolderBatchPage {
   key: string;
   status: FolderItemStatus;
-  skeleton?: { id: string; revision: string };
+  /** `kind` is absent in batches saved before it was kept; such pages are treated as documents. */
+  skeleton?: { id: string; revision: string; kind?: PageKind | undefined };
   createStarted?: boolean;
   cancelAfterCreate?: boolean;
   pendingUpdate?: UpdatePageRequest;

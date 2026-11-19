@@ -82,6 +82,23 @@ export function arrowheadPath(kind: WhiteboardArrowhead, tip: Point, direction: 
   return { d: `M${n(tip.x)} ${n(tip.y)}L${n(mid.x + normal.x * w2)} ${n(mid.y + normal.y * w2)}L${n(far.x)} ${n(far.y)}L${n(mid.x - normal.x * w2)} ${n(mid.y - normal.y * w2)}Z`, filled: true };
 }
 
+/** The same arrowhead as a polyline, for turning a connector into freehand strokes. */
+export function arrowheadPoints(kind: WhiteboardArrowhead, tip: Point, direction: Point, strokeWidth: number): Point[] | null {
+  if (kind === 'none') return null;
+  const size = arrowSize(strokeWidth);
+  const normal = { x: -direction.y, y: direction.x };
+  const at = (back: number, side: number): Point => ({ x: tip.x - direction.x * size * back + normal.x * side, y: tip.y - direction.y * size * back + normal.y * side });
+  const wing = size * 0.55;
+  if (kind === 'arrow') return [at(1, wing), tip, at(1, -wing)];
+  if (kind === 'triangle') return [at(1, wing), tip, at(1, -wing), at(1, wing)];
+  if (kind === 'dot') {
+    const r = size * 0.36, c = at(0.36, 0);
+    return Array.from({ length: 25 }, (_, i) => ({ x: c.x + r * Math.cos(i / 24 * Math.PI * 2), y: c.y + r * Math.sin(i / 24 * Math.PI * 2) }));
+  }
+  const w2 = size * 0.4;
+  return [tip, at(0.6, w2), at(1.2, 0), at(0.6, -w2), tip];
+}
+
 /** Dash pattern scaled with the stroke so dashes stay legible at any width. */
 export function dashArray(style: 'solid' | 'dashed' | 'dotted', strokeWidth: number): number[] {
   if (style === 'dashed') return [strokeWidth * 4 + 4, strokeWidth * 2.5 + 3];
@@ -89,8 +106,15 @@ export function dashArray(style: 'solid' | 'dashed' | 'dotted', strokeWidth: num
   return [];
 }
 
-/** Bezier edge between two mind-map nodes; it leaves the parent horizontally towards the child. */
-export function mindEdgePath(from: Point, to: Point): string {
+/**
+ * Edge between two mind-map nodes: a Bezier leaving the parent horizontally towards the child, or
+ * in an organisation chart a square bracket down from the parent's bottom to the child's top.
+ */
+export function mindEdgePath(from: Point, to: Point, down = false): string {
+  if (down) {
+    const middle = (from.y + to.y) / 2;
+    return `M${n(from.x)} ${n(from.y)}V${n(middle)}H${n(to.x)}V${n(to.y)}`;
+  }
   const dx = Math.max(24, Math.abs(to.x - from.x) / 2) * (to.x < from.x ? -1 : 1);
   return `M${n(from.x)} ${n(from.y)}C${n(from.x + dx)} ${n(from.y)} ${n(to.x - dx)} ${n(to.y)} ${n(to.x)} ${n(to.y)}`;
 }

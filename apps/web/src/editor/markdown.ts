@@ -1,5 +1,6 @@
 import { $createCodeNode } from '@lexical/code';
 import { isCalloutKind, isCalloutTitle, isMarkdownFrontMatter, markdownFrontMatterKey, pageIdFromReferenceUrl, pageReferenceUrl, whiteboardViewHeight } from '@nbase/contracts';
+import type { PageProperty } from '@nbase/contracts';
 import { createEditor, createState, $setState } from 'lexical';
 import type { EditorState } from 'lexical';
 import { $isLinkNode } from '@lexical/link';
@@ -26,7 +27,7 @@ import {
   FootnoteDefinitionNode, FootnoteReferenceNode,
 } from './nodes/FootnoteNodes';
 import { legacyPageReferencePattern } from './legacyPageReferences';
-import { readMarkdownFrontMatter } from './markdownFrontMatter';
+import { propertiesFromFrontMatter, readMarkdownFrontMatter } from './markdownFrontMatter';
 import { maskMarkdownInlineLiterals, resolveMarkdownReferences } from './markdownReferences';
 import { normalizeCodeBlockLanguage } from './codeLanguages';
 import { MERMAID_TRANSFORMER } from './mermaidMarkdown';
@@ -41,7 +42,8 @@ import { $createBlockReferenceNode, $isBlockReferenceNode, BlockReferenceNode } 
 import { $resolveHtmlSubset, ALIGNED_BLOCK, BOOKMARK_BLOCK, createToggleTransformer, encodeHtmlSubset, textStyleSpan } from './markdownHtmlSubset';
 import type { DocumentContent, EditorSnapshot, MarkdownAssessment, OutlineItem } from './types';
 
-export { addMarkdownFrontMatter, getMarkdownFrontMatter, readMarkdownFrontMatter } from './markdownFrontMatter';
+export { addMarkdownFrontMatter, getMarkdownFrontMatter, pagePropertiesFrontMatter, propertiesFromFrontMatter, readMarkdownFrontMatter,
+  rowPropertiesFrontMatter } from './markdownFrontMatter';
 
 const frontMatterState = createState(markdownFrontMatterKey, { parse: value => isMarkdownFrontMatter(value) ? value : null });
 
@@ -529,6 +531,8 @@ export interface MarkdownImportResult {
   content: DocumentContent;
   title?: string;
   tagNames: string[];
+  /** Unknown header keys turned into the page's own properties. */
+  pageProperties: PageProperty[];
   warnings: string[];
   preservedAsSource: boolean;
 }
@@ -559,6 +563,7 @@ export function parseMarkdownImport(markdown: string, transformers = MARKDOWN_TR
       return [true, startLineIndex];
     },
   };
+  const { properties: pageProperties, metadata } = propertiesFromFrontMatter(header.metadata);
   const editor = createEditor({ namespace: 'nbase-markdown', nodes: EDITOR_NODES, onError: error => { throw error; } });
   let unresolved = false;
   editor.update(() => {
@@ -575,15 +580,15 @@ export function parseMarkdownImport(markdown: string, transformers = MARKDOWN_TR
       if (!$resolveHtmlSubset(root)) {
         unresolved = true;
         root.clear().append($createCodeNode('markdown').append($createTextNode(markdown)));
-      } else if (Object.keys(header.metadata).length) $setState(root, frontMatterState, header.metadata);
+      } else if (Object.keys(metadata).length) $setState(root, frontMatterState, metadata);
     }
   }, { discrete: true });
-  if (unresolved) return { content: { schemaVersion: 1, editorState: editor.getEditorState().toJSON() }, tagNames: [],
+  if (unresolved) return { content: { schemaVersion: 1, editorState: editor.getEditorState().toJSON() }, tagNames: [], pageProperties: [],
     warnings: [...warnings, '检测到无法定位的颜色、对齐或折叠标记，此文档将以 Markdown 代码原文保留。'], preservedAsSource: true };
   return {
     content: { schemaVersion: 1, editorState: editor.getEditorState().toJSON() },
     ...(!preservedAsSource && header.title !== undefined ? { title: header.title } : {}),
-    tagNames: preservedAsSource ? [] : header.tagNames, warnings, preservedAsSource,
+    tagNames: preservedAsSource ? [] : header.tagNames, pageProperties: preservedAsSource ? [] : pageProperties, warnings, preservedAsSource,
   };
 }
 

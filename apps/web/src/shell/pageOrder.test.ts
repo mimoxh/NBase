@@ -24,12 +24,13 @@ describe('page placement', () => {
   });
 
   it('steps among siblings and stops at both ends', () => {
-    expect(siblingStep(pages, 'b', -1)).toEqual({ parentId: null, afterId: null });
-    expect(siblingStep(pages, 'b', 1)).toEqual({ parentId: null, afterId: 'c' });
-    expect(siblingStep(pages, 'c', -1)).toEqual({ parentId: null, afterId: 'a' });
-    expect(siblingStep(pages, 'a', -1)).toBeNull();
-    expect(siblingStep(pages, 'c', 1)).toBeNull();
-    expect(siblingStep(pages, 'missing', 1)).toBeNull();
+    const roots = pages.filter(item => item.parentId === null);
+    expect(siblingStep(roots, 1, -1)).toEqual({ parentId: null, afterId: null });
+    expect(siblingStep(roots, 1, 1)).toEqual({ parentId: null, afterId: 'c' });
+    expect(siblingStep(roots, 2, -1)).toEqual({ parentId: null, afterId: 'a' });
+    expect(siblingStep(roots, 0, -1)).toBeNull();
+    expect(siblingStep(roots, 2, 1)).toBeNull();
+    expect(siblingStep(roots, 5, 1)).toBeNull();
   });
 
   it('detects drops that would make a cycle', () => {

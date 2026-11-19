@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.NBase" parent="@android:style/Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@color/nb_bg</item>
+        <item name="android:colorAccent">@color/nb_accent</item>
+        <item name="android:colorPrimary">@color/nb_accent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <!-- The page follows prefers-color-scheme itself; ROM dark modes (MIUI/HyperOS) must not invert it again. -->
+        <item name="android:forceDarkAllowed">false</item>
+    </style>
+</resources>

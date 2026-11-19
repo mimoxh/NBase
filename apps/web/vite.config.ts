@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -16,9 +17,13 @@ export default defineConfig({
       },
     },
   },
+  test: {
+    // One jsdom fork per CPU sometimes dies with 0xC0000005 while starting on Windows under load.
+    maxWorkers: '50%',
+  },
   server: {
     port: 5173,
     strictPort: true,
-    proxy: { '/api': 'http://127.0.0.1:3001' },
+    proxy: { '/api': { target: 'http://127.0.0.1:3001', ws: true } },
   },
 });

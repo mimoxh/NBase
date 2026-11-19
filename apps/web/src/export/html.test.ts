@@ -115,6 +115,14 @@ describe('HTML export', () => {
     expect(single).toContain('附件：片.mp4（单文件 HTML 不含附件）');
     expect(single).not.toContain('<video');
     expect(render(doc, 'package', res)).toContain(`<video controls preload="none" src="assets/${audioId}.mp4"></video>`);
+    res.assetUrl = file => `/api/shared/s/attachments/${file.id}`;
+    const served = render(content([paragraph([
+      { type: 'attachment', version: 1, attachmentId: imageId, alt: '图', fileName: 'a.png', mediaType: 'image/png' },
+      { type: 'attachment', version: 1, attachmentId: audioId, alt: '', fileName: '片.mp4', mediaType: 'video/mp4' },
+    ])]), 'package', res);
+    expect(served).toContain(`<img src="/api/shared/s/attachments/${imageId}"`);
+    expect(served).toContain(`<video controls preload="none" src="/api/shared/s/attachments/${audioId}"></video>`);
+    expect(served).not.toContain('assets/');
   });
 
   it('ships non-image attachments beside index.html and embeds images otherwise', async () => {

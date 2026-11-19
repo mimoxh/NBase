@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { isWhiteboardContent, pageVersionLabelLimit, pageVersionNoteLimit, type PageSummary, type PageVersion, type PageVersionSummary, type StoredDocumentContent, type TrashedPageDocument,
+import { historySearchLimit, isWhiteboardContent, pageVersionLabelLimit, pageVersionNoteLimit, type HistorySearchMatch, type PageSummary, type PageVersion, type PageVersionSummary, type StoredDocumentContent, type TrashedPageDocument,
   type TrashedPageSummary } from '@nbase/contracts';
 import { LazyWhiteboard } from '../whiteboard/lazy';
 import { attachmentContentUrl } from '../whiteboard/host';
@@ -12,6 +12,7 @@ import { diffVersions, type DiffLine } from './versionDiff';
 import { groupHistory } from './historyGroups';
 import { PageIcon } from '../shell/PageTree';
 import { relativeTime } from '../shell/Topbar';
+import { invalidPhraseMessage, marked, pendingHistoryNotice, searchPhraseInvalid } from './searchText';
 
 const operationNames: Record<PageVersionSummary['operation'], string> = {
   baseline: '迁移基线', create: '创建', update: '保存', trash: '移入回收站', restore: '从回收站恢复', 'restore-version': '恢复历史',
@@ -71,6 +72,11 @@ function labelFailure(error: unknown): string {
 }
 
 const timeOf = (iso: string) => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const dayTimeOf = (iso: string) => new Date(iso).toLocaleString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+type HistorySearchState = { phase: 'idle' | 'loading' | 'ready' | 'error'; hits: HistorySearchMatch[]; truncated: boolean;
+  pending: number; error: string };
+const idleSearch: HistorySearchState = { phase: 'idle', hits: [], truncated: false, pending: 0, error: '' };
 
 /** Time of the version, led by its revision when a name takes the revision's place as the heading. */
 function versionCaption(version: PageVersionSummary): string {
@@ -78,12 +84,16 @@ function versionCaption(version: PageVersionSummary): string {
   return version.label ? `修订 ${version.revision} · ${time}` : time;
 }
 
-export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, canWrite, csrfToken, nameRevision, pageReferences,
-  onRestore, onAuthError, onClose }: {
+export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, canWrite, csrfToken, nameRevision, initialRevision,
+  initialQuery, pageReferences, onRestore, onAuthError, onClose }: {
   workspaceId: string; pageId: string; currentRevision: string; busy: boolean;
   canWrite: boolean; csrfToken: string;
   /** Opens with this version selected and its name form shown. */
   nameRevision?: string | undefined;
+  /** Opens with this version selected, such as a history search hit. */
+  initialRevision?: string | undefined;
+  /** Opens with the history search already filled in. */
+  initialQuery?: string | undefined;
   pageReferences?: EditorPageReferences | undefined;
   onRestore: (version: PageVersion) => void; onAuthError?: () => void; onClose: () => void;
 }) {
@@ -91,7 +101,11 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
   const [versions, setVersions] = useState<PageVersionSummary[]>([]);
   const [next, setNext] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string | undefined>();
-  const [selected, setSelected] = useState<string | null>(nameRevision ?? null);
+  const [selected, setSelected] = useState<string | null>(nameRevision ?? initialRevision ?? null);
+  const [query, setQuery] = useState(initialQuery ?? '');
+  const [composing, setComposing] = useState(false);
+  const [search, setSearch] = useState<HistorySearchState>(idleSearch);
+  const [searchRetry, setSearchRetry] = useState(0);
   const [preview, setPreview] = useState<PageVersion | null>(null);
   const [showDiff, setShowDiff] = useState(false);
   const [compareTo, setCompareTo] = useState<CompareBase>('previous');
@@ -171,6 +185,28 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
     // `versions` only shortcuts the previous-version lookup; loading more of the list must not refetch the same base.
   }, [workspaceId, pageId, selected, showDiff, compareTo, currentRevision, filter, previewRetry]);
 
+  const phrase = query.trim();
+  const searching = Boolean(phrase);
+  useEffect(() => {
+    if (!phrase || composing) { setSearch(idleSearch); return; }
+    if (searchPhraseInvalid(phrase)) { setSearch({ ...idleSearch, phase: 'error', error: invalidPhraseMessage }); return; }
+    setSearch({ ...idleSearch, phase: 'loading' });
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      void pageClient.pageHistorySearch(workspaceId, pageId, phrase, controller.signal).then(response => {
+        if (controller.signal.aborted) return;
+        setSearch({ phase: 'ready', hits: response.versions, truncated: response.truncated, pending: response.pendingVersions, error: '' });
+        // Keep the preview on a version the filtered list shows.
+        setSelected(previous => response.versions.some(hit => hit.revision === previous) ? previous : response.versions[0]?.revision ?? previous);
+      }).catch(cause => {
+        if (controller.signal.aborted) return;
+        if (cause instanceof ApiError && cause.status === 401) authErrorRef.current?.();
+        setSearch({ ...idleSearch, phase: 'error', error: failure(cause) });
+      });
+    }, 250);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [workspaceId, pageId, phrase, composing, searchRetry]);
+
   const changeFilter = (value: 'all' | 'named') => {
     if (value === filter) return;
     setFilter(value); setCursor(undefined); setVersions([]); setNext(null);
@@ -181,6 +217,7 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
       const updated = await pageClient.labelVersion(workspaceId, pageId, revision, { label, note }, csrfToken);
       setVersions(list => filter === 'named' && updated.label === null ? list.filter(item => item.revision !== revision)
         : list.map(item => item.revision === revision ? updated : item));
+      setSearch(value => ({ ...value, hits: value.hits.map(hit => hit.revision === revision ? { ...hit, label: updated.label, note: updated.note } : hit) }));
       const cached = cache.current.get(revision);
       if (cached) cache.current.set(revision, { ...cached, label: updated.label, note: updated.note });
       setPreview(value => value && value.revision === revision ? { ...value, label: updated.label, note: updated.note } : value);
@@ -194,8 +231,11 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
   };
 
   const days = groupHistory(versions, new Date());
-  const summary = versions.find(item => item.revision === selected)
+  const summary = versions.find(item => item.revision === selected) ?? search.hits.find(item => item.revision === selected)
     ?? (preview && preview.revision === selected ? preview : null);
+  const hits = filter === 'named' ? search.hits.filter(hit => hit.label) : search.hits;
+  const firstHit = searching && search.phase === 'ready' && !hits.some(hit => hit.revision === selected) ? hits[0]?.revision : undefined;
+  useEffect(() => { if (firstHit) setSelected(firstHit); }, [firstHit]);
   const pair = showDiff && preview && base.status === 'ready'
     ? (BigInt(base.version.revision) < BigInt(preview.revision) ? [base.version, preview] as const : [preview, base.version] as const)
     : null;
@@ -218,6 +258,20 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
     {version.label && <span className="nb-hist-label">{version.label}</span>}
     <span>{operationNames[version.operation]}{version.deleted ? ' · 已删除' : ''}</span>
   </button>;
+
+  const hitItem = (hit: HistorySearchMatch) => {
+    const mark = hit.highlight ?? phrase;
+    return <button key={hit.revision} className={`nb-hist-item nb-hist-hit ${selected === hit.revision ? 'selected' : ''}`}
+      aria-current={selected === hit.revision ? 'true' : undefined}
+      onClick={() => { setSelected(hit.revision); if (editing !== hit.revision) setEditing(null); }} disabled={busy}>
+      <strong>{dayTimeOf(hit.savedAt)} · 修订 {hit.revision}
+        {hit.revision === currentRevision && <span className="nb-hist-cur">当前</span>}</strong>
+      {hit.label && <span className="nb-hist-label">{hit.label}</span>}
+      <span>{operationNames[hit.operation]}{hit.deleted ? ' · 已删除' : ''}{hit.actor ? ` · ${hit.actor.loginName}` : ''}</span>
+      <span className="nb-hist-snip">{hit.matchField === 'title' || hit.snippet === '仅标题匹配'
+        ? marked(`标题：${hit.title || '未命名页面'}`, mark) : marked(hit.snippet, mark)}</span>
+    </button>;
+  };
 
   return <Modal title="历史" variant="large" onClose={onClose}>
     <div className="nb-hist">
@@ -291,11 +345,25 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
         </div>
       </div>
       <div className="nb-hist-side">
+        <div className="nb-hist-search">
+          <input type="text" aria-label="在历史中搜索" placeholder="在历史中搜索标题或正文" value={query}
+            onChange={event => setQuery(event.target.value)}
+            onCompositionStart={() => setComposing(true)} onCompositionEnd={() => setComposing(false)} />
+        </div>
         <div className="nb-hist-filter" role="group" aria-label="版本筛选">
           <button className={filter === 'all' ? 'active' : ''} aria-pressed={filter === 'all'} onClick={() => changeFilter('all')}>全部</button>
           <button className={filter === 'named' ? 'active' : ''} aria-pressed={filter === 'named'} onClick={() => changeFilter('named')}>已命名</button>
         </div>
-        <div className="nb-hist-side-list" aria-label="版本列表">
+        {searching ? <div className="nb-hist-side-list" aria-label="搜索到的版本">
+          {search.phase === 'loading' && <p className="nb-pal-msg" role="status">正在搜索历史…</p>}
+          {search.phase === 'error' && <p className="nb-pal-msg" role="alert">{search.error}
+            <button onClick={() => setSearchRetry(value => value + 1)}>重试</button></p>}
+          {search.phase === 'ready' && search.pending > 0 && <p className="nb-hist-notice" role="note">{pendingHistoryNotice(search.pending)}</p>}
+          {search.phase === 'ready' && hits.map(hitItem)}
+          {search.phase === 'ready' && !hits.length && <p className="nb-pal-msg">{filter === 'named'
+            ? '没有包含这些文字的命名版本' : '没有包含这些文字的版本'}</p>}
+          {search.phase === 'ready' && search.truncated && <p className="nb-hist-notice">仅显示最近 {historySearchLimit} 个匹配的版本，请换用更具体的词。</p>}
+        </div> : <div className="nb-hist-side-list" aria-label="版本列表">
           {days.map(day => <div key={day.key}>
             <div className="nb-hist-group">{day.label}</div>
             {day.entries.map(entry => {
@@ -317,7 +385,7 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
           {!loading && !error && !versions.length && <p className="nb-pal-msg">{filter === 'named'
             ? '还没有命名版本。选中一个版本后点“命名此版本”，或在页面菜单里选“保存为命名版本”。' : '还没有可读取的历史'}</p>}
           {next && !loading && <button className="nb-btn nb-btn-quiet" onClick={() => setCursor(next)}>加载更早版本</button>}
-        </div>
+        </div>}
       </div>
     </div>
     <div className="dialog-actions"><span className="dialog-description" style={{ marginRight: 'auto' }}>恢复会生成新版本，当前内容仍保留在历史中，页面位置和图标不变。</span>
@@ -327,8 +395,8 @@ export function PageHistoryDialog({ workspaceId, pageId, currentRevision, busy, 
   </Modal>;
 }
 
-export function TrashDialog({ workspaceId, busy, pages: activePages, initialPageId, pageReferences, onRestore, onClose }: {
-  workspaceId: string; busy: boolean; pages: PageSummary[]; initialPageId?: string | undefined;
+export function TrashDialog({ workspaceId, busy, canWrite = true, pages: activePages, initialPageId, pageReferences, onRestore, onClose }: {
+  workspaceId: string; busy: boolean; canWrite?: boolean; pages: PageSummary[]; initialPageId?: string | undefined;
   pageReferences?: EditorPageReferences | undefined;
   onRestore: (page: TrashedPageDocument) => void; onClose: () => void;
 }) {
@@ -398,14 +466,14 @@ export function TrashDialog({ workspaceId, busy, pages: activePages, initialPage
           <span className="nb-trash-main"><strong>{page.title || '未命名页面'}</strong>
             <small>{pathOf(page)} · {relativeTime(page.deletedAt).replace('编辑', '删除')}</small></span>
           {siblings(page) > 0 && <span className="nb-trash-badge">含 {siblings(page)} 个子页面</span>}
-          <span className="nb-trash-restore" role="button" tabIndex={0}
+          {canWrite && <span className="nb-trash-restore" role="button" tabIndex={0}
             onClick={event => {
               event.stopPropagation();
               if (busy) return;
               if (preview?.id === page.id) { onRestore(preview); return; }
               void pageClient.trashed(workspaceId, page.id).then(doc => onRestore(doc)).catch(() => undefined);
             }}
-            onKeyDown={event => { if (event.key === 'Enter') { event.stopPropagation(); event.preventDefault(); (event.currentTarget as HTMLElement).click(); } }}>恢复</span>
+            onKeyDown={event => { if (event.key === 'Enter') { event.stopPropagation(); event.preventDefault(); (event.currentTarget as HTMLElement).click(); } }}>恢复</span>}
         </button>)}
         {loading && <p className="nb-pal-msg" role="status">正在读取回收站…</p>}
         {error && <p className="nb-pal-msg" role="alert">{error}<button onClick={() => setRetry(value => value + 1)}>重试</button></p>}
@@ -418,8 +486,8 @@ export function TrashDialog({ workspaceId, busy, pages: activePages, initialPage
         {previewError && <p role="alert">{previewError}<button onClick={() => setRetry(value => value + 1)}>重试</button></p>}
         {preview && <>
           <div className="nb-trash-body-head"><h3 style={{ margin: 0 }}>{preview.title || '未命名页面'}</h3>
-            <button className="nb-btn nb-btn-primary" disabled={busy} onClick={() => onRestore(preview)}>
-              {busy ? '正在处理…' : '恢复'}</button></div>
+            {canWrite && <button className="nb-btn nb-btn-primary" disabled={busy} onClick={() => onRestore(preview)}>
+              {busy ? '正在处理…' : '恢复'}</button>}</div>
           <Preview id={`trash:${preview.id}:${preview.revision}`} title={preview.title} content={preview.content}
             workspaceId={workspaceId} pageReferences={pageReferences} />
         </>}

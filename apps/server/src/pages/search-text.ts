@@ -1,4 +1,4 @@
-import { isFootnoteId, isSerializedBlockReference, isSerializedWhiteboardView, pageReferenceLabelLimit, type SerializedPageReference, type StoredDocumentContent } from '@nbase/contracts';
+import { isFootnoteId, isSerializedBlockReference, isSerializedWhiteboardView, pagePropertiesSearchText, pageReferenceLabelLimit, type PageProperty, type SerializedPageReference, type StoredDocumentContent } from '@nbase/contracts';
 
 import { isWhiteboardContent, whiteboardIndex } from '../whiteboards/content.js';
 
@@ -16,6 +16,12 @@ export function isPageReference(value: Record<string, unknown>): value is Record
 }
 
 const normalizeWhitespace = (text: string) => text.replace(/\s+/gu, ' ').trim();
+
+/** Search text for a document page: body text first, then the page's own property names and values. */
+export function documentIndexText(bodyText: string, properties: readonly PageProperty[] | null): string {
+  const extra = properties ? normalizeWhitespace(pagePropertiesSearchText(properties)) : '';
+  return extra ? (bodyText ? `${bodyText} ${extra}` : extra) : bodyText;
+}
 
 /** Flatten adjacent text leaves and retain reference positions for contextual snippets. */
 function inspectDocument(content: StoredDocumentContent, collectReferences: boolean) {

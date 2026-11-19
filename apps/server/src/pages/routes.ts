@@ -1,6 +1,6 @@
-import { databasePropertyLimit, pageTagLimit, pageVersionLabelLimit, pageVersionNoteLimit, type CreatePageRequest,
-  type PageStateRequest, type PageVersionLabelRequest, type PropertyValue, type RowProperties,
-  type UpdatePageRequest } from '@nbase/contracts';
+import { databasePropertyLimit, historySearchLimit, isPageProperties, pageTagLimit, pageVersionLabelLimit, pageVersionNoteLimit, type CreatePageRequest,
+  type PageProperty, type PageStateRequest, type PageVersionLabelRequest, type PropertyValue, type RowProperties,
+  type CollabWrite, type UpdatePageRequest } from '@nbase/contracts';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AuthRepository } from '../auth/repository.js';
 import {
@@ -9,6 +9,7 @@ import {
 import { authorizeWorkspace, WorkspaceRouteError } from '../auth/workspace.js';
 import { ContentValidationError, PageFieldError, validateDocumentContent, validatePageCover, validatePageIcon } from './validate.js';
 import { decodePageCursor, decodeSiblingCursor, isRevision, isUuid, PageError, PgPageRepository } from './repository.js';
+import { parseCollabWrite } from '../live/rooms.js';
 
 interface WorkspaceParams { workspaceId: string }
 interface PageParams extends WorkspaceParams { pageId: string }
@@ -50,6 +51,11 @@ function rowProperties(value: unknown, allowNull: boolean): Record<string, Prope
   return value as Record<string, PropertyValue | null>;
 }
 
+function pageProperties(value: unknown): PageProperty[] {
+  if (!isPageProperties(value)) throw new RouteError(400, 'INVALID_REQUEST');
+  return value;
+}
+
 function createBody(value: unknown): CreatePageRequest {
   if (!object(value) || !isUuid(value.clientMutationId) || !parentId(value.parentId) || !title(value.title)) {
     throw new RouteError(400, 'INVALID_REQUEST');
@@ -64,12 +70,13 @@ function createBody(value: unknown): CreatePageRequest {
   if (Object.hasOwn(value, 'cover')) body.cover = validatePageCover(value.cover);
   if (Object.hasOwn(value, 'tagIds')) body.tagIds = pageTagIds(value.tagIds);
   if (Object.hasOwn(value, 'properties')) body.properties = rowProperties(value.properties, false) as RowProperties;
+  if (Object.hasOwn(value, 'pageProperties')) body.pageProperties = pageProperties(value.pageProperties);
   return body;
 }
 
 function updateBody(value: unknown): UpdatePageRequest {
   if (!object(value) || !isUuid(value.clientMutationId) || !isRevision(value.expectedRevision)
-    || !(['title', 'parentId', 'content', 'icon', 'cover', 'tagIds', 'properties'].some((key) => Object.hasOwn(value, key)))) {
+    || !(['title', 'parentId', 'content', 'icon', 'cover', 'tagIds', 'properties', 'pageProperties'].some((key) => Object.hasOwn(value, key)))) {
     throw new RouteError(400, 'INVALID_REQUEST');
   }
   if (Object.hasOwn(value, 'title') && !title(value.title)) throw new RouteError(400, 'INVALID_REQUEST');
@@ -82,6 +89,11 @@ function updateBody(value: unknown): UpdatePageRequest {
   if (Object.hasOwn(value, 'cover')) body.cover = validatePageCover(value.cover);
   if (Object.hasOwn(value, 'tagIds')) body.tagIds = pageTagIds(value.tagIds);
   if (Object.hasOwn(value, 'properties')) body.properties = rowProperties(value.properties, true);
+  if (Object.hasOwn(value, 'pageProperties')) body.pageProperties = pageProperties(value.pageProperties);
+  if (Object.hasOwn(value, 'collab')) {
+    if (!parseCollabWrite(value.collab)) throw new RouteError(400, 'INVALID_REQUEST');
+    body.collab = value.collab as CollabWrite;
+  }
   return body;
 }
 
@@ -99,6 +111,19 @@ function labelText(value: unknown, limit: number, controls: RegExp): string | nu
   if (!text) return null;
   if ([...text].length > limit || controls.test(text)) throw new RouteError(400, 'INVALID_REQUEST');
   return text;
+}
+
+/** `q` (trimmed), optional comma-separated `tagIds` and `limit`; a search needs a phrase or, where allowed, tags. */
+function searchQuery(query: unknown, allowTags: boolean, defaultLimit: number): { phrase: string; tagIds: string[]; limit: number } {
+  if (!object(query) || (query.q !== undefined && typeof query.q !== 'string')
+    || (query.tagIds !== undefined && (!allowTags || typeof query.tagIds !== 'string'))) throw new RouteError(400, 'INVALID_REQUEST');
+  const tagIds = typeof query.tagIds === 'string' ? pageTagIds(query.tagIds.split(',')) : [];
+  const phrase = typeof query.q === 'string' ? query.q.trim() : '';
+  if ((!phrase && !tagIds.length) || phrase.length > 100 || Buffer.byteLength(phrase, 'utf8') > 256
+    || /[\u0000-\u001f\u007f]/.test(phrase)) throw new RouteError(400, 'INVALID_REQUEST');
+  const limit = query.limit === undefined ? defaultLimit : Number(query.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new RouteError(400, 'INVALID_REQUEST');
+  return { phrase, tagIds, limit };
 }
 
 /** Blank strings mean "none"; a note needs a label so that every note belongs to a named version. */
@@ -123,11 +148,17 @@ export function sendError(request: FastifyRequest, reply: FastifyReply, error: u
   return reply.code(503).send({ error: 'SERVICE_UNAVAILABLE' });
 }
 
-export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository,
-  auth: AuthRepository, publicOrigin: string): void {
-  const { origin, secure } = publicOriginConfig(publicOrigin);
+export interface PageEvents { pageSaved(workspaceId: string, pageId: string, revision: string, actorId: string): void }
 
-  const authorize = (request: FastifyRequest, workspaceId: string, write: boolean) =>
+export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository,
+  auth: AuthRepository, publicOrigin: string, events?: PageEvents): void {
+  const { origin, secure } = publicOriginConfig(publicOrigin);
+  const saved = (workspaceId: string, pageId: string, actorId: string, result: { statusCode: number; body: unknown }) => {
+    const body = result.body as { revision?: unknown };
+    if (result.statusCode < 300 && typeof body.revision === 'string') events?.pageSaved(workspaceId, pageId, body.revision, actorId);
+  };
+
+  const authorize = (request: FastifyRequest, workspaceId: string, write: boolean | 'post-read') =>
     authorizeWorkspace(request, auth, origin, secure, workspaceId, write, write ? 'application/json' : undefined);
 
   app.get<{ Params: WorkspaceParams }>('/api/workspaces/:workspaceId/pages', async (request, reply) => {
@@ -161,16 +192,28 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
     reply.header('Cache-Control', 'no-store');
     try {
       const actorId = await authorize(request, request.params.workspaceId, false);
-      const query: unknown = request.query;
-      if (!object(query) || (query.q !== undefined && typeof query.q !== 'string')
-        || (query.tagIds !== undefined && typeof query.tagIds !== 'string')) throw new RouteError(400, 'INVALID_REQUEST');
-      const tagIds = query.tagIds === undefined ? [] : pageTagIds(query.tagIds.split(','));
-      const phrase = query.q?.trim() ?? '';
-      if ((!phrase && !tagIds.length) || phrase.length > 100 || Buffer.byteLength(phrase, 'utf8') > 256
-        || /[\u0000-\u001f\u007f]/.test(phrase)) throw new RouteError(400, 'INVALID_REQUEST');
-      const limit = query.limit === undefined ? 20 : Number(query.limit);
-      if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new RouteError(400, 'INVALID_REQUEST');
+      const { phrase, tagIds, limit } = searchQuery(request.query, true, 20);
       return reply.send(await pages.search(request.params.workspaceId, actorId, phrase, limit, tagIds));
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.get<{ Params: WorkspaceParams }>('/api/workspaces/:workspaceId/history-search', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const actorId = await authorize(request, request.params.workspaceId, false);
+      const { phrase, tagIds, limit } = searchQuery(request.query, true, 20);
+      if (!phrase) throw new RouteError(400, 'INVALID_REQUEST');
+      return reply.send(await pages.searchHistory(request.params.workspaceId, actorId, phrase, limit, tagIds));
+    } catch (error) { return sendError(request, reply, error, secure); }
+  });
+
+  app.get<{ Params: PageParams }>('/api/workspaces/:workspaceId/pages/:pageId/history-search', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    try {
+      const actorId = await authorize(request, request.params.workspaceId, false);
+      if (!isUuid(request.params.pageId)) throw new RouteError(404, 'NOT_FOUND');
+      const { phrase, limit } = searchQuery(request.query, false, historySearchLimit);
+      return reply.send(await pages.searchPageHistory(request.params.workspaceId, actorId, request.params.pageId, phrase, limit));
     } catch (error) { return sendError(request, reply, error, secure); }
   });
 
@@ -283,7 +326,8 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
   app.put<{ Params: PageParams }>('/api/workspaces/:workspaceId/favorites/:pageId', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     try {
-      const actorId = await authorize(request, request.params.workspaceId, true);
+      // Favorites are a personal preference, so viewers may keep them too.
+      const actorId = await authorize(request, request.params.workspaceId, 'post-read');
       if (!isUuid(request.params.pageId)) throw new RouteError(404, 'NOT_FOUND');
       await pages.favoriteAdd(request.params.workspaceId, actorId, request.params.pageId);
       return reply.code(204).send();
@@ -293,7 +337,7 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
   app.delete<{ Params: PageParams }>('/api/workspaces/:workspaceId/favorites/:pageId', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     try {
-      const actorId = await authorize(request, request.params.workspaceId, true);
+      const actorId = await authorize(request, request.params.workspaceId, 'post-read');
       if (!isUuid(request.params.pageId)) throw new RouteError(404, 'NOT_FOUND');
       await pages.favoriteRemove(request.params.workspaceId, actorId, request.params.pageId);
       return reply.code(204).send();
@@ -326,6 +370,7 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
       const actorId = await authorize(request, request.params.workspaceId, true);
       if (!isUuid(request.params.pageId)) throw new RouteError(404, 'NOT_FOUND');
       const result = await pages.update(request.params.workspaceId, actorId, request.params.pageId, updateBody(request.body));
+      saved(request.params.workspaceId, request.params.pageId, actorId, result);
       return reply.code(result.statusCode).send(result.body);
     } catch (error) { return sendError(request, reply, error, secure); }
   });
@@ -368,6 +413,7 @@ export function registerPageRoutes(app: FastifyInstance, pages: PgPageRepository
       if (!object(body) || !isRevision(body.sourceRevision)) throw new RouteError(400, 'INVALID_REQUEST');
       const result = await pages.restoreVersion(request.params.workspaceId, actorId, request.params.pageId,
         { ...state, sourceRevision: body.sourceRevision });
+      saved(request.params.workspaceId, request.params.pageId, actorId, result);
       return reply.code(result.statusCode).send(result.body);
     } catch (error) { return sendError(request, reply, error, secure); }
   });

@@ -82,11 +82,11 @@
 .nbase-attachment-caption { color:var(--nb-muted,#6b7280); font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
 .nbase-image-resize { position:absolute; right:-4px; bottom:-4px; width:12px; height:12px; border-radius:3px; background:var(--nb-accent-text,#647a45); border:2px solid var(--nb-bg,#fff); cursor:nwse-resize; touch-action:none; }
 .nbase-image-controls { display:flex; flex-wrap:wrap; align-items:center; gap:6px; font-size:12px; }
-.nbase-image-choice { display:inline-flex; gap:1px; }
+.nbase-image-choice { display:inline-flex; flex-wrap:wrap; gap:1px; }
 .nbase-image-controls button { border:0; border-radius:5px; padding:3px 7px; background:transparent; color:var(--nb-text,#30332e); font:inherit; cursor:pointer; }
 .nbase-image-controls button:hover { background:var(--nb-hover,#f3f4f0); }
 .nbase-image-controls button.is-active { background:var(--nb-accent-soft,#e8ede2); color:var(--nb-accent-text,#4c6736); }
-.nbase-image-controls input { flex:1; min-width:140px; border:1px solid var(--editor-line); border-radius:5px; padding:4px 7px; background:transparent; color:inherit; font:inherit; }
+.nbase-image-controls input { flex:1; min-width:min(140px, 100%); border:1px solid var(--editor-line); border-radius:5px; padding:4px 7px; background:transparent; color:inherit; font:inherit; }
 .nbase-image-lightbox { position:fixed; inset:0; z-index:100; display:grid; place-items:center; padding:24px; background:rgba(0,0,0,.82); }
 .nbase-image-lightbox img { max-width:100%; max-height:100%; object-fit:contain; cursor:default; }
 .nbase-image-lightbox button { position:absolute; top:12px; right:16px; width:36px; height:36px; border:0; border-radius:8px; background:rgba(255,255,255,.14); color:#fff; font-size:22px; line-height:1; cursor:pointer; }
@@ -173,3 +173,11 @@ body.nbase-col-resizing, body.nbase-col-resizing * { cursor: col-resize !importa
 .nbase-block-reference.is-missing { color: var(--nb-faint); text-decoration: line-through; cursor: default; }
 .nbase-block-flash { animation: nbase-block-flash 1.6s ease-out; }
 @keyframes nbase-block-flash { from { background: var(--nb-accent-soft); } to { background: transparent; } }
+
+/* Co-editing carets of other room members; the colour arrives inline as --lexical-cursor-color. */
+.nbase-collab-cursor { background-color: var(--lexical-cursor-color); width: 2px; z-index: 10; }
+.nbase-collab-name {
+  position: absolute; top: -16px; left: -2px; padding: 2px 4px; border-radius: 3px 3px 3px 0;
+  background-color: var(--lexical-cursor-color); color: #fff; font-size: 12px; font-weight: 600;
+  line-height: 12px; white-space: nowrap; pointer-events: none;
+}

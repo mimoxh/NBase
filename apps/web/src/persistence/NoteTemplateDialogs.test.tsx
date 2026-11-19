@@ -16,7 +16,8 @@ vi.mock('../editor/DocumentEditor', async () => {
   const { forwardRef, useImperativeHandle } = await import('react');
   return { DocumentEditor: forwardRef<DocumentEditorHandle, DocumentEditorProps>(function Editor({ initialContent, readOnly }, ref) {
     useImperativeHandle(ref, () => ({ getSnapshot: () => ({ content: initialContent!, markdown: '', plainText: '', outline: [] }),
-      focus: () => {}, insertAttachments: () => {}, replaceContent: () => false, findText: () => false, jumpToHeading: () => {}, locatePageReference: () => false }));
+      focus: () => {}, insertAttachments: () => {}, replaceContent: () => false, findText: () => false, jumpToHeading: () => {}, locatePageReference: () => false,
+      commentAnchor: () => null, locateComment: () => false }));
     return <div data-template-editor data-readonly={String(readOnly)}>{JSON.stringify(initialContent)}</div>;
   }) };
 });

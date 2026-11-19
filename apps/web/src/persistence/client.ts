@@ -1,14 +1,16 @@
 import type {
   AttachmentMetadata, AuthSessionResponse, CreatePageRequest, FavoriteListResponse, PageBacklinksResponse, PageDocument, PageTreeResponse, SearchResponse,
-  PageSummary, PageHistoryResponse, PageVersion, PageVersionLabelRequest, PageVersionSummary, PageStateRequest, RestorePageVersionRequest,
-  TagWriteRequest, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest, WorkspaceTag,
+  PageSummary, PageHistoryResponse, PageHistorySearchResponse, PageVersion, PageVersionLabelRequest, PageVersionSummary, PageStateRequest, RestorePageVersionRequest,
+  TagWriteRequest, TrashedPageDocument, TrashListResponse, TrashPageRequest, UpdatePageRequest, WorkspaceHistorySearchResponse, WorkspaceTag,
 } from '@nbase/contracts';
 
 const timeoutMs = 8_000;
 
 export class ApiError extends Error {
   constructor(public readonly status: number, public readonly code: string,
-    public readonly currentRevision?: string) {
+    public readonly currentRevision?: string,
+    /** The whole error body, for codes that carry more than a revision. */
+    public readonly details?: Record<string, unknown>) {
     super(code);
   }
 }
@@ -35,7 +37,8 @@ export async function request<T>(path: string, method = 'GET', body?: unknown, c
     if (!response.ok) {
       const error = payload as { error?: unknown; currentRevision?: unknown };
       throw new ApiError(response.status, typeof error?.error === 'string' ? error.error : 'SERVICE_UNAVAILABLE',
-        typeof error?.currentRevision === 'string' ? error.currentRevision : undefined);
+        typeof error?.currentRevision === 'string' ? error.currentRevision : undefined,
+        error && typeof error === 'object' ? error as Record<string, unknown> : undefined);
     }
     return payload as T;
   } catch (error) {
@@ -73,6 +76,12 @@ export const pageClient = {
     request<PageDocument>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}`, 'PATCH', body, csrfToken),
   search: (workspaceId: string, phrase: string, signal?: AbortSignal, tagIds: string[] = []) =>
     request<SearchResponse>(`${workspacePath(workspaceId)}/search?q=${encodeURIComponent(phrase)}&limit=30${tagIds.length ? `&tagIds=${encodeURIComponent(tagIds.join(','))}` : ''}`,
+      'GET', undefined, undefined, signal),
+  historySearch: (workspaceId: string, phrase: string, signal?: AbortSignal, tagIds: string[] = []) =>
+    request<WorkspaceHistorySearchResponse>(`${workspacePath(workspaceId)}/history-search?q=${encodeURIComponent(phrase)}&limit=20${tagIds.length ? `&tagIds=${encodeURIComponent(tagIds.join(','))}` : ''}`,
+      'GET', undefined, undefined, signal),
+  pageHistorySearch: (workspaceId: string, pageId: string, phrase: string, signal?: AbortSignal) =>
+    request<PageHistorySearchResponse>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}/history-search?q=${encodeURIComponent(phrase)}`,
       'GET', undefined, undefined, signal),
   setPosition: (workspaceId: string, pageId: string, afterPageId: string | null, csrfToken: string) =>
     request<void>(`${workspacePath(workspaceId)}/pages/${encodeURIComponent(pageId)}/position`, 'PUT', { afterPageId }, csrfToken),

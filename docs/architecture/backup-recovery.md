@@ -14,7 +14,7 @@
 
 ## 操作命令
 
-在仓库根目录构建维护镜像，Node/npm 与 PostgreSQL 客户端版本分别固定在 Dockerfile/lockfile：
+在仓库根目录构建维护镜像。Node/npm 版本固定在 Dockerfile 与 lockfile；PostgreSQL 客户端只固定主版本 18（`postgresql18-client~18`），因为 Alpine 仓库会移除旧的修订版本，精确固定会导致无法构建（2026-11-17 起 `18.6-r0` 已不可获取）。引擎在备份前核对客户端与服务端主版本一致，实际使用的 `pg_dump` 版本写入清单。恢复和回退使用已保管的维护镜像，不重新构建：
 
 ```sh
 docker build --target maintenance -t nbase-maintenance:local .

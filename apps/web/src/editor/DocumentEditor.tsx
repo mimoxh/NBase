@@ -1,12 +1,14 @@
-import { Component, forwardRef, useCallback, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Component, forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode, Ref } from 'react';
-import { createEditor, HISTORY_PUSH_TAG } from 'lexical';
+import { $getRoot, $parseSerializedNode, createEditor, HISTORY_PUSH_TAG, type LexicalEditor, type SerializedLexicalNode } from 'lexical';
 import type { HistoryState } from '@lexical/history';
 import { LexicalComposer } from '@lexical/react/LexicalComposer';
 import { useLexicalComposerContext } from '@lexical/react/LexicalComposerContext';
 import { ContentEditable } from '@lexical/react/LexicalContentEditable';
 import { LexicalErrorBoundary } from '@lexical/react/LexicalErrorBoundary';
 import { RichTextPlugin } from '@lexical/react/LexicalRichTextPlugin';
+import { CollaborationPlugin } from '@lexical/react/LexicalCollaborationPlugin';
+import { LexicalCollaboration } from '@lexical/react/LexicalCollaborationContext';
 import { createEmptyHistoryState, HistoryPlugin } from '@lexical/react/LexicalHistoryPlugin';
 import { ListPlugin } from '@lexical/react/LexicalListPlugin';
 import { CheckListPlugin } from '@lexical/react/LexicalCheckListPlugin';
@@ -44,6 +46,7 @@ import { revealInToggles, TogglePlugin } from './plugins/TogglePlugin';
 import { TableColumnResizePlugin } from './plugins/TableColumnResizePlugin';
 import { BookmarkPlugin } from './plugins/BookmarkPlugin';
 import { BlockReferencePlugin } from './plugins/BlockReferencePlugin';
+import { findCommentBlock, readCommentAnchor } from './commentAnchors';
 import { BlockResolverContext } from './nodes/BlockReferenceNode';
 import { FootnoteNavigationPlugin } from './nodes/FootnoteNodes';
 import { $insertAttachments, AttachmentWorkspaceContext } from './nodes/AttachmentNode';
@@ -57,6 +60,7 @@ const theme = {
   heading: { h1: 'nbase-heading-1', h2: 'nbase-heading-2', h3: 'nbase-heading-3' },
   text: { bold: 'nbase-bold', italic: 'nbase-italic', strikethrough: 'nbase-strikethrough', code: 'nbase-inline-code', highlight: 'nbase-highlight' },
   list: listTheme,
+  collaboration: { cursor: 'nbase-collab-cursor', cursorName: 'nbase-collab-name' },
   code: 'nbase-code-block', table: 'nbase-table', tableCell: 'nbase-table-cell', tableCellHeader: 'nbase-table-header', tableCellSelected: 'nbase-table-selected', tableSelection: 'nbase-table-selection', tableRow: 'nbase-table-row', hr: 'nbase-rule',
   codeHighlight: {
     atrule: 'nbase-token-attr', attr: 'nbase-token-attr', boolean: 'nbase-token-property', builtin: 'nbase-token-selector',
@@ -79,11 +83,11 @@ function withBody(state: DocumentContent['editorState']): DocumentContent['edito
   return { ...state, root: { ...root, children: [paragraph] } } as DocumentContent['editorState'];
 }
 
-class EditorBoundary extends Component<{ children: ReactNode; original: string }, { failed: boolean }> {
+class EditorBoundary extends Component<{ children: ReactNode; original: () => string }, { failed: boolean }> {
   state = { failed: false };
   static getDerivedStateFromError() { return { failed: true }; }
   render() {
-    return this.state.failed ? <div className="nbase-editor-error" role="alert"><strong>编辑器未能打开此文档。</strong><p>原始内容仍保留在下方，请复制后重试。</p><pre>{this.props.original}</pre></div> : this.props.children;
+    return this.state.failed ? <div className="nbase-editor-error" role="alert"><strong>编辑器未能打开此文档。</strong><p>原始内容仍保留在下方，请复制后重试。</p><pre>{this.props.original()}</pre></div> : this.props.children;
   }
 }
 
@@ -137,14 +141,59 @@ function findVisibleText(root: HTMLElement, phrase: string, reveal: (element: HT
   return false;
 }
 
+const collabUndoManager = Symbol.for('@lexical/yjs/UndoManager');
+
+/** Replaces the body inside one update, so a room receives it as an edit and the user can undo it in one step. */
+function replaceCollabContent(editor: LexicalEditor, content: DocumentContent) {
+  const undo = (editor as unknown as Record<symbol, { stopCapturing(): void } | undefined>)[collabUndoManager];
+  undo?.stopCapturing();
+  editor.update(() => {
+    const root = $getRoot();
+    root.clear();
+    for (const child of content.editorState.root.children) root.append($parseSerializedNode(child as SerializedLexicalNode) as never);
+  }, { discrete: true });
+  undo?.stopCapturing();
+}
+
+/** Remote edits wait while an input method composes text, so the composition is not rewritten under the user. */
+function CompositionHoldPlugin({ onComposition }: { onComposition: (composing: boolean) => void }) {
+  const [editor] = useLexicalComposerContext();
+  const callback = useRef(onComposition);
+  callback.current = onComposition;
+  useEffect(() => {
+    let root: HTMLElement | null = null;
+    let release = 0;
+    const start = () => { window.clearTimeout(release); callback.current(true); };
+    // Lexical commits the composed text from its own compositionend handler; remote edits follow after it.
+    const end = () => { window.clearTimeout(release); release = window.setTimeout(() => callback.current(false), 0); };
+    const detach = () => {
+      root?.removeEventListener('compositionstart', start);
+      root?.removeEventListener('compositionend', end);
+    };
+    const unregister = editor.registerRootListener(next => {
+      detach();
+      root = next;
+      root?.addEventListener('compositionstart', start);
+      root?.addEventListener('compositionend', end);
+    });
+    return () => { unregister(); detach(); window.clearTimeout(release); callback.current(false); };
+  }, [editor]);
+  return null;
+}
+
 function StateBridge({ props, editorRef, folding, history }: { props: DocumentEditorProps; editorRef: Ref<DocumentEditorHandle>;
   history: HistoryState;
   folding: { current: SectionFoldingHandle | null } }) {
   const [editor] = useLexicalComposerContext();
   const callbacks = useRef(props);
   callbacks.current = props;
+  const collab = Boolean(props.collab);
   useImperativeHandle(editorRef, () => ({
-    getSnapshot: () => readEditorSnapshot(editor.getEditorState()),
+    getSnapshot: () => {
+      // Remote edits reach Lexical in queued updates; commit them so the snapshot matches the room document.
+      if (collab) editor.update(() => undefined, { discrete: true });
+      return readEditorSnapshot(editor.getEditorState());
+    },
     focus: () => { if (editor.isEditable()) editor.focus(); },
     insertAttachments: attachments => {
       if (editor.isEditable() && attachments.length) editor.update(() => $insertAttachments(attachments));
@@ -155,6 +204,7 @@ function StateBridge({ props, editorRef, folding, history }: { props: DocumentEd
       if (next.isEmpty()) throw new Error('转换后的正文为空或不完整。');
       if (JSON.stringify(readEditorSnapshot(editor.getEditorState()).content)
         === JSON.stringify(readEditorSnapshot(next).content)) return false;
+      if (collab) { replaceCollabContent(editor, content); return true; }
       history.current ??= { editor, editorState: editor.getEditorState() };
       editor.setEditorState(next, { tag: HISTORY_PUSH_TAG });
       return true;
@@ -176,7 +226,21 @@ function StateBridge({ props, editorRef, folding, history }: { props: DocumentEd
       node.querySelector<HTMLElement>('a,button')?.focus({ preventScroll: true });
       return true;
     },
-  }), [editor, folding, history]);
+    commentAnchor: () => readCommentAnchor(editor),
+    locateComment: (anchor, reveal = true) => {
+      const element = findCommentBlock(editor, anchor);
+      if (!element) return false;
+      if (!reveal) return true;
+      revealInToggles(editor, element);
+      folding.current?.reveal(element);
+      element.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+      element.classList.remove('nbase-block-flash');
+      void element.offsetWidth;
+      element.classList.add('nbase-block-flash');
+      window.setTimeout(() => element.classList.remove('nbase-block-flash'), 1600);
+      return true;
+    },
+  }), [editor, folding, history, collab]);
   useLayoutEffect(() => { editor.setEditable(!props.readOnly); }, [editor, props.readOnly]);
   useLayoutEffect(() => {
     const initial = readEditorSnapshot(editor.getEditorState());
@@ -201,6 +265,8 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
   const history = useMemo(createEmptyHistoryState, []);
   const folding = useRef<SectionFoldingHandle>(null);
   const noticeRef = useRef(props.onNotice);
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const collab = props.collab;
   const resolveRef = useRef(props.resolveBlock);
   resolveRef.current = props.resolveBlock;
   const hasResolver = Boolean(props.resolveBlock);
@@ -209,23 +275,28 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
   [hasResolver, props.documentId]);
   const revealBlock = useCallback((element: HTMLElement) => folding.current?.reveal(element), []);
   noticeRef.current = props.onNotice;
-  const config = useMemo(() => {
+  /** Serialized opening content; a room's seeder writes it into an empty room document. */
+  const seedState = useMemo(() => {
     const content = props.initialContent ?? createContentFromMarkdown(props.initialMarkdown ?? '');
     if (content.schemaVersion !== 1) throw new Error('不支持的文档内容版本');
     const validator = createEditor({ nodes: EDITOR_NODES, onError: (error) => { throw error; } });
     const editorState = withBody(content.editorState);
     const parsed = validator.parseEditorState(editorState);
     if (parsed.isEmpty()) throw new Error('文档内容为空或不完整');
+    return JSON.stringify(editorState);
+  }, []);
+  const config = useMemo(() => {
     return {
     namespace: 'nbase-document',
     nodes: EDITOR_NODES, theme, editable: !props.readOnly,
-    editorState: JSON.stringify(editorState),
+    // A room's document is the source of the content; the binding fills the editor (or seeds the room) once connected.
+    editorState: collab ? null : seedState,
     onError: (error: Error) => {
       queueMicrotask(() => { setFailure(error.message); noticeRef.current?.('编辑器发生错误；请保留当前文档并重新打开。'); });
     },
   // The initial state belongs to this mounted document; edits never replace it.
   }; }, []);
-  return <AttachmentWorkspaceContext.Provider value={props.workspaceId ?? null}>
+  return <LexicalCollaboration><AttachmentWorkspaceContext.Provider value={props.workspaceId ?? null}>
     <PageReferencesProvider references={props.pageReferences}><DatabaseEmbeddingProvider value={props.databases}>
     <EmbeddedPagesProvider value={props.embeds}><EmbedPathProvider pageId={props.documentId}>
     <BlockResolverContext.Provider value={resolverContext}>
@@ -235,10 +306,15 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <ToolbarPlugin readOnly={Boolean(props.readOnly)} onNotice={props.onNotice}
         findPanel={<FindReplacePlugin title={props.title} onReplaceTitle={props.onReplaceTitle}
           readOnly={Boolean(props.readOnly)} reveal={element => folding.current?.reveal(element)} historyState={history} />} />
-      <div className="nbase-editor-surface">
+      <div className="nbase-editor-surface" ref={surfaceRef}>
         <RichTextPlugin contentEditable={<ContentEditable className="nbase-editor-content" aria-label="文档正文" spellCheck={false} />} placeholder={<div className="nbase-editor-placeholder">{props.readOnly ? '这篇文档暂无正文。' : '输入 / 选择样式，或 # 标题、- 列表…'}</div>} ErrorBoundary={LexicalErrorBoundary} />
       </div>
-      <HistoryPlugin externalHistoryState={history} /><ListPlugin /><CheckListPlugin />
+      {collab ? <>
+        <CollaborationPlugin id="root" providerFactory={collab.providerFactory} shouldBootstrap
+          initialEditorState={seedState} username={collab.username} cursorColor={collab.cursorColor}
+          cursorsContainerRef={surfaceRef} />
+        {collab.onComposition && <CompositionHoldPlugin onComposition={collab.onComposition} />}
+      </> : <HistoryPlugin externalHistoryState={history} />}<ListPlugin /><CheckListPlugin />
       <LinkPlugin validateUrl={isSafeLinkUrl} attributes={{ rel: 'noopener noreferrer' }} />
       <TablePlugin hasTabHandler hasHorizontalScroll hasNestedTables={false} />
       <HorizontalRulePlugin /><MarkdownShortcutPlugin transformers={MARKDOWN_TRANSFORMERS} />
@@ -254,10 +330,10 @@ function EditorInstance({ props, editorRef }: { props: DocumentEditorProps; edit
       <SectionFoldingPlugin ref={folding} />
       <StateBridge props={props} editorRef={editorRef} folding={folding} history={history} />
     </div>
-  </LexicalComposer></BlockResolverContext.Provider></EmbedPathProvider></EmbeddedPagesProvider></DatabaseEmbeddingProvider></PageReferencesProvider></AttachmentWorkspaceContext.Provider>;
+  </LexicalComposer></BlockResolverContext.Provider></EmbedPathProvider></EmbeddedPagesProvider></DatabaseEmbeddingProvider></PageReferencesProvider></AttachmentWorkspaceContext.Provider></LexicalCollaboration>;
 }
 
 export const DocumentEditor = forwardRef<DocumentEditorHandle, DocumentEditorProps>(function DocumentEditor(props, ref) {
-  const original = props.initialContent ? JSON.stringify(props.initialContent, null, 2) : props.initialMarkdown ?? '';
+  const original = () => props.initialContent ? JSON.stringify(props.initialContent, null, 2) : props.initialMarkdown ?? '';
   return <EditorBoundary key={props.documentId} original={original}><EditorInstance props={props} editorRef={ref} /></EditorBoundary>;
 });

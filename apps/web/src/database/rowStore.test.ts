@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DatabaseQueryRequest, DatabaseRow } from '@nbase/contracts';
+import type { DatabaseQueryRequest, DatabaseRow, PropertyDefinition } from '@nbase/contracts';
 import { RowStore } from './rowStore';
 import { announceDatabaseChange, type DatabaseDataSource } from './source';
 
@@ -258,5 +258,36 @@ describe('row store', () => {
     expect(source.notice).toHaveBeenCalledWith('数据已在别处修改，已重新载入最新内容。');
     await flush();
     expect(source.query).toHaveBeenCalledTimes(2);
+  });
+  it('moves a multi-select card between board columns, leaving only the column it left', async () => {
+    const { store, source, server } = setup(['a']);
+    // Multi-select values must be option ids in UUID form.
+    const [o1, o2, o3] = ['33333333-3333-4333-8333-333333333331', '33333333-3333-4333-8333-333333333332', '33333333-3333-4333-8333-333333333333'];
+    const options = [o1, o2, o3].map((id, index) => ({ id: id!, name: `选项${index + 1}`, color: 'default' as const }));
+    const multi: PropertyDefinition = { id: propertyId, name: '标签', type: 'multi_select', options };
+    server.set('a', { ...row('a'), properties: { [propertyId]: [o1, o2] } });
+    source.query.mockImplementation(async () => ({ order: ['a'], total: 1, allRows: 1, schemaRevision: '1',
+      rows: [server.get('a')!], groups: [{ key: o1!, ids: ['a'] }, { key: o2!, ids: ['a'] }] }));
+    source.updateRow.mockImplementation(async (id, expected, patch: { title?: string; properties?: Record<string, unknown> }) => {
+      const base = server.get(id)!;
+      const properties = { ...base.properties };
+      for (const [key, value] of Object.entries(patch.properties ?? {})) {
+        if (value === null) delete properties[key]; else properties[key] = value as never;
+      }
+      const saved = { ...base, ...(patch.title !== undefined ? { title: patch.title } : {}), properties, revision: String(Number(expected) + 1) };
+      server.set(id, saved);
+      return saved;
+    });
+    store.setQuery({ filters: [], sorts: [], groupBy: propertyId }, titleId, true);
+    await flush();
+
+    await store.moveToGroup('a', o1!, o3!, multi);
+    expect(source.updateRow.mock.calls.at(-1)![2]).toEqual({ properties: { [propertyId]: [o2, o3] } });
+    expect(store.groups.map(group => [group.key, group.ids])).toEqual([[o1, []], [o2, ['a']], [o3, ['a']]]);
+
+    await store.moveToGroup('a', o2!, null, multi);
+    expect(source.updateRow.mock.calls.at(-1)![2]).toEqual({ properties: { [propertyId]: null } });
+    expect(store.groups.find(group => group.key === o2)?.ids).toEqual([]);
+    expect(store.groups.find(group => group.key === null)?.ids).toEqual(['a']);
   });
 });

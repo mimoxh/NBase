@@ -1,7 +1,7 @@
 import type { WhiteboardArrowhead, WhiteboardConnectorMode, WhiteboardShapeKind, WhiteboardStrokeStyle } from '@nbase/contracts';
 import { clamp, expandRect, type Point, type Rect } from './geometry';
 import { History } from './history';
-import { boundsOfIds, indexElements, noteColors, normalizeForSave, palette, visibleElements, type El } from './model';
+import { boundsOfIds, indexElements, isEmbedElement, markProvisional, noteColors, normalizeForSave, palette, visibleElements, type El } from './model';
 import { emptyOverlay, type Background, type Overlay, type View } from './render/canvas';
 
 export type Tool = 'select' | 'hand' | 'shape' | 'text' | 'note' | 'connector' | 'pen' | 'highlighter' | 'eraser' | 'frame' | 'mind';
@@ -25,6 +25,24 @@ export const maxZoom = 8;
 
 const emptySelection: ReadonlySet<string> = new Set();
 
+export interface RemoteBoardUser {
+  clientId: number;
+  name: string;
+  color: string;
+  selection: string[];
+  editingId: string | null;
+}
+
+export interface BoardCollab {
+  readonly canUndo: boolean;
+  readonly canRedo: boolean;
+  commit(base: El[], next: El[], record: boolean): El[];
+  preview(base: El[], next: El[]): void;
+  cancelPreview(): void;
+  undo(): El[] | null;
+  redo(): El[] | null;
+}
+
 /** Same elements in the same order; elements are immutable, so identity is equality. */
 export function sameElements(a: readonly El[], b: readonly El[]): boolean {
   if (a === b) return true;
@@ -46,6 +64,8 @@ export class BoardStore {
   view: View = { x: 0, y: 0, zoom: 1 };
   size = { width: 0, height: 0 };
   tool: Tool = 'select';
+  /** Whether a creation tool stays picked after it made something, instead of handing back to select. */
+  toolLocked = false;
   style: ToolStyle = { ...defaultToolStyle };
   editingId: string | null = null;
   /** The live page or database on the board that currently takes pointer and keyboard input. */
@@ -57,10 +77,16 @@ export class BoardStore {
   overlay: Overlay = emptyOverlay;
   faded: ReadonlySet<string> = emptySelection;
   readOnly: boolean;
+  remoteUsers: RemoteBoardUser[] = [];
+  remotePreviews: ReadonlyMap<string, El | null> = new Map();
+  private collaboration: BoardCollab | null = null;
   /** Bumps on every change; React reads it through useSyncExternalStore. */
   version = 0;
   /** Bumps only when elements change, for consumers that ignore view changes. */
   contentVersion = 0;
+  /** Bumps when the tool or its style changes. */
+  styleVersion = 0;
+  private counted: { version: number; frames: number; embeds: boolean } = { version: -1, frames: 0, embeds: false };
   readonly history = new History<El[]>(200);
   private listeners = new Set<() => void>();
   private gestureBase: El[] | null = null;
@@ -76,7 +102,49 @@ export class BoardStore {
 
   subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
   getVersion = () => this.version;
+  get canUndo() { return this.collaboration?.canUndo ?? this.history.canUndo; }
+  get canRedo() { return this.collaboration?.canRedo ?? this.history.canRedo; }
   emit() { this.version += 1; for (const listener of this.listeners) listener(); }
+
+  setCollaboration(collaboration: BoardCollab | null) { this.collaboration = collaboration; }
+
+  setRemoteBoardState(users: RemoteBoardUser[], previews: ReadonlyMap<string, El | null>) {
+    this.remoteUsers = users;
+    this.remotePreviews = previews;
+    this.emit();
+  }
+
+  /** Remote changes join the settled state, or sit underneath the local gesture without entering its undo base. */
+  applyRemote(remote: El[]) {
+    const base = this.gestureBase;
+    if (!base) {
+      this.setElements(remote);
+      this.persisted = remote;
+      this.emit();
+      this.onContent(remote);
+      return;
+    }
+    const before = indexElements(base), current = indexElements(this.elements);
+    const locallyDeleted = new Set([...before.keys()].filter(id => !current.has(id)));
+    let merged = remote.filter(element => !locallyDeleted.has(element.id))
+      .map(element => {
+        const local = current.get(element.id);
+        return local && before.get(element.id) !== local ? local : element;
+      });
+    // Locally created elements keep their place relative to the preview; remote additions remain in the shared order.
+    for (const element of this.elements) {
+      if (before.has(element.id) || merged.some(item => item.id === element.id)) continue;
+      const previous = this.elements[this.elements.indexOf(element) - 1];
+      const at = previous ? merged.findIndex(item => item.id === previous.id) + 1 : 0;
+      merged = [...merged.slice(0, Math.max(0, at)), element, ...merged.slice(Math.max(0, at))];
+    }
+    this.gestureBase = remote;
+    this.setElements(merged);
+    this.persisted = merged;
+    if (merged !== remote) markProvisional(this.index);
+    this.emit();
+    this.onContent(merged);
+  }
 
   private setElements(next: El[]) {
     if (next === this.elements) return;
@@ -95,21 +163,37 @@ export class BoardStore {
   /** The state the running gesture started from, or the current state between gestures. */
   get base(): El[] { return this.gestureBase ?? this.elements; }
 
-  preview(next: El[]) { this.setElements(next); this.emit(); }
+  preview(next: El[]) {
+    if (this.collaboration && this.gestureBase) this.collaboration.preview(this.gestureBase, next);
+    this.setElements(next);
+    if (this.gestureBase && this.elements !== this.gestureBase) markProvisional(this.index);
+    this.emit();
+  }
 
   /** Persist the current or given elements as one undo step from the gesture base (or the current state). */
   commit(next: El[] = this.elements) {
     const base = this.gestureBase ?? this.elements;
     this.gestureBase = null;
-    if (this.readOnly) { this.setElements(base); this.emit(); return; }
+    if (this.readOnly) { this.collaboration?.cancelPreview(); this.setElements(base); this.emit(); return; }
     if (sameElements(next, base)) {
       this.setElements(base);
       this.emit();
       // Live typing may have saved an intermediate state; bring the saved copy back to this one.
-      if (!sameElements(base, this.persisted)) this.persist(base);
+      if (!sameElements(base, this.persisted)) {
+        if (this.collaboration) this.collaboration.commit(base, base, false);
+        this.persist(base);
+      }
+      this.collaboration?.cancelPreview();
       return;
     }
     const normalized = normalizeForSave(next);
+    if (this.collaboration) {
+      const written = this.collaboration.commit(base, normalized, true);
+      this.setElements(written);
+      this.emit();
+      this.persist(written);
+      return;
+    }
     this.history.push(base);
     this.setElements(normalized);
     this.emit();
@@ -124,22 +208,26 @@ export class BoardStore {
   /** Save the in-gesture state (text typing) without ending the gesture or adding undo steps. */
   persistPreview() {
     if (this.readOnly || sameElements(this.elements, this.persisted)) return;
-    this.persist(normalizeForSave(this.elements));
+    const normalized = normalizeForSave(this.elements);
+    if (this.collaboration) this.collaboration.commit(this.gestureBase ?? this.elements, normalized, false);
+    this.persist(normalized);
   }
 
   /** Abandon the gesture and restore its starting state. */
   cancel() {
     if (this.gestureBase) this.setElements(this.gestureBase);
     this.gestureBase = null;
+    this.collaboration?.cancelPreview();
     this.overlay = emptyOverlay; this.faded = emptySelection;
     this.emit();
   }
 
-  undo() { this.travel(this.history.undo(this.elements)); }
-  redo() { this.travel(this.history.redo(this.elements)); }
+  undo() { this.travel(this.collaboration ? this.collaboration.undo() : this.history.undo(this.elements)); }
+  redo() { this.travel(this.collaboration ? this.collaboration.redo() : this.history.redo(this.elements)); }
   private travel(state: El[] | null) {
     if (!state || this.readOnly) return;
     this.editingId = null; this.activeEmbedId = null; this.gestureBase = null;
+    this.collaboration?.cancelPreview();
     this.setElements(state);
     this.emit();
     this.persist(state);
@@ -152,15 +240,27 @@ export class BoardStore {
     this.emit();
   }
 
-  setTool(tool: Tool) {
+  setTool(tool: Tool, locked = false) {
     if (this.readOnly && tool !== 'select' && tool !== 'hand') return;
     this.tool = tool;
+    this.toolLocked = locked && tool !== 'select' && tool !== 'hand';
     if (tool !== 'select') { this.selection = emptySelection; this.focusGroup = null; }
     this.overlay = emptyOverlay;
     this.emit();
   }
 
-  setStyle(patch: Partial<ToolStyle>) { this.style = { ...this.style, ...patch }; this.emit(); }
+  setStyle(patch: Partial<ToolStyle>) { this.style = { ...this.style, ...patch }; this.styleVersion += 1; this.emit(); }
+
+  private counts() {
+    if (this.counted.version !== this.contentVersion) {
+      let frames = 0, embeds = false;
+      for (const el of this.elements) { if (el.type === 'frame') frames += 1; else if (!embeds && isEmbedElement(el)) embeds = true; }
+      this.counted = { version: this.contentVersion, frames, embeds };
+    }
+    return this.counted;
+  }
+  frameCount() { return this.counts().frames; }
+  hasEmbeds() { return this.counts().embeds; }
   setOverlay(overlay: Overlay) { this.overlay = overlay; this.emit(); }
 
   // ── View ──

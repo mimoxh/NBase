@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useSyncExternalStore } from 'react';
-import { applyRowPatch, databaseBulkLimit, databaseQueryWindow, flatFilters, type BulkRowPatch, type DatabaseQueryRequest, type DatabaseRow,
-  type DatabaseRowGroup, type PropertyValue, type RowProperties } from '@nbase/contracts';
+import { applyRowPatch, databaseBulkLimit, databaseQueryWindow, flatFilters, groupMoveValue, rowGroupKeys, type BulkRowPatch, type DatabaseQueryRequest, type DatabaseRow,
+  type DatabaseRowGroup, type PropertyDefinition, type PropertyValue, type RowProperties } from '@nbase/contracts';
 import { announceDatabaseChange, failureText, subscribeDatabase, type DatabaseDataSource, type RowPatch } from './source';
 
 const cacheLimit = 3000;
@@ -161,10 +161,18 @@ export class RowStore {
     this.scheduleFetch();
   }
 
-  /** Moves a card between board columns, writing the new group value. */
-  moveToGroup(rowId: string, toKey: string | null, propertyId: string, value: PropertyValue | null): Promise<boolean> {
-    this.groups = this.placeInGroup(this.groups.map(group => ({ ...group, ids: group.ids.filter(id => id !== rowId) })), rowId, toKey);
-    return this.updateRow(rowId, { properties: { [propertyId]: value } });
+  /**
+   * Moves a card from one board column to another, writing the new group value. A multi-select card leaves only
+   * the column it was dragged from and stays in the columns of its other options.
+   */
+  moveToGroup(rowId: string, fromKey: string | null, toKey: string | null, def: PropertyDefinition): Promise<boolean> {
+    const row = this.rows.get(rowId);
+    const value: PropertyValue | null = groupMoveValue(def, row?.properties[def.id], fromKey, toKey);
+    const keys = row ? rowGroupKeys({ ...row, properties: applyRowPatch(row.properties, { [def.id]: value }) }, def) : [toKey];
+    const kept = this.groups.map(group => keys.includes(group.key) ? group : { ...group, ids: group.ids.filter(id => id !== rowId) });
+    this.groups = keys.reduce((groups, key) => groups.some(group => group.key === key && group.ids.includes(rowId)) ? groups
+      : this.placeInGroup(groups, rowId, key), kept);
+    return this.updateRow(rowId, { properties: { [def.id]: value } });
   }
 
   private placeInGroup(groups: DatabaseRowGroup[], rowId: string, key: string | null): DatabaseRowGroup[] {
